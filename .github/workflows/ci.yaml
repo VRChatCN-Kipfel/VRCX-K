@@ -135,12 +135,13 @@ jobs:
 
   # ── Stage 4: Database integration tests (Windows, hard gate) ───────
   test_mysql:
-    name: Test MySQL (${{ matrix.mysql-version }})
-    runs-on: windows-latest
+    name: Test MySQL (${{ matrix.mysql-version }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: quality-gate
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-latest, ubuntu-latest]
         mysql-version: ['8.0', '8.4']
     env:
       MYSQL_TEST_HOST: 127.0.0.1
@@ -205,12 +206,13 @@ jobs:
   # Tests self-skip when PG_TEST_HOST is unset, so this job is the only
   # place `*.pgsql.test.js` actually executes.
   test_pgsql:
-    name: PgSQL Integration (PG ${{ matrix.pg.version }})
-    runs-on: windows-latest
+    name: PgSQL Integration (PG ${{ matrix.pg.version }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: quality-gate
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-latest, ubuntu-latest]
         pg:
           - { version: "16" }
           - { version: "17" }
