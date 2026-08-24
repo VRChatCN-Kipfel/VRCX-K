@@ -194,6 +194,22 @@ export const useVrcxStore = defineStore('Vrcx', () => {
                 if (!ok) return;
             }
 
+            // MySQL 旧库护卫（对应 issue #33）：旧版本建表的 configs/cookies 的
+            // value 列可能是 TEXT(64KB)，而 initGlobalSchema 的 LONGTEXT 建表/升级
+            // 只在全新库与迁移路径执行（initTables），版本号==当前的存量库永远不会
+            // 触发——configs 有 setString>60KB 惰性守卫兜底，cookies 没有。
+            // 此处每次启动幂等补升级：仅当 INFORMATION_SCHEMA 探测到非 longtext
+            // 才 ALTER MODIFY LONGTEXT（仅 MySQLAdapter 提供该方法，其它引擎经
+            // 可选链短路；失败仅 warn，不阻塞启动）。
+            try {
+                await adapter.initValueColumnsLongText?.();
+            } catch (error) {
+                console.warn(
+                    '[db] MySQL cookies/configs value 列 LONGTEXT 升级失败',
+                    error
+                );
+            }
+
             clearVRCXCacheFrequency.value = await configRepository.getInt(
                 'VRCX_clearVRCXCacheFrequency',
                 172800
