@@ -4,7 +4,7 @@ mod notify;
 mod process_tree;
 mod tray;
 
-use host::{spawn_host, HostReady, HostState};
+use host::{supervise_loop, HostReady, HostState};
 use tauri::{Emitter, Manager, RunEvent};
 
 #[tauri::command]
@@ -35,20 +35,13 @@ pub fn run() {
         .setup(|app| {
             tray::setup(app.handle())?;
             let handle = app.handle().clone();
-            std::thread::spawn(move || match spawn_host() {
-                Ok(session) => {
-                    let state = handle.state::<HostState>();
-                    let ready = state.store(session);
-                    eprintln!(
-                        "[shell] host ready port={} token_len={}",
-                        ready.port,
-                        ready.token.len()
-                    );
+            std::thread::spawn(move || {
+                let state = handle.state::<HostState>();
+                supervise_loop(state.inner(), |ready| {
                     if let Err(err) = handle.emit("host-ready", &ready) {
                         eprintln!("[shell] emit host-ready: {err}");
                     }
-                }
-                Err(err) => eprintln!("[shell] host spawn failed: {err}"),
+                });
             });
             Ok(())
         });
@@ -58,7 +51,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-                app.state::<HostState>().kill();
+                app.state::<HostState>().request_stop();
             }
         });
 }

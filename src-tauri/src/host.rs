@@ -2,9 +2,15 @@ use crate::kkrpc_stdio::Peer;
 use crate::process_tree::ProcessTree;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+pub const HOST_RESTART_EXIT: i32 = 51;
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_SPAWN_FAILURES: u32 = 8;
+const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+const MAX_BACKOFF: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostReady {
@@ -12,6 +18,7 @@ pub struct HostReady {
     pub token: String,
 }
 
+#[cfg(test)]
 pub struct HostSession {
     pub tree: ProcessTree,
     pub peer: Arc<Peer>,
@@ -19,35 +26,312 @@ pub struct HostSession {
 }
 
 #[derive(Default)]
+struct HostInner {
+    generation: u64,
+    stopping: bool,
+    tree: Option<ProcessTree>,
+    peer: Option<Arc<Peer>>,
+    ready: Option<HostReady>,
+}
+
+impl HostInner {
+    fn clear(&mut self) {
+        self.tree = None;
+        self.peer = None;
+        self.ready = None;
+    }
+}
+
+#[derive(Default)]
 pub struct HostState {
-    pub ready: Mutex<Option<HostReady>>,
-    tree: Mutex<Option<ProcessTree>>,
-    pub peer: Mutex<Option<Arc<Peer>>>,
+    inner: Mutex<HostInner>,
 }
 
 impl HostState {
-    pub fn store(&self, session: HostSession) -> HostReady {
-        let ready = session.ready.clone();
-        *self.ready.lock().expect("ready") = Some(ready.clone());
-        *self.peer.lock().expect("peer") = Some(session.peer);
-        *self.tree.lock().expect("tree") = Some(session.tree);
-        ready
-    }
-
     pub fn snapshot(&self) -> Option<HostReady> {
-        self.ready.lock().expect("ready").clone()
+        self.inner.lock().expect("host").ready.clone()
     }
 
-    pub fn kill(&self) {
-        if let Some(mut tree) = self.tree.lock().expect("tree").take() {
+    pub fn is_stopping(&self) -> bool {
+        self.inner.lock().expect("host").stopping
+    }
+
+    #[cfg(test)]
+    pub fn child_id(&self) -> Option<u32> {
+        self.inner
+            .lock()
+            .expect("host")
+            .tree
+            .as_ref()
+            .map(ProcessTree::id)
+    }
+
+    pub fn peer(&self) -> Option<Arc<Peer>> {
+        self.inner.lock().expect("host").peer.clone()
+    }
+
+    pub fn wait_child(&self) -> Option<ExitStatus> {
+        loop {
+            {
+                let mut inner = self.inner.lock().expect("host");
+                let tree = inner.tree.as_mut()?;
+                match tree.try_wait() {
+                    Ok(Some(status)) => {
+                        inner.clear();
+                        return Some(status);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        inner.clear();
+                        return None;
+                    }
+                }
+                if inner.stopping {
+                    return None;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+
+    pub fn request_stop(&self) {
+        let peer = {
+            let mut inner = self.inner.lock().expect("host");
+            inner.stopping = true;
+            inner.generation = inner.generation.wrapping_add(1);
+            inner.peer.clone()
+        };
+        if let Some(peer) = peer {
+            let _ = peer.call_timeout("stop", vec![], Duration::from_millis(1500));
+        }
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        while Instant::now() < deadline {
+            let mut inner = self.inner.lock().expect("host");
+            match inner.tree.as_mut() {
+                None => {
+                    inner.clear();
+                    return;
+                }
+                Some(tree) => {
+                    if let Ok(Some(_)) = tree.try_wait() {
+                        inner.clear();
+                        return;
+                    }
+                }
+            }
+            drop(inner);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.reap_tree();
+    }
+
+    #[cfg(test)]
+    pub fn force_kill_running(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        if let Some(tree) = inner.tree.as_mut() {
             tree.kill_tree();
         }
-        *self.peer.lock().expect("peer") = None;
-        *self.ready.lock().expect("ready") = None;
+    }
+
+    fn reap_tree(&self) {
+        let mut tree = {
+            let mut inner = self.inner.lock().expect("host");
+            inner.peer = None;
+            inner.ready = None;
+            inner.tree.take()
+        };
+        if let Some(tree) = tree.as_mut() {
+            tree.kill_tree();
+        }
+    }
+
+    fn adopt_inflight(
+        &self,
+        generation: u64,
+        tree: ProcessTree,
+        peer: Arc<Peer>,
+    ) -> Result<(), ProcessTree> {
+        let mut inner = self.inner.lock().expect("host");
+        if inner.stopping || inner.generation != generation {
+            return Err(tree);
+        }
+        inner.tree = Some(tree);
+        inner.peer = Some(peer);
+        inner.ready = None;
+        Ok(())
+    }
+
+    fn promote_ready(&self, generation: u64, ready: HostReady) -> Result<HostReady, ()> {
+        let mut inner = self.inner.lock().expect("host");
+        if inner.stopping || inner.generation != generation || inner.tree.is_none() {
+            return Err(());
+        }
+        inner.ready = Some(ready.clone());
+        Ok(ready)
+    }
+
+    fn generation(&self) -> Result<u64, String> {
+        let inner = self.inner.lock().expect("host");
+        if inner.stopping {
+            return Err("stopping".into());
+        }
+        Ok(inner.generation)
+    }
+
+    fn still_current(&self, generation: u64) -> bool {
+        let inner = self.inner.lock().expect("host");
+        !inner.stopping && inner.generation == generation
     }
 }
 
+enum ExitKind {
+    RestartRequested,
+    Stopped,
+    Crashed(Option<ExitStatus>),
+}
+
+fn classify_exit(status: Option<ExitStatus>) -> ExitKind {
+    match status {
+        Some(status) if status.code() == Some(HOST_RESTART_EXIT) => ExitKind::RestartRequested,
+        Some(status) => ExitKind::Crashed(Some(status)),
+        None => ExitKind::Stopped,
+    }
+}
+
+pub fn supervise_loop(state: &HostState, mut on_ready: impl FnMut(HostReady)) {
+    let mut fail_streak = 0u32;
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
+        if state.is_stopping() {
+            break;
+        }
+        match spawn_host_into(state) {
+            Ok(ready) => {
+                fail_streak = 0;
+                backoff = INITIAL_BACKOFF;
+                eprintln!(
+                    "[shell] host ready port={} token_len={}",
+                    ready.port,
+                    ready.token.len()
+                );
+                on_ready(ready);
+                let status = state.wait_child();
+                if state.is_stopping() {
+                    break;
+                }
+                match classify_exit(status) {
+                    ExitKind::RestartRequested => {
+                        eprintln!("[shell] host requested restart ({HOST_RESTART_EXIT})");
+                    }
+                    ExitKind::Stopped => break,
+                    ExitKind::Crashed(status) => {
+                        fail_streak += 1;
+                        eprintln!(
+                            "[shell] host crashed {status:?} ({fail_streak}/{MAX_SPAWN_FAILURES}), backing off {backoff:?}"
+                        );
+                        if fail_streak >= MAX_SPAWN_FAILURES {
+                            eprintln!("[shell] host restart storm cap reached, giving up");
+                            break;
+                        }
+                        if sleep_or_stop(state, backoff) {
+                            break;
+                        }
+                        backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+                    }
+                }
+            }
+            Err(err) => {
+                if state.is_stopping() {
+                    break;
+                }
+                fail_streak += 1;
+                eprintln!("[shell] host spawn failed: {err} ({fail_streak}/{MAX_SPAWN_FAILURES})");
+                if fail_streak >= MAX_SPAWN_FAILURES {
+                    eprintln!("[shell] host restart storm cap reached, giving up");
+                    break;
+                }
+                if sleep_or_stop(state, backoff) {
+                    break;
+                }
+                backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+            }
+        }
+    }
+}
+
+fn sleep_or_stop(state: &HostState, total: Duration) -> bool {
+    let deadline = Instant::now() + total;
+    while Instant::now() < deadline {
+        if state.is_stopping() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    state.is_stopping()
+}
+
+#[cfg(test)]
 pub fn spawn_host() -> Result<HostSession, String> {
+    let mut starting = start_host_process()?;
+    let ready = wait_until_ready(&mut starting, || false)?;
+    let pong = starting
+        .peer
+        .call("ping", vec![])
+        .map_err(|err| format!("host ping: {err}"))?;
+    if pong != serde_json::json!("pong") {
+        starting.tree.kill_tree();
+        return Err(format!("host ping returned {pong}"));
+    }
+    Ok(HostSession {
+        tree: starting.tree,
+        peer: starting.peer,
+        ready,
+    })
+}
+
+fn spawn_host_into(state: &HostState) -> Result<HostReady, String> {
+    let generation = state.generation()?;
+    let starting = start_host_process()?;
+    let peer = starting.peer.clone();
+    if let Err(mut tree) = state.adopt_inflight(generation, starting.tree, peer) {
+        tree.kill_tree();
+        return Err("stopped during spawn".into());
+    }
+    let wait = wait_until_ready_in_state(state, generation, &starting.ready_slot);
+    let ready = match wait {
+        Ok(ready) => ready,
+        Err(err) => {
+            state.reap_tree();
+            return Err(err);
+        }
+    };
+    let Some(peer) = state.peer() else {
+        state.reap_tree();
+        return Err("host peer lost".into());
+    };
+    let pong = peer
+        .call("ping", vec![])
+        .map_err(|err| format!("host ping: {err}"))?;
+    if pong != serde_json::json!("pong") {
+        state.reap_tree();
+        return Err(format!("host ping returned {pong}"));
+    }
+    match state.promote_ready(generation, ready) {
+        Ok(ready) => Ok(ready),
+        Err(()) => {
+            state.reap_tree();
+            Err("stopped during ready".into())
+        }
+    }
+}
+
+struct StartingHost {
+    tree: ProcessTree,
+    peer: Arc<Peer>,
+    ready_slot: Arc<Mutex<Option<HostReady>>>,
+}
+
+fn start_host_process() -> Result<StartingHost, String> {
     let bun = find_bun();
     let host_dir = host_dir();
     if !host_dir.join("src/index.ts").is_file() {
@@ -86,31 +370,65 @@ pub fn spawn_host() -> Result<HostSession, String> {
             serde_json::Value::Null
         }),
     );
+    Ok(StartingHost {
+        tree,
+        peer,
+        ready_slot,
+    })
+}
 
+#[cfg(test)]
+fn wait_until_ready(
+    starting: &mut StartingHost,
+    mut abort: impl FnMut() -> bool,
+) -> Result<HostReady, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let ready = loop {
-        if let Some(ready) = ready_slot.lock().expect("ready slot").clone() {
-            break ready;
+    loop {
+        if let Some(ready) = starting.ready_slot.lock().expect("ready slot").clone() {
+            return Ok(ready);
+        }
+        if abort() {
+            starting.tree.kill_tree();
+            return Err("stopped during ready".into());
         }
         if Instant::now() >= deadline {
-            tree.kill_tree();
+            starting.tree.kill_tree();
             return Err("host did not call ready() within 10s".into());
         }
-        if let Ok(Some(status)) = tree.try_wait() {
+        if let Ok(Some(status)) = starting.tree.try_wait() {
             return Err(format!("host exited before ready: {status}"));
         }
         std::thread::sleep(Duration::from_millis(20));
-    };
-
-    let pong = peer
-        .call("ping", vec![])
-        .map_err(|err| format!("host ping: {err}"))?;
-    if pong != serde_json::json!("pong") {
-        tree.kill_tree();
-        return Err(format!("host ping returned {pong}"));
     }
+}
 
-    Ok(HostSession { tree, peer, ready })
+fn wait_until_ready_in_state(
+    state: &HostState,
+    generation: u64,
+    ready_slot: &Mutex<Option<HostReady>>,
+) -> Result<HostReady, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if !state.still_current(generation) {
+            return Err("stopped during ready".into());
+        }
+        if let Some(ready) = ready_slot.lock().expect("ready slot").clone() {
+            return Ok(ready);
+        }
+        {
+            let mut inner = state.inner.lock().expect("host");
+            if let Some(tree) = inner.tree.as_mut() {
+                if let Ok(Some(status)) = tree.try_wait() {
+                    inner.clear();
+                    return Err(format!("host exited before ready: {status}"));
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("host did not call ready() within 10s".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn bun_exe() -> &'static str {
@@ -168,8 +486,15 @@ mod tests {
     use crate::process_tree::pid_alive;
 
     #[test]
+    fn restart_exit_matches_named_const() {
+        assert_eq!(HOST_RESTART_EXIT, 51);
+    }
+
+    #[test]
     fn spawn_host_ready_ping_stop() {
         let mut session = spawn_host().expect("spawn host");
+        assert!(session.ready.port > 0);
+        assert_eq!(session.ready.token.len(), 64);
         let pong = session.peer.call("ping", vec![]).expect("ping");
         assert_eq!(pong, serde_json::json!("pong"));
         let stopped = session.peer.call("stop", vec![]).expect("stop");
@@ -199,5 +524,68 @@ mod tests {
         assert_ne!(name, "bun.ps1");
         let bun = find_bun();
         assert_ne!(bun.extension().and_then(|ext| ext.to_str()), Some("ps1"));
+    }
+
+    #[test]
+    fn spawn_into_stopping_state_fails() {
+        let state = HostState::default();
+        state.request_stop();
+        assert!(spawn_host_into(&state).is_err());
+        assert!(state.child_id().is_none());
+    }
+
+    #[test]
+    fn kill_host_relaunches_with_new_token() {
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            let first_pid = state.child_id().expect("first pid");
+            state.force_kill_running();
+            let second = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("second ready");
+            assert_ne!(first.token, second.token);
+            assert_ne!(first.port, second.port);
+            let second_pid = state.child_id().expect("second pid");
+            state.request_stop();
+            assert!(!pid_alive(first_pid));
+            assert!(!pid_alive(second_pid));
+        });
+    }
+
+    #[test]
+    fn exit_51_relaunches_with_new_token() {
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            state
+                .peer()
+                .expect("peer")
+                .call("restart", vec![])
+                .expect("restart");
+            let second = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("second ready");
+            assert_ne!(first.token, second.token);
+            let second_pid = state.child_id().expect("second pid");
+            state.request_stop();
+            assert!(!pid_alive(second_pid));
+        });
     }
 }

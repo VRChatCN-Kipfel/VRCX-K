@@ -8,7 +8,7 @@ import { log } from "./log"
 import { connectShellStdio } from "./stdio"
 import { listenHostWs } from "./ws"
 
-export const EXIT_RESTART = 51
+export { HOST_RESTART_EXIT as EXIT_RESTART } from "./api"
 
 async function bootstrap() {
   log("starting Cordis...")

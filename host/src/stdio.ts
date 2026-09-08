@@ -4,12 +4,13 @@ import {
   type ReadableLike,
   type WritableLike,
 } from "kkrpc/stdio"
-import { hostWsAPI } from "./api"
+import { HOST_RESTART_EXIT, hostWsAPI } from "./api"
 import type { HostWsReady } from "./ws"
 
 export type HostStdioAPI = {
   ping(): Promise<string>
   stop(): Promise<boolean>
+  restart(): Promise<boolean>
 }
 
 export type ShellStdioAPI = {
@@ -72,6 +73,10 @@ export function connectShellStdio() {
       ping: () => hostWsAPI.ping(),
       stop: async () => {
         setTimeout(() => process.exit(0), 10)
+        return true
+      },
+      restart: async () => {
+        setTimeout(() => process.exit(HOST_RESTART_EXIT), 10)
         return true
       },
     },
