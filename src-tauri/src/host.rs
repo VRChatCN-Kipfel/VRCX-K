@@ -452,6 +452,7 @@ fn find_bun() -> PathBuf {
     if let Ok(explicit) = std::env::var("VRCXK_BUN") {
         return PathBuf::from(explicit);
     }
+    // 1. Standalone install (bun.sh default): ~/.bun/bin/bun[.exe]
     let name = bun_exe();
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         let candidate = PathBuf::from(home).join(".bun/bin").join(name);
@@ -459,10 +460,40 @@ fn find_bun() -> PathBuf {
             return candidate;
         }
     }
+    // 2. npm global install: PATH has `bun`/`bun.cmd` shims in the npm prefix
+    //    dir, but the real binary lives at <prefix>/node_modules/bun/bin/bun.exe.
+    //    Spawning the shim directly fails on Windows (not an executable), so
+    //    resolve through the shim directory.
+    for shim in ["bun.cmd", "bun.exe", "bun"] {
+        if let Some(dir) = shim_dir_on_path(shim) {
+            let candidate = dir.join("node_modules/bun/bin").join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    // 3. Plain `bun.exe` on PATH.
     if let Some(found) = find_on_path(name) {
         return found;
     }
+    // 4. Fallback: bare name (hope it is on PATH after all).
     PathBuf::from(name)
+}
+
+/// Return the directory containing the first PATH entry named `name`
+/// (skipping `.ps1` shims which cannot be spawned directly).
+fn shim_dir_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(name);
+        if !candidate.is_file() {
+            return None;
+        }
+        if candidate.extension().and_then(|ext| ext.to_str()) == Some("ps1") {
+            return None;
+        }
+        Some(dir)
+    })
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {

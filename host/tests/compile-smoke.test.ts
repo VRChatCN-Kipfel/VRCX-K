@@ -1,18 +1,24 @@
-import { afterAll, afterEach, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test"
 import { unlink } from "node:fs/promises"
 import { join } from "node:path"
 import { HOST_VERSION } from "../src/api"
+import { drain, killTree, readReady, resolveBun, warmBun } from "./helpers"
 
 const hostDir = join(import.meta.dir, "..")
+const bun = resolveBun()
 const outfile = join(
   hostDir,
   process.platform === "win32" ? "dist/host-compile-smoke.exe" : "dist/host-compile-smoke",
 )
 
+beforeAll(async () => {
+  await warmBun()
+}, 60_000)
+
 let proc: ReturnType<typeof Bun.spawn> | undefined
 
 afterEach(() => {
-  proc?.kill()
+  if (proc) killTree(proc.pid)
   proc = undefined
 })
 
@@ -20,26 +26,8 @@ afterAll(async () => {
   await unlink(outfile).catch(() => {})
 })
 
-async function readReady(stderr: ReadableStream<Uint8Array>) {
-  const reader = stderr.getReader()
-  const decoder = new TextDecoder()
-  let buf = ""
-  const deadline = Date.now() + 15_000
-  while (Date.now() < deadline) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const match = buf.match(/\[host\] ready ({.*})/)
-    if (match) {
-      reader.releaseLock()
-      return JSON.parse(match[1]) as { port: number; token: string; version: string }
-    }
-  }
-  throw new Error(`compiled host did not become ready\n${buf}`)
-}
-
 test("compiled host finds cordis.yml via cwd", async () => {
-  const compile = Bun.spawn(["bun", "build", "--compile", "src/index.ts", "--outfile", outfile], {
+  const compile = Bun.spawn([bun, "build", "--compile", "src/index.ts", "--outfile", outfile], {
     cwd: hostDir,
     stdout: "pipe",
     stderr: "pipe",
@@ -63,21 +51,3 @@ test("compiled host finds cordis.yml via cwd", async () => {
   const stdout = await drain(proc.stdout)
   expect(stdout).toBe("")
 }, 90_000)
-
-async function drain(stream: ReadableStream<Uint8Array>, ms = 200) {
-  const reader = stream.getReader()
-  let buf = ""
-  const decoder = new TextDecoder()
-  const timer = setTimeout(() => reader.cancel().catch(() => {}), ms)
-  try {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-    }
-  } catch {
-  } finally {
-    clearTimeout(timer)
-  }
-  return buf
-}

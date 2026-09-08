@@ -1,23 +1,29 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, beforeAll, expect, test } from "bun:test"
 import { join } from "node:path"
 import { wrap, dispose } from "kkrpc"
 import { webSocketClientTransport } from "kkrpc/ws"
 import type { HostWsAPI } from "../src/api"
 import { HOST_VERSION } from "../src/api"
+import { drain, killTree, readReady, resolveBun, warmBun } from "./helpers"
 
 const hostDir = join(import.meta.dir, "..")
+const bun = resolveBun()
+
+beforeAll(async () => {
+  await warmBun()
+}, 60_000)
 
 type HostProc = ReturnType<typeof Bun.spawn>
 
 let proc: HostProc | undefined
 
 afterEach(() => {
-  proc?.kill()
+  if (proc) killTree(proc.pid)
   proc = undefined
 })
 
 async function spawnHost() {
-  proc = Bun.spawn(["bun", "src/index.ts"], {
+  proc = Bun.spawn([bun, "src/index.ts"], {
     cwd: hostDir,
     stdin: "ignore",
     stdout: "pipe",
@@ -25,43 +31,6 @@ async function spawnHost() {
   })
   const ready = await readReady(proc.stderr)
   return { proc, ready }
-}
-
-async function readReady(stderr: ReadableStream<Uint8Array>) {
-  const reader = stderr.getReader()
-  const decoder = new TextDecoder()
-  let buf = ""
-  const deadline = Date.now() + 10_000
-  while (Date.now() < deadline) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const match = buf.match(/\[host\] ready ({.*})/)
-    if (match) {
-      reader.releaseLock()
-      return JSON.parse(match[1]) as { port: number; token: string; version: string }
-    }
-  }
-  throw new Error(`host did not become ready\n${buf}`)
-}
-
-async function drain(stream: ReadableStream<Uint8Array>, ms = 200) {
-  const reader = stream.getReader()
-  let buf = ""
-  const decoder = new TextDecoder()
-  const timer = setTimeout(() => reader.cancel().catch(() => {}), ms)
-  try {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-    }
-  } catch {
-    // cancelled
-  } finally {
-    clearTimeout(timer)
-  }
-  return buf
 }
 
 test("host ws ping and getVersion", async () => {
@@ -84,9 +53,7 @@ test("host ws ping and getVersion", async () => {
 })
 
 test("wrong cwd cannot assemble cordis.yml and exits non-zero", async () => {
-  const tmp = await Bun.file(join(hostDir, "src/index.ts")).exists()
-  expect(tmp).toBe(true)
-  proc = Bun.spawn(["bun", join(hostDir, "src/index.ts")], {
+  proc = Bun.spawn([bun, join(hostDir, "src/index.ts")], {
     cwd: import.meta.dir,
     stdin: "ignore",
     stdout: "pipe",
