@@ -1,10 +1,12 @@
 use crate::kkrpc_stdio::Peer;
 use crate::process_tree::ProcessTree;
+use crate::shell_sys::register_shell_handlers;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tauri::AppHandle;
 
 pub const HOST_RESTART_EXIT: i32 = 51;
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -198,14 +200,18 @@ fn classify_exit(status: Option<ExitStatus>) -> ExitKind {
     }
 }
 
-pub fn supervise_loop(state: &HostState, mut on_ready: impl FnMut(HostReady)) {
+pub fn supervise_loop(
+    state: &HostState,
+    app: Option<&AppHandle>,
+    mut on_ready: impl FnMut(HostReady),
+) {
     let mut fail_streak = 0u32;
     let mut backoff = INITIAL_BACKOFF;
     loop {
         if state.is_stopping() {
             break;
         }
-        match spawn_host_into(state) {
+        match spawn_host_into(state, app) {
             Ok(ready) => {
                 fail_streak = 0;
                 backoff = INITIAL_BACKOFF;
@@ -272,7 +278,7 @@ fn sleep_or_stop(state: &HostState, total: Duration) -> bool {
 
 #[cfg(test)]
 pub fn spawn_host() -> Result<HostSession, String> {
-    let mut starting = start_host_process()?;
+    let mut starting = start_host_process(None)?;
     let ready = wait_until_ready(&mut starting, || false)?;
     let pong = starting
         .peer
@@ -289,9 +295,9 @@ pub fn spawn_host() -> Result<HostSession, String> {
     })
 }
 
-fn spawn_host_into(state: &HostState) -> Result<HostReady, String> {
+fn spawn_host_into(state: &HostState, app: Option<&AppHandle>) -> Result<HostReady, String> {
     let generation = state.generation()?;
-    let starting = start_host_process()?;
+    let starting = start_host_process(app)?;
     let peer = starting.peer.clone();
     if let Err(mut tree) = state.adopt_inflight(generation, starting.tree, peer) {
         tree.kill_tree();
@@ -331,7 +337,7 @@ struct StartingHost {
     ready_slot: Arc<Mutex<Option<HostReady>>>,
 }
 
-fn start_host_process() -> Result<StartingHost, String> {
+fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
     let bun = find_bun();
     let host_dir = host_dir();
     if !host_dir.join("src/index.ts").is_file() {
@@ -351,6 +357,9 @@ fn start_host_process() -> Result<StartingHost, String> {
     let stdout = tree.child_stdout().ok_or("host stdout")?;
     let stdin = tree.child_stdin().ok_or("host stdin")?;
     let peer = Peer::start(stdout, stdin);
+    if let Some(app) = app {
+        register_shell_handlers(&peer, app.clone());
+    }
     let ready_slot: Arc<Mutex<Option<HostReady>>> = Arc::new(Mutex::new(None));
     let ready_handler = Arc::clone(&ready_slot);
     peer.on(
@@ -530,7 +539,7 @@ mod tests {
     fn spawn_into_stopping_state_fails() {
         let state = HostState::default();
         state.request_stop();
-        assert!(spawn_host_into(&state).is_err());
+        assert!(spawn_host_into(&state, None).is_err());
         assert!(state.child_id().is_none());
     }
 
@@ -540,7 +549,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                supervise_loop(&state, |ready| {
+                supervise_loop(&state, None, |ready| {
                     let _ = tx.send(ready);
                 });
             });
@@ -567,7 +576,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
-                supervise_loop(&state, |ready| {
+                supervise_loop(&state, None, |ready| {
                     let _ = tx.send(ready);
                 });
             });

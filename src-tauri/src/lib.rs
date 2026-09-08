@@ -2,6 +2,7 @@ mod host;
 mod kkrpc_stdio;
 mod notify;
 mod process_tree;
+mod shell_sys;
 mod tray;
 
 use host::{supervise_loop, HostReady, HostState};
@@ -37,7 +38,7 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let state = handle.state::<HostState>();
-                supervise_loop(state.inner(), |ready| {
+                supervise_loop(state.inner(), Some(&handle), |ready| {
                     if let Err(err) = handle.emit("host-ready", &ready) {
                         eprintln!("[shell] emit host-ready: {err}");
                     }

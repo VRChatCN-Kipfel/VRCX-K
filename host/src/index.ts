@@ -26,7 +26,7 @@ async function bootstrap() {
   log(`ready ${JSON.stringify({ ...ready, version: HOST_VERSION })}`)
 
   if (process.env.VRCXK_SHELL === "1") {
-    const shell = connectShellStdio()
+    const shell = connectShellStdio(ctx)
     await shell.ready(ready)
   }
 }

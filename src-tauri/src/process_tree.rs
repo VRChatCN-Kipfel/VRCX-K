@@ -151,6 +151,13 @@ mod win {
 
     pub struct Job(Handle);
 
+    // SAFETY: a Windows HANDLE is a raw pointer with no thread affinity. The
+    // only owner-side operation is `terminate`/`CloseHandle` in Drop, which is
+    // thread-safe (kernel objects are process-global). Transferring the Job
+    // between threads (e.g. HostState inside a Mutex) is sound.
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
     impl Job {
         pub fn create() -> Result<Self, ()> {
             unsafe {
