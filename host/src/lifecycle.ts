@@ -25,7 +25,10 @@
 
 import type { Context } from "cordis"
 
-export const GRACEFUL_STOP_TIMEOUT_MS = 2000
+// A cooperative host shutdown gets enough time for real plugin cleanup. The
+// shell keeps a separate, longer 30s deadline and kills the process tree if
+// this process itself becomes unresponsive.
+export const GRACEFUL_STOP_TIMEOUT_MS = 10_000
 
 /**
  * Dispose every fiber in reverse load order, then clear the root fiber's own
@@ -76,13 +79,31 @@ export async function gracefulStop(ctx: Context): Promise<void> {
  * anyway — the shell supervisor's own STOP_TIMEOUT force-kill is the final
  * backstop, but we avoid lingering here too.
  */
-export async function gracefulStopWithTimeout(ctx: Context): Promise<void> {
-  const timer = setTimeout(() => {
+export async function gracefulStopWithTimeout(
+  ctx: Context,
+  timeoutMs = GRACEFUL_STOP_TIMEOUT_MS,
+): Promise<void> {
+  const cleanup = gracefulStop(ctx)
+
+  // A disposer belongs to third-party plugin code and cannot be safely
+  // cancelled. Once the deadline expires, stop awaiting it so the RPC handler
+  // can schedule process.exit(); consume any eventual rejection instead.
+  void cleanup.catch((err) => {
+    console.error("[host] graceful cleanup completed with an error after timeout", err)
+  })
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs)
+    timer.unref?.()
+  })
+
+  const outcome = await Promise.race([cleanup.then(() => "done" as const), deadline])
+  if (timer) clearTimeout(timer)
+
+  if (outcome === "timeout") {
     console.error(
-      `[host] graceful stop exceeded ${GRACEFUL_STOP_TIMEOUT_MS}ms, exiting anyway`,
+      `[host] graceful stop exceeded ${timeoutMs}ms; exiting anyway`,
     )
-  }, GRACEFUL_STOP_TIMEOUT_MS)
-  timer.unref?.()
-  await gracefulStop(ctx)
-  clearTimeout(timer)
+  }
 }

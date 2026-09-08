@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 pub const HOST_RESTART_EXIT: i32 = 51;
-const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+// Host has a 10s cooperative cleanup deadline; leave 30s total before the
+// shell force-kills its process tree if it no longer responds.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const STOP_RPC_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_SPAWN_FAILURES: u32 = 8;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
@@ -104,7 +107,7 @@ impl HostState {
             inner.peer.clone()
         };
         if let Some(peer) = peer {
-            let _ = peer.call_timeout("stop", vec![], Duration::from_millis(1500));
+            let _ = peer.call_timeout("stop", vec![], STOP_RPC_TIMEOUT);
         }
         let deadline = Instant::now() + STOP_TIMEOUT;
         while Instant::now() < deadline {
@@ -356,10 +359,10 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
 
     let stdout = tree.child_stdout().ok_or("host stdout")?;
     let stdin = tree.child_stdin().ok_or("host stdin")?;
-    let peer = Peer::start(stdout, stdin);
-    if let Some(app) = app {
-        register_shell_handlers(&peer, app.clone());
-    }
+    let peer = Peer::new(stdin);
+
+    // Register the mandatory startup handshake before reading stdout. If the
+    // host is already ready, its frame remains safely buffered in the pipe.
     let ready_slot: Arc<Mutex<Option<HostReady>>> = Arc::new(Mutex::new(None));
     let ready_handler = Arc::clone(&ready_slot);
     peer.on(
@@ -379,6 +382,10 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
             serde_json::Value::Null
         }),
     );
+    if let Some(app) = app {
+        register_shell_handlers(&peer, app.clone());
+    }
+    peer.start_reader(stdout);
     Ok(StartingHost {
         tree,
         peer,

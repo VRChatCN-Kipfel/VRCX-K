@@ -22,9 +22,8 @@
 fn main() {
     #[cfg(all(windows, target_env = "msvc"))]
     {
-        let attributes = tauri_build::Attributes::new().windows_attributes(
-            tauri_build::WindowsAttributes::new_without_app_manifest(),
-        );
+        let attributes = tauri_build::Attributes::new()
+            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
         tauri_build::try_build(attributes).expect("failed to run tauri-build");
 
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests-manifest.xml");
@@ -32,7 +31,9 @@ fn main() {
         println!("cargo::rustc-link-arg=/MANIFEST:EMBED");
         println!(
             "cargo::rustc-link-arg=/MANIFESTINPUT:{}",
-            manifest.to_str().expect("manifest path must be valid UTF-8")
+            manifest
+                .to_str()
+                .expect("manifest path must be valid UTF-8")
         );
     }
 

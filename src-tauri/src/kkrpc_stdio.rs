@@ -20,13 +20,19 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn start(stdout: ChildStdout, stdin: ChildStdin) -> Arc<Self> {
-        let peer = Arc::new(Self {
+    /// Create a peer without consuming host stdout yet. Install mandatory
+    /// handshake handlers before calling `start_reader()` so early frames stay
+    /// buffered by the OS pipe rather than being dispatched as unknown.
+    pub fn new(stdin: ChildStdin) -> Arc<Self> {
+        Arc::new(Self {
             writer: Mutex::new(stdin),
             pending: Mutex::new(HashMap::new()),
             handlers: Mutex::new(HashMap::new()),
-        });
-        let reader_peer = Arc::clone(&peer);
+        })
+    }
+
+    pub fn start_reader(self: &Arc<Self>, stdout: ChildStdout) {
+        let reader_peer = Arc::clone(self);
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -51,7 +57,6 @@ impl Peer {
                 reader_peer.dispatch(message);
             }
         });
-        peer
     }
 
     pub fn on(&self, method: &str, handler: Handler) {
@@ -120,8 +125,15 @@ impl Peer {
                     .expect("handlers")
                     .get(&method)
                     .cloned();
-                let result = handler.map(|call| call(args)).unwrap_or(Value::Null);
-                let _ = self.write(&json!({ "t": "r", "id": id, "v": result }));
+                let response = match handler {
+                    Some(call) => json!({ "t": "r", "id": id, "v": call(args) }),
+                    None => json!({
+                        "t": "r",
+                        "id": id,
+                        "e": { "m": format!("unknown RPC method: {method}") },
+                    }),
+                };
+                let _ = self.write(&response);
             }
             Some("r") => {
                 let Some(id) = message.get("id").and_then(Value::as_str) else {

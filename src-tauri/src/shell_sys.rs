@@ -50,12 +50,7 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
         handler(app.clone(), |app, args| {
             let title = str_arg(args, 0);
             let body = str_arg(args, 1);
-            let result = app
-                .notification()
-                .builder()
-                .title(title)
-                .body(body)
-                .show();
+            let result = app.notification().builder().title(title).body(body).show();
             json!(result.is_ok())
         }),
     );
@@ -80,11 +75,7 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
                 Some("yesNoCancel") => MessageDialogButtons::YesNoCancel,
                 _ => MessageDialogButtons::Ok,
             };
-            let mut builder = app
-                .dialog()
-                .message(text)
-                .kind(kind)
-                .buttons(buttons);
+            let mut builder = app.dialog().message(text).kind(kind).buttons(buttons);
             if !title.is_empty() {
                 builder = builder.title(title);
             }
@@ -127,15 +118,19 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
     peer.on(
         "shell.dialog.pickFile",
         handler(app.clone(), |app, args| {
-            let opts = args.get(0).cloned().unwrap_or_else(|| json!({}));
-            let multiple = opts.get("multiple").and_then(Value::as_bool).unwrap_or(false);
-            let directory = opts.get("directory").and_then(Value::as_bool).unwrap_or(false);
+            let opts = args.first().cloned().unwrap_or_else(|| json!({}));
+            let multiple = opts
+                .get("multiple")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let directory = opts
+                .get("directory")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let save = opts.get("save").and_then(Value::as_bool).unwrap_or(false);
             let builder = app.dialog().file();
             let picked: Option<Value> = if save {
-                builder
-                    .blocking_save_file()
-                    .map(path_to_json)
+                builder.blocking_save_file().map(path_to_json)
             } else if directory && multiple {
                 builder
                     .blocking_pick_folders()
@@ -275,10 +270,7 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
     peer.on(
         "shell.app.exit",
         handler(app.clone(), |app, args| {
-            let code = args
-                .first()
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as i32;
+            let code = args.first().and_then(Value::as_u64).unwrap_or(0) as i32;
             app.exit(code);
             json!(true)
         }),
@@ -293,7 +285,9 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
             let get = |f: &dyn Fn(
                 &tauri::path::PathResolver<tauri::Wry>,
             ) -> Result<std::path::PathBuf, tauri::Error>| {
-                f(path).map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+                f(path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default()
             };
             json!({
                 "config": get(&|p| p.app_config_dir()),
@@ -320,7 +314,9 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
                 "home" => path.home_dir(),
                 _ => return json!(""),
             };
-            json!(resolved.map(|p| p.to_string_lossy().to_string()).unwrap_or_default())
+            json!(resolved
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default())
         }),
     );
 }
