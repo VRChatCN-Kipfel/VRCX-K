@@ -151,13 +151,13 @@ export function connectShellStdio(ctx: Context) {
       ping: () => hostWsAPI.ping(),
       stop: async () => {
         console.error("[host] stop requested — graceful shutdown")
-        await gracefulStopWithTimeout(ctx)
+        await gracefulStopWithTimeout(ctx, "stop")
         setTimeout(() => process.exit(0), 10)
         return true
       },
       restart: async () => {
         console.error("[host] restart requested — graceful shutdown then exit 51")
-        await gracefulStopWithTimeout(ctx)
+        await gracefulStopWithTimeout(ctx, "restart")
         setTimeout(() => process.exit(HOST_RESTART_EXIT), 10)
         return true
       },

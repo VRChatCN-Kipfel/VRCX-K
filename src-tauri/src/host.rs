@@ -9,10 +9,13 @@ use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 pub const HOST_RESTART_EXIT: i32 = 51;
-// Host has a 10s cooperative cleanup deadline; leave 30s total before the
-// shell force-kills its process tree if it no longer responds.
+// A cooperative stop is allowed to take time while the host remains responsive.
+// This is also the watchdog budget: it starts when the stop request is sent,
+// is shared by the RPC wait and child-exit wait, and ends by killing the process
+// tree. A user-initiated force kill takes a separate immediate path.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
-const STOP_RPC_TIMEOUT: Duration = Duration::from_secs(12);
+// Leaves a small response-frame margin inside the shared 30s watchdog budget.
+const STOP_RPC_TIMEOUT: Duration = Duration::from_secs(28);
 const MAX_SPAWN_FAILURES: u32 = 8;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
@@ -100,6 +103,9 @@ impl HostState {
     }
 
     pub fn request_stop(&self) {
+        // Start one watchdog before writing the RPC. A wedged host must not
+        // receive a fresh 30s child-exit wait after consuming the RPC timeout.
+        let deadline = Instant::now() + STOP_TIMEOUT;
         let peer = {
             let mut inner = self.inner.lock().expect("host");
             inner.stopping = true;
@@ -107,9 +113,8 @@ impl HostState {
             inner.peer.clone()
         };
         if let Some(peer) = peer {
-            let _ = peer.call_timeout("stop", vec![], STOP_RPC_TIMEOUT);
+            let _ = peer.call_timeout("stop", vec![], stop_rpc_timeout(deadline));
         }
-        let deadline = Instant::now() + STOP_TIMEOUT;
         while Instant::now() < deadline {
             let mut inner = self.inner.lock().expect("host");
             match inner.tree.as_mut() {
@@ -187,6 +192,10 @@ impl HostState {
         let inner = self.inner.lock().expect("host");
         !inner.stopping && inner.generation == generation
     }
+}
+
+fn stop_rpc_timeout(deadline: Instant) -> Duration {
+    STOP_RPC_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()))
 }
 
 enum ExitKind {
@@ -562,6 +571,21 @@ mod tests {
             .call_timeout("ping", vec![], Duration::from_secs(2));
         assert!(err.is_err(), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn stop_rpc_timeout_uses_only_the_watchdog_budget_remaining() {
+        let deadline = Instant::now() + Duration::from_millis(30);
+        std::thread::sleep(Duration::from_millis(10));
+        let timeout = stop_rpc_timeout(deadline);
+        assert!(timeout < Duration::from_millis(30));
+        assert!(timeout <= STOP_RPC_TIMEOUT);
+    }
+
+    #[test]
+    fn stop_rpc_timeout_is_zero_after_watchdog_expires() {
+        let deadline = Instant::now() - Duration::from_millis(1);
+        assert_eq!(stop_rpc_timeout(deadline), Duration::ZERO);
     }
 
     #[test]

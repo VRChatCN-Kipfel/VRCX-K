@@ -5,6 +5,7 @@ import Include from "@cordisjs/plugin-include"
 import Loader from "@cordisjs/plugin-loader"
 import { HOST_VERSION } from "./api"
 import { log } from "./log"
+import { ShutdownSignal } from "./signal"
 import { connectShellStdio } from "./stdio"
 import { listenHostWs } from "./ws"
 
@@ -14,6 +15,11 @@ async function bootstrap() {
   log("starting Cordis...")
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(process.cwd()).href + "/"
+
+  // Provide the shutdown signal service so plugins can participate in
+  // graceful shutdown cooperatively via ctx.signal (see signal.ts).
+  ctx.provide("signal", new ShutdownSignal())
+  void ctx.signal // type guard — provided above
 
   await ctx.plugin(Loader)
   await ctx.plugin(Include, { path: "./cordis.yml", enableLogs: false })
