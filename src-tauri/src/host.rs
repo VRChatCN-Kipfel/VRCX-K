@@ -24,6 +24,36 @@ const STOP_RPC_TIMEOUT: Duration = Duration::from_secs(28);
 const MAX_SPAWN_FAILURES: u32 = 8;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
+// A freshly ready host must stay up this long before its crash/restart streak
+// is forgiven. Rapid ready→exit loops (crash or exit 51) inside this window
+// therefore accumulate toward the storm cap instead of resetting forever.
+const STABLE_WINDOW: Duration = Duration::from_secs(30);
+
+/// Tunable crash/restart storm policy.
+///
+/// The defaults are the production values; tests may construct a HostState
+/// with a compressed policy (short window, small backoff, lower cap) so the
+/// storm paths are exercised without multi-second sleeps. This is a
+/// configuration surface, not a test-only backdoor: operators could tune the
+/// same values later.
+#[derive(Clone, Copy, Debug)]
+struct StormPolicy {
+    stable_window: Duration,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    max_failures: u32,
+}
+
+impl Default for StormPolicy {
+    fn default() -> Self {
+        Self {
+            stable_window: STABLE_WINDOW,
+            initial_backoff: INITIAL_BACKOFF,
+            max_backoff: MAX_BACKOFF,
+            max_failures: MAX_SPAWN_FAILURES,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostReady {
@@ -48,6 +78,10 @@ struct HostInner {
     lifecycle: HostSnapshot,
     fail_streak: u32,
     backoff: Duration,
+    /// When the current generation reached Ready; used to decide whether an
+    /// exit happened inside the stable window (streak not forgiven) or after
+    /// it (streak forgiven). Cleared on adopt, set on promote_ready.
+    ready_at: Option<Instant>,
 }
 
 impl HostInner {
@@ -70,6 +104,7 @@ impl Default for HostInner {
             lifecycle: HostSnapshot::new(),
             fail_streak: 0,
             backoff: INITIAL_BACKOFF,
+            ready_at: None,
         }
     }
 }
@@ -92,20 +127,30 @@ pub struct HostState {
     /// takes the receiver exactly once; senders may be cloned freely.
     command_tx: Sender<HostCommand>,
     command_rx: Mutex<Option<Receiver<HostCommand>>>,
+    storm: StormPolicy,
 }
 
 impl Default for HostState {
     fn default() -> Self {
-        let (command_tx, rx) = channel();
-        Self {
-            inner: Mutex::new(HostInner::default()),
-            command_tx,
-            command_rx: Mutex::new(Some(rx)),
-        }
+        Self::with_storm_policy(StormPolicy::default())
     }
 }
 
 impl HostState {
+    /// Build a state with a custom storm policy. Production uses the default;
+    /// tests compress the window/backoff/cap so storm paths run quickly.
+    fn with_storm_policy(storm: StormPolicy) -> Self {
+        let (command_tx, rx) = channel();
+        let mut inner = HostInner::default();
+        inner.backoff = storm.initial_backoff;
+        Self {
+            inner: Mutex::new(inner),
+            command_tx,
+            command_rx: Mutex::new(Some(rx)),
+            storm,
+        }
+    }
+
     fn take_command_rx(&self) -> Option<Receiver<HostCommand>> {
         self.command_rx.lock().expect("host rx").take()
     }
@@ -164,7 +209,7 @@ impl HostState {
                     // A user-intended start resets the crash storm bookkeeping
                     // so a Failed host can recover without a full app restart.
                     inner.fail_streak = 0;
-                    inner.backoff = INITIAL_BACKOFF;
+                    inner.backoff = self.storm.initial_backoff;
                     inner.lifecycle.next_retry_ms = None;
                 }
                 HostCommand::GracefulStop | HostCommand::ForceKill => inner.stopping = true,
@@ -224,17 +269,56 @@ impl HostState {
     fn reset_storm_state(&self) {
         let mut inner = self.inner.lock().expect("host");
         inner.fail_streak = 0;
-        inner.backoff = INITIAL_BACKOFF;
+        inner.backoff = self.storm.initial_backoff;
         inner.lifecycle.attempt = 0;
         inner.lifecycle.next_retry_ms = None;
     }
 
-    fn record_ready_metrics(&self) {
+    /// The current generation reached Ready and has run for at least the
+    /// stable window, so its next exit is treated as a fresh incident rather
+    /// than part of a storm.
+    fn exited_stably(&self) -> bool {
+        let inner = self.inner.lock().expect("host");
+        match inner.ready_at {
+            Some(since) => since.elapsed() >= self.storm.stable_window,
+            // No ready this generation (e.g. spawn failure): never stable.
+            None => false,
+        }
+    }
+
+    /// Account for a child exit on the supervisor thread.
+    ///
+    /// - Exits after the stable window forgive the previous streak first
+    ///   (crash restarts counting from one; a cooperative exit-51 restart is
+    ///   a legitimate request and does not count at all).
+    /// - Exits inside the window (crash *or* exit 51) accumulate the streak,
+    ///   so rapid ready→exit loops hit the storm cap instead of looping
+    ///   forever.
+    ///
+    /// Returns true when the caller must back off before respawning.
+    fn note_exit(&self, is_restart_request: bool) -> bool {
+        let stable = self.exited_stably();
         let mut inner = self.inner.lock().expect("host");
-        inner.fail_streak = 0;
-        inner.backoff = INITIAL_BACKOFF;
-        inner.lifecycle.attempt = 0;
-        inner.lifecycle.next_retry_ms = None;
+        if stable {
+            inner.fail_streak = 0;
+            inner.backoff = self.storm.initial_backoff;
+        }
+        if is_restart_request {
+            if stable {
+                // Legitimate cooperative reload after stable runtime: the
+                // host asked to restart; relaunch immediately, no penalty.
+                inner.lifecycle.attempt = 0;
+                inner.lifecycle.next_retry_ms = None;
+                return false;
+            }
+            // Restart storm inside the window is treated like a crash loop.
+            inner.fail_streak = inner.fail_streak.saturating_add(1);
+            inner.lifecycle.attempt = inner.fail_streak;
+            return true;
+        }
+        inner.fail_streak = inner.fail_streak.saturating_add(1);
+        inner.lifecycle.attempt = inner.fail_streak;
+        true
     }
 
     fn mark_failed(&self) {
@@ -264,13 +348,13 @@ impl HostState {
 
     fn double_backoff(&self) {
         let mut inner = self.inner.lock().expect("host");
-        inner.backoff = inner.backoff.saturating_mul(2).min(MAX_BACKOFF);
+        inner.backoff = inner.backoff.saturating_mul(2).min(self.storm.max_backoff);
         inner.lifecycle.next_retry_ms = Some(inner.backoff.as_millis() as u64);
     }
 
     fn streak_capped(&self) -> bool {
         let inner = self.inner.lock().expect("host");
-        inner.fail_streak >= MAX_SPAWN_FAILURES
+        inner.fail_streak >= self.storm.max_failures
     }
 
     fn fail_streak(&self) -> u32 {
@@ -417,6 +501,7 @@ impl HostState {
         inner.tree = Some(tree);
         inner.peer = Some(peer);
         inner.ready = None;
+        inner.ready_at = None;
         inner.lifecycle.generation = generation;
         inner.lifecycle.phase = HostLifecycleState::Starting;
         inner.lifecycle.pid = inner.tree.as_ref().map(ProcessTree::id);
@@ -429,6 +514,7 @@ impl HostState {
             return Err(());
         }
         inner.ready = Some(ready.clone());
+        inner.ready_at = Some(Instant::now());
         inner.lifecycle.phase = HostLifecycleState::Ready;
         inner.lifecycle.pid = inner.tree.as_ref().map(ProcessTree::id);
         inner.lifecycle.port = Some(ready.port);
@@ -468,9 +554,11 @@ pub fn supervise_loop(
                 return;
             }
         }
-        if state.wants_running() {
+        if state.wants_running() && !state.streak_capped() {
             run_running_segment(state, app, &mut on_ready, &rx);
         } else {
+            // Stopped, AppExit, or a capped storm (persistent Failed): park
+            // until an explicit Start/Restart command resets the streak.
             wait_for_start(state, &rx);
         }
     }
@@ -569,7 +657,6 @@ fn run_running_segment(
         }
         match spawn_host_into(state, app) {
             Ok(ready) => {
-                state.record_ready_metrics();
                 eprintln!(
                     "[shell] host ready port={} token_len={}",
                     ready.port,
@@ -579,9 +666,34 @@ fn run_running_segment(
                 match watch_until_exit(state, rx) {
                     WatchOutcome::Stopped => return,
                     WatchOutcome::Crashed(status) => {
-                        state.bump_streak();
+                        // A crash inside the stable window keeps accumulating;
+                        // after the window the streak is forgiven first.
+                        let needs_backoff = state.note_exit(false);
                         eprintln!(
-                            "[shell] host crashed {status:?} ({}/{MAX_SPAWN_FAILURES}), backing off {:?}",
+                            "[shell] host crashed {status:?} ({}/{}, window={:?}), backing off {:?}",
+                            state.fail_streak(),
+                            state.storm.max_failures,
+                            state.storm.stable_window,
+                            state.backoff()
+                        );
+                        if state.streak_capped() {
+                            eprintln!("[shell] host restart storm cap reached, giving up");
+                            state.mark_failed();
+                            return;
+                        }
+                        if needs_backoff && sleep_or_stop(state, rx) {
+                            return;
+                        }
+                        state.double_backoff();
+                    }
+                    WatchOutcome::RestartRequested => {
+                        // Exit 51 is the host asking for a cooperative restart.
+                        // Inside the stable window it is a restart storm and
+                        // counts/backs off like a crash; after the window it is
+                        // a legitimate request and relaunches immediately.
+                        let needs_backoff = state.note_exit(true);
+                        eprintln!(
+                            "[shell] host requested restart ({HOST_RESTART_EXIT}) streak={}, backoff={:?}",
                             state.fail_streak(),
                             state.backoff()
                         );
@@ -590,15 +702,12 @@ fn run_running_segment(
                             state.mark_failed();
                             return;
                         }
-                        if sleep_or_stop(state, rx) {
+                        if needs_backoff && sleep_or_stop(state, rx) {
                             return;
                         }
-                        state.double_backoff();
-                    }
-                    WatchOutcome::RestartRequested => {
-                        // Host exited 51: cooperative reload/restart. It is not
-                        // a crash: the loop immediately spawns the next gen.
-                        eprintln!("[shell] host requested restart ({HOST_RESTART_EXIT})");
+                        if needs_backoff {
+                            state.double_backoff();
+                        }
                     }
                 }
             }
@@ -606,10 +715,13 @@ fn run_running_segment(
                 if !state.wants_running() {
                     return;
                 }
+                // Spawn failures never reached Ready, so there is no stable
+                // window to forgive them: they always accumulate.
                 state.bump_streak();
                 eprintln!(
-                    "[shell] host spawn failed: {err} ({}/{MAX_SPAWN_FAILURES})",
-                    state.fail_streak()
+                    "[shell] host spawn failed: {err} ({}/{})",
+                    state.fail_streak(),
+                    state.storm.max_failures
                 );
                 if state.streak_capped() {
                     eprintln!("[shell] host restart storm cap reached, giving up");
@@ -1340,6 +1452,216 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(50));
             }
             assert!(!pid_alive(second_pid));
+            state.latch_app_exit();
+        });
+    }
+
+    // --- stable-window storm accounting ------------------------------------
+
+    fn storm_state(window: Duration, cap: u32) -> HostState {
+        HostState::with_storm_policy(StormPolicy {
+            stable_window: window,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(40),
+            max_failures: cap,
+        })
+    }
+
+    fn force_ready_at(state: &HostState, when: Instant) {
+        let mut inner = state.inner.lock().expect("host");
+        inner.ready_at = Some(when);
+    }
+
+    #[test]
+    fn note_exit_forgives_streak_only_after_stable_window() {
+        let state = HostState::default();
+        let window = state.storm.stable_window;
+        let long_ago = Instant::now() - window - Duration::from_secs(1);
+
+        // Inside the window: crash bumps, exit 51 bumps.
+        force_ready_at(&state, Instant::now());
+        assert!(state.note_exit(false), "crash inside window backs off");
+        assert_eq!(state.fail_streak(), 1);
+        assert!(state.note_exit(true), "51 inside window backs off");
+        assert_eq!(state.fail_streak(), 2);
+
+        // After the window: crash forgives then bumps to one.
+        force_ready_at(&state, long_ago);
+        assert!(state.note_exit(false), "crash after window backs off");
+        assert_eq!(
+            state.fail_streak(),
+            1,
+            "window crash restarts the count at 1"
+        );
+
+        // After the window: exit 51 is legitimate, forgiven, no backoff.
+        force_ready_at(&state, long_ago);
+        assert!(!state.note_exit(true), "51 after window must not back off");
+        assert_eq!(state.fail_streak(), 0, "legitimate 51 stays forgiven");
+    }
+
+    #[test]
+    fn crash_inside_stable_window_accumulates_streak() {
+        // Two rapid kills must reach attempt=2: ready no longer forgives the
+        // streak, so the supervisor notices the crash loop.
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let _first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            state.force_kill_running();
+            let _second = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("second ready");
+            state.force_kill_running();
+            // Second kill lands inside the stable window (default 30s), so
+            // the streak must have accumulated rather than reset at ready.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let snapshot = state.lifecycle_snapshot();
+                if snapshot.attempt >= 2 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                state.lifecycle_snapshot().attempt >= 2,
+                "rapid crashes inside the stable window must accumulate; attempt={}",
+                state.lifecycle_snapshot().attempt
+            );
+            state.latch_app_exit();
+        });
+    }
+
+    #[test]
+    fn exit_51_loop_inside_stable_window_reaches_failed_cap_and_start_recovers() {
+        // A host that asks to restart (51) faster than the stable window is a
+        // restart storm: it must hit the cap and park in Failed instead of
+        // looping forever, and an explicit Start must recover it.
+        let state = storm_state(Duration::from_secs(5), 3);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            // Fire reload three times; the third 51 must cap the storm.
+            for i in 0..3 {
+                let ready = rx
+                    .recv_timeout(Duration::from_secs(15))
+                    .unwrap_or_else(|_| panic!("ready #{i} before cap"));
+                assert!(matches!(
+                    state.dispatch(HostCommand::Reload),
+                    HostCommandResult::Accepted { .. }
+                ));
+                let _ = ready;
+            }
+            // After the capped reload, the supervisor must NOT produce a new
+            // ready: it parks in Failed waiting for an explicit command.
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(
+                rx.try_recv().is_err(),
+                "restart storm must cap into Failed, not keep relaunching"
+            );
+            assert_eq!(
+                state.lifecycle_snapshot().phase,
+                HostLifecycleState::Failed,
+                "restart storm must end in Failed"
+            );
+            // A manual Start is the user intent that resets the streak.
+            assert!(matches!(
+                state.dispatch(HostCommand::Start),
+                HostCommandResult::Accepted { .. }
+            ));
+            let recovered = rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("ready after manual start from Failed");
+            assert!(recovered.port > 0);
+            state.latch_app_exit();
+        });
+    }
+
+    #[test]
+    fn exit_51_after_stable_window_relaunches_without_penalty() {
+        // A reload after stable runtime is a legitimate host restart request:
+        // no streak accumulation, no backoff, immediate relaunch.
+        let state = storm_state(Duration::from_millis(400), 3);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            // Wait out the stable window before asking for a restart.
+            std::thread::sleep(Duration::from_millis(700));
+            assert!(matches!(
+                state.dispatch(HostCommand::Reload),
+                HostCommandResult::Accepted { .. }
+            ));
+            let second = rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("second ready after stable reload");
+            assert_ne!(first.token, second.token);
+            assert_eq!(
+                state.lifecycle_snapshot().attempt,
+                0,
+                "a legitimate 51 after the stable window must not count"
+            );
+            let pid = state.child_id().expect("pid");
+            state.dispatch(HostCommand::ForceKill);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && pid_alive(pid) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!pid_alive(pid));
+            state.latch_app_exit();
+        });
+    }
+
+    #[test]
+    fn crash_after_stable_window_restarts_counting_from_one() {
+        // A crash after stable runtime forgives the old streak, then counts
+        // the fresh incident as attempt 1 (and still relaunches).
+        let state = storm_state(Duration::from_millis(400), 3);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            std::thread::sleep(Duration::from_millis(700));
+            state.force_kill_running();
+            let second = rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("second ready after stable crash");
+            assert_ne!(first.token, second.token);
+            assert_eq!(
+                state.lifecycle_snapshot().attempt,
+                1,
+                "crash after the stable window restarts the count at 1"
+            );
+            let pid = state.child_id().expect("pid");
+            state.dispatch(HostCommand::ForceKill);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && pid_alive(pid) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!pid_alive(pid));
             state.latch_app_exit();
         });
     }
