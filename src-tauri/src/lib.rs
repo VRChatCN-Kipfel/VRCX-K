@@ -51,22 +51,19 @@ fn dispatch_host_command(
     state.dispatch(command)
 }
 
-#[tauri::command]
-fn dispatch_app_command(
-    app: tauri::AppHandle,
-    state: tauri::State<HostState>,
-    lifecycle: tauri::State<AppLifecycle>,
-    request: AppCommandRequest,
-) -> AppCommandResult {
-    let command = request.command;
-    let result = lifecycle.dispatch(request);
-    if !matches!(result, AppCommandResult::Accepted { .. }) {
-        return result;
-    }
-
+/// Execute an accepted application command on the Rust-owned lifecycle path.
+///
+/// Shared by the `dispatch_app_command` IPC entry point and the #6 tray
+/// router: the tray route calls this directly (no string IPC) so both callers
+/// observe one orchestration. The caller is responsible for obtaining an
+/// `Accepted` verdict first (idempotent latch); this function performs the
+/// post-accept work — latching AppExit so the supervisor cannot relaunch,
+/// then the graceful/force teardown off the calling thread.
+pub(crate) fn execute_app_command(app: tauri::AppHandle, command: AppCommand) {
+    let state = app.state::<HostState>();
     // The Rust shell owns process lifecycle. Latch AppExit before returning so
     // the supervisor cannot relaunch and host/plugin code cannot race this app
-    // command. Graceful work runs off the Tauri command thread.
+    // command. Graceful work runs off the calling thread.
     state.latch_app_exit();
     match command {
         AppCommand::RestartGraceful => {
@@ -90,6 +87,21 @@ fn dispatch_app_command(
             app.exit(0);
         }
     }
+}
+
+#[tauri::command]
+fn dispatch_app_command(
+    app: tauri::AppHandle,
+    _state: tauri::State<HostState>,
+    lifecycle: tauri::State<AppLifecycle>,
+    request: AppCommandRequest,
+) -> AppCommandResult {
+    let command = request.command;
+    let result = lifecycle.dispatch(request);
+    if !matches!(result, AppCommandResult::Accepted { .. }) {
+        return result;
+    }
+    execute_app_command(app.clone(), command);
     result
 }
 
