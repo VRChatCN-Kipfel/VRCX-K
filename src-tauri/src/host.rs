@@ -1,6 +1,6 @@
 use crate::host_lifecycle::{
-    reduce_command, HostCommand, HostCommandResult, HostLifecycleFacade, HostLifecycleState,
-    HostSnapshot,
+    reduce_command, HostCommand, HostCommandResult, HostDesiredState, HostLifecycleFacade,
+    HostLifecycleState, HostSnapshot,
 };
 use crate::kkrpc_stdio::Peer;
 use crate::process_tree::ProcessTree;
@@ -8,6 +8,7 @@ use crate::shell_sys::register_shell_handlers;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
@@ -45,6 +46,8 @@ struct HostInner {
     peer: Option<Arc<Peer>>,
     ready: Option<HostReady>,
     lifecycle: HostSnapshot,
+    fail_streak: u32,
+    backoff: Duration,
 }
 
 impl HostInner {
@@ -53,11 +56,6 @@ impl HostInner {
         self.peer = None;
         self.ready = None;
     }
-}
-
-#[derive(Default)]
-pub struct HostState {
-    inner: Mutex<HostInner>,
 }
 
 impl Default for HostInner {
@@ -70,7 +68,59 @@ impl Default for HostInner {
             peer: None,
             ready: None,
             lifecycle: HostSnapshot::new(),
+            fail_streak: 0,
+            backoff: INITIAL_BACKOFF,
         }
+    }
+}
+
+/// Single source of truth for host process state and the command bus that
+/// drives the supervisor.
+///
+/// # Threading model
+/// `dispatch()` runs on the caller thread (Tauri IPC, tray router). It never
+/// blocks on process I/O: it reduces the command against the public snapshot,
+/// fences `stopping`, and enqueues the command on a channel. The dedicated
+/// supervisor thread (see `supervise_loop`) is the *only* thread that spawns,
+/// stops, force-kills or reloads the host, so commands are serialized and a
+/// double-spawn race is impossible by construction. Generation is still
+/// allocated only after a real `Command::spawn` succeeds (see
+/// `spawn_host_into`); stop/force only advance the internal command epoch.
+pub struct HostState {
+    inner: Mutex<HostInner>,
+    /// Commands accepted by `dispatch` are delivered here. `supervise_loop`
+    /// takes the receiver exactly once; senders may be cloned freely.
+    command_tx: Sender<HostCommand>,
+    command_rx: Mutex<Option<Receiver<HostCommand>>>,
+}
+
+impl Default for HostState {
+    fn default() -> Self {
+        let (command_tx, rx) = channel();
+        Self {
+            inner: Mutex::new(HostInner::default()),
+            command_tx,
+            command_rx: Mutex::new(Some(rx)),
+        }
+    }
+}
+
+impl HostState {
+    fn take_command_rx(&self) -> Option<Receiver<HostCommand>> {
+        self.command_rx.lock().expect("host rx").take()
+    }
+
+    fn command_tx(&self) -> Sender<HostCommand> {
+        self.command_tx.clone()
+    }
+
+    fn wants_running(&self) -> bool {
+        let inner = self.inner.lock().expect("host");
+        inner.lifecycle.desired == HostDesiredState::Running && !inner.stopping
+    }
+
+    fn desired(&self) -> HostDesiredState {
+        self.inner.lock().expect("host").lifecycle.desired
     }
 }
 
@@ -93,17 +143,37 @@ impl HostState {
         self.inner.lock().expect("host").lifecycle.clone()
     }
 
+    /// Accept a host lifecycle command and hand it to the supervisor.
+    ///
+    /// This is the stable entry point used by the Tauri IPC command
+    /// (`dispatch_host_command`) and, through the `HostLifecycleFacade`
+    /// trait, by the #6 tray router. The returned `HostCommandResult` is the
+    /// *synchronous* reducer verdict (Accepted/Noop/Rejected) against the
+    /// current snapshot; Accepted additionally fences `stopping` and wakes the
+    /// supervisor, which performs the real process orchestration off-thread.
     pub fn dispatch(&self, command: HostCommand) -> HostCommandResult {
         let mut inner = self.inner.lock().expect("host");
         let result = reduce_command(&mut inner.lifecycle, command);
-        inner.command_epoch = inner.command_epoch.wrapping_add(1);
-        inner.stopping = matches!(
-            inner.lifecycle.desired,
-            crate::host_lifecycle::HostDesiredState::Stopped
-                | crate::host_lifecycle::HostDesiredState::AppExit
-        );
-        if inner.stopping {
+        if matches!(result, HostCommandResult::Accepted { .. }) {
+            // Fence the supervisor against the previous intent before the
+            // worker observes the command. Only Start/Restart clear stopping;
+            // stop/force latch it so the watch loop aborts and cannot relaunch.
+            match command {
+                HostCommand::Start | HostCommand::Restart => {
+                    inner.stopping = false;
+                    // A user-intended start resets the crash storm bookkeeping
+                    // so a Failed host can recover without a full app restart.
+                    inner.fail_streak = 0;
+                    inner.backoff = INITIAL_BACKOFF;
+                    inner.lifecycle.next_retry_ms = None;
+                }
+                HostCommand::GracefulStop | HostCommand::ForceKill => inner.stopping = true,
+                HostCommand::Reload => {}
+            }
             inner.command_epoch = inner.command_epoch.wrapping_add(1);
+            if let Err(err) = self.command_tx().send(command) {
+                eprintln!("[shell] supervisor unavailable, command dropped: {err:?}");
+            }
         }
         result
     }
@@ -126,30 +196,110 @@ impl HostState {
         self.inner.lock().expect("host").peer.clone()
     }
 
-    pub fn wait_child(&self) -> Option<ExitStatus> {
-        loop {
-            {
+    /// True while a host process is adopted (Starting or Ready).
+    fn has_child(&self) -> bool {
+        self.inner.lock().expect("host").tree.is_some()
+    }
+
+    /// Supervisor-only force kill after dispatch latched `Stopped`. Kills and
+    /// reaps the whole process tree; the host must not be relaunched.
+    fn force_kill_stopped(&self) -> Result<(), String> {
+        let mut inner = self.inner.lock().expect("host");
+        if inner.tree.is_none() {
+            return Ok(());
+        }
+        inner.peer = None;
+        inner.ready = None;
+        inner.lifecycle.phase = HostLifecycleState::Stopping;
+        inner.lifecycle.last_exit = None;
+        let tree = inner.tree.take();
+        drop(inner);
+        let mut tree = tree.ok_or("host process tree vanished")?;
+        tree.kill_tree();
+        self.finish_stopped();
+        Ok(())
+    }
+
+    /// Reset crash/backoff state for a user-intended start or restart.
+    fn reset_storm_state(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.fail_streak = 0;
+        inner.backoff = INITIAL_BACKOFF;
+        inner.lifecycle.attempt = 0;
+        inner.lifecycle.next_retry_ms = None;
+    }
+
+    fn record_ready_metrics(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.fail_streak = 0;
+        inner.backoff = INITIAL_BACKOFF;
+        inner.lifecycle.attempt = 0;
+        inner.lifecycle.next_retry_ms = None;
+    }
+
+    fn mark_failed(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.lifecycle.phase = HostLifecycleState::Failed;
+        inner.lifecycle.next_retry_ms = None;
+        inner.lifecycle.last_error = Some("host restart storm cap reached".into());
+    }
+
+    /// Restore the running intent after a Restart command stopped the current
+    /// generation (dispatch already reduced phase=Starting, desired=Running;
+    /// the stop helper temporarily latched Stopped/Stopping over it).
+    fn resume_running(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.stopping = false;
+        inner.lifecycle.desired = HostDesiredState::Running;
+        // dispatch(Restart) reduced phase=Starting; the stop helpers may have
+        // overwritten it with Stopping/Stopped, so restore the reduced phase.
+        inner.lifecycle.phase = HostLifecycleState::Starting;
+    }
+
+    fn bump_streak(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.fail_streak = inner.fail_streak.saturating_add(1);
+        inner.lifecycle.attempt = inner.fail_streak;
+    }
+
+    fn double_backoff(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.backoff = inner.backoff.saturating_mul(2).min(MAX_BACKOFF);
+        inner.lifecycle.next_retry_ms = Some(inner.backoff.as_millis() as u64);
+    }
+
+    fn streak_capped(&self) -> bool {
+        let inner = self.inner.lock().expect("host");
+        inner.fail_streak >= MAX_SPAWN_FAILURES
+    }
+
+    fn fail_streak(&self) -> u32 {
+        self.inner.lock().expect("host").fail_streak
+    }
+
+    fn backoff(&self) -> Duration {
+        self.inner.lock().expect("host").backoff
+    }
+
+    /// Supervisor-only host-cooperative reload: tell a Ready host to tear down
+    /// and exit 51. The running segment then spawns the next generation.
+    fn host_reload(&self) {
+        let Some(peer) = self.peer() else {
+            let mut inner = self.inner.lock().expect("host");
+            inner.lifecycle.last_error = Some("reload requested without a ready host".into());
+            return;
+        };
+        match peer.call_timeout("restart", vec![], STOP_RPC_TIMEOUT) {
+            Ok(_) => {}
+            Err(err) => {
                 let mut inner = self.inner.lock().expect("host");
-                let tree = inner.tree.as_mut()?;
-                match tree.try_wait() {
-                    Ok(Some(status)) => {
-                        inner.clear();
-                        return Some(status);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        inner.clear();
-                        return None;
-                    }
-                }
-                if inner.stopping {
-                    return None;
-                }
+                inner.lifecycle.last_error = Some(format!("host reload RPC failed: {err}"));
             }
-            std::thread::sleep(Duration::from_millis(30));
         }
     }
 
+    /// Latch a terminal desired state (`Stopped`/`AppExit`) and fence the
+    /// current command epoch. Process teardown is performed by the caller.
     fn latch_desired(&self, desired: crate::host_lifecycle::HostDesiredState) {
         let mut inner = self.inner.lock().expect("host");
         inner.stopping = true;
@@ -174,7 +324,9 @@ impl HostState {
         );
     }
 
-    #[cfg(test)]
+    /// Cooperative stop of the current host generation: latch `Stopped`, call
+    /// the `stop` RPC, wait for child exit within `timeout`, then kill the
+    /// process tree if the deadline expires. The host is not relaunched.
     pub fn request_stop_with_timeout(&self, timeout: Duration) {
         self.request_stop_with_desired(timeout, crate::host_lifecycle::HostDesiredState::Stopped);
     }
@@ -197,11 +349,15 @@ impl HostState {
             match inner.tree.as_mut() {
                 None => {
                     inner.clear();
+                    drop(inner);
+                    self.finish_stopped();
                     return;
                 }
                 Some(tree) => {
                     if let Ok(Some(_)) = tree.try_wait() {
                         inner.clear();
+                        drop(inner);
+                        self.finish_stopped();
                         return;
                     }
                 }
@@ -210,6 +366,17 @@ impl HostState {
             std::thread::sleep(Duration::from_millis(20));
         }
         self.reap_tree();
+        self.finish_stopped();
+    }
+
+    /// Record a completed stop in the public snapshot (child already cleared).
+    /// The desired state stays whatever the stop latched (Stopped/AppExit).
+    fn finish_stopped(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.lifecycle.phase = HostLifecycleState::Stopped;
+        inner.lifecycle.pid = None;
+        inner.lifecycle.port = None;
+        inner.lifecycle.next_retry_ms = None;
     }
 
     #[cfg(test)]
@@ -279,94 +446,294 @@ fn stop_rpc_timeout(deadline: Instant) -> Duration {
     STOP_RPC_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()))
 }
 
-enum ExitKind {
-    RestartRequested,
-    Stopped,
-    Crashed(Option<ExitStatus>),
-}
-
-fn classify_exit(status: Option<ExitStatus>) -> ExitKind {
-    match status {
-        Some(status) if status.code() == Some(HOST_RESTART_EXIT) => ExitKind::RestartRequested,
-        Some(status) => ExitKind::Crashed(Some(status)),
-        None => ExitKind::Stopped,
-    }
-}
-
 pub fn supervise_loop(
     state: &HostState,
     app: Option<&AppHandle>,
     mut on_ready: impl FnMut(HostReady),
 ) {
-    let mut fail_streak = 0u32;
-    let mut backoff = INITIAL_BACKOFF;
+    let Some(rx) = state.take_command_rx() else {
+        eprintln!("[shell] supervisor already bound to this HostState");
+        return;
+    };
+    // Initial intent follows the snapshot default (Running): a fresh
+    // HostState starts the host automatically, preserving legacy behavior.
     loop {
-        if state.is_stopping() {
-            break;
+        if state.desired() == HostDesiredState::AppExit {
+            return;
+        }
+        // Non-blocking drain so a Start arriving while we were deciding does
+        // not wait for the next spawn/watch cycle boundary.
+        while let Ok(command) = rx.try_recv() {
+            if supervise_command(state, command) {
+                return;
+            }
+        }
+        if state.wants_running() {
+            run_running_segment(state, app, &mut on_ready, &rx);
+        } else {
+            wait_for_start(state, &rx);
+        }
+    }
+}
+
+/// Block until a Start/Restart arrives (or the app exits). The only commands
+/// valid while the host is not running are Start and Restart; the reducer
+/// rejects the rest, and Reload only targets a Ready host.
+fn wait_for_start(state: &HostState, rx: &Receiver<HostCommand>) {
+    loop {
+        if state.desired() == HostDesiredState::AppExit {
+            return;
+        }
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(HostCommand::Start | HostCommand::Restart) => return,
+            Ok(_) => {
+                // Reducer rejected it; ignore stragglers from a racing caller.
+            }
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Execute a single command from the supervisor thread. Returns `true` when
+/// the supervisor must exit (app exit latched while executing a command).
+fn supervise_command(state: &HostState, command: HostCommand) -> bool {
+    match command {
+        HostCommand::Start => {
+            // Already fenced in dispatch; just (re)enter the running segment.
+            state.reset_storm_state();
+        }
+        HostCommand::GracefulStop => {
+            state.request_stop_with_timeout(STOP_TIMEOUT);
+        }
+        HostCommand::ForceKill => {
+            // The reducer latched Stopped; kill and reap immediately. This is
+            // "end the host", not a simulated crash: no automatic relaunch.
+            let _ = state.force_kill_stopped();
+        }
+        HostCommand::Restart => {
+            state.reset_storm_state();
+            // Stop the current generation first (RPC stop with deadline, then
+            // kill tree on timeout), then let the loop respawn: this is the
+            // shell-guaranteed restart even if the host wedges.
+            if state.has_child() {
+                state.request_stop_with_timeout(STOP_TIMEOUT);
+            }
+            // The stop helper latched Stopped over the reducer's Running
+            // intent; restore it so the loop re-enters the running segment.
+            state.resume_running();
+        }
+        HostCommand::Reload => {
+            // Host-cooperative full reload: the host tears down and exits 51;
+            // the running segment observes RestartRequested and relaunches.
+            state.host_reload();
+        }
+    }
+    state.desired() == HostDesiredState::AppExit
+}
+
+fn run_running_segment(
+    state: &HostState,
+    app: Option<&AppHandle>,
+    on_ready: &mut impl FnMut(HostReady),
+    rx: &Receiver<HostCommand>,
+) {
+    // Spawn/watch until a stop intent or storm cap ends this running segment.
+    // Crash streak and backoff live on HostInner so dispatch-side commands and
+    // the running segment observe one source of truth.
+    loop {
+        // Keep servicing commands even between spawn attempts so e.g. a
+        // ForceKill during backoff is honored without waiting out the sleep.
+        if let Ok(command) = rx.try_recv() {
+            match command {
+                HostCommand::GracefulStop => {
+                    state.request_stop_with_timeout(STOP_TIMEOUT);
+                    return;
+                }
+                HostCommand::ForceKill => {
+                    let _ = state.force_kill_stopped();
+                    return;
+                }
+                HostCommand::Start | HostCommand::Restart => {
+                    state.reset_storm_state();
+                }
+                HostCommand::Reload => state.host_reload(),
+            }
+        }
+        if !state.wants_running() {
+            return;
+        }
+        if state.streak_capped() {
+            state.mark_failed();
+            return;
         }
         match spawn_host_into(state, app) {
             Ok(ready) => {
-                fail_streak = 0;
-                backoff = INITIAL_BACKOFF;
+                state.record_ready_metrics();
                 eprintln!(
                     "[shell] host ready port={} token_len={}",
                     ready.port,
                     ready.token.len()
                 );
                 on_ready(ready);
-                let status = state.wait_child();
-                if state.is_stopping() {
-                    break;
-                }
-                match classify_exit(status) {
-                    ExitKind::RestartRequested => {
-                        eprintln!("[shell] host requested restart ({HOST_RESTART_EXIT})");
-                    }
-                    ExitKind::Stopped => break,
-                    ExitKind::Crashed(status) => {
-                        fail_streak += 1;
+                match watch_until_exit(state, rx) {
+                    WatchOutcome::Stopped => return,
+                    WatchOutcome::Crashed(status) => {
+                        state.bump_streak();
                         eprintln!(
-                            "[shell] host crashed {status:?} ({fail_streak}/{MAX_SPAWN_FAILURES}), backing off {backoff:?}"
+                            "[shell] host crashed {status:?} ({}/{MAX_SPAWN_FAILURES}), backing off {:?}",
+                            state.fail_streak(),
+                            state.backoff()
                         );
-                        if fail_streak >= MAX_SPAWN_FAILURES {
+                        if state.streak_capped() {
                             eprintln!("[shell] host restart storm cap reached, giving up");
-                            break;
+                            state.mark_failed();
+                            return;
                         }
-                        if sleep_or_stop(state, backoff) {
-                            break;
+                        if sleep_or_stop(state, rx) {
+                            return;
                         }
-                        backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+                        state.double_backoff();
+                    }
+                    WatchOutcome::RestartRequested => {
+                        // Host exited 51: cooperative reload/restart. It is not
+                        // a crash: the loop immediately spawns the next gen.
+                        eprintln!("[shell] host requested restart ({HOST_RESTART_EXIT})");
                     }
                 }
             }
             Err(err) => {
-                if state.is_stopping() {
-                    break;
+                if !state.wants_running() {
+                    return;
                 }
-                fail_streak += 1;
-                eprintln!("[shell] host spawn failed: {err} ({fail_streak}/{MAX_SPAWN_FAILURES})");
-                if fail_streak >= MAX_SPAWN_FAILURES {
+                state.bump_streak();
+                eprintln!(
+                    "[shell] host spawn failed: {err} ({}/{MAX_SPAWN_FAILURES})",
+                    state.fail_streak()
+                );
+                if state.streak_capped() {
                     eprintln!("[shell] host restart storm cap reached, giving up");
-                    break;
+                    state.mark_failed();
+                    return;
                 }
-                if sleep_or_stop(state, backoff) {
-                    break;
+                if sleep_or_stop(state, rx) {
+                    return;
                 }
-                backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+                state.double_backoff();
             }
         }
     }
 }
 
-fn sleep_or_stop(state: &HostState, total: Duration) -> bool {
+enum WatchOutcome {
+    Stopped,
+    RestartRequested,
+    Crashed(Option<ExitStatus>),
+}
+
+/// Watch the current child until it exits, servicing lifecycle commands as
+/// they arrive. Runs on the supervisor thread.
+fn watch_until_exit(state: &HostState, rx: &Receiver<HostCommand>) -> WatchOutcome {
+    loop {
+        // GracefulStop/ForceKill/Reload/Restart may arrive while running.
+        match rx.try_recv() {
+            Ok(HostCommand::GracefulStop) => {
+                state.request_stop_with_timeout(STOP_TIMEOUT);
+                return WatchOutcome::Stopped;
+            }
+            Ok(HostCommand::ForceKill) => {
+                let _ = state.force_kill_stopped();
+                return WatchOutcome::Stopped;
+            }
+            Ok(HostCommand::Restart) => {
+                state.reset_storm_state();
+                if state.has_child() {
+                    state.request_stop_with_timeout(STOP_TIMEOUT);
+                }
+                // Fall through and return Stopped so the running segment loops
+                // and spawns the new generation.
+                state.resume_running();
+                return WatchOutcome::Stopped;
+            }
+            Ok(HostCommand::Reload) => {
+                // Ask the host to tear down and exit 51; watch continues.
+                state.host_reload();
+            }
+            Ok(HostCommand::Start) => {}
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => return WatchOutcome::Stopped,
+        }
+        if state.desired() == HostDesiredState::AppExit {
+            return WatchOutcome::Stopped;
+        }
+        if state.is_stopping() {
+            return WatchOutcome::Stopped;
+        }
+        {
+            let mut inner = state.inner.lock().expect("host");
+            let Some(tree) = inner.tree.as_mut() else {
+                return WatchOutcome::Stopped;
+            };
+            match tree.try_wait() {
+                Ok(Some(status)) => {
+                    inner.clear();
+                    drop(inner);
+                    return classify_watch(Some(status));
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    inner.clear();
+                    return WatchOutcome::Stopped;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn classify_watch(status: Option<ExitStatus>) -> WatchOutcome {
+    match status {
+        Some(status) if status.code() == Some(HOST_RESTART_EXIT) => WatchOutcome::RestartRequested,
+        Some(status) => WatchOutcome::Crashed(Some(status)),
+        None => WatchOutcome::Stopped,
+    }
+}
+
+fn sleep_or_stop(state: &HostState, rx: &Receiver<HostCommand>) -> bool {
+    let total = state.backoff();
     let deadline = Instant::now() + total;
     while Instant::now() < deadline {
-        if state.is_stopping() {
+        if !state.wants_running() {
             return true;
+        }
+        // Keep the snapshot's nextRetryMs honest while backing off.
+        {
+            let mut inner = state.inner.lock().expect("host");
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            inner.lifecycle.phase = HostLifecycleState::Backoff;
+            inner.lifecycle.next_retry_ms = Some(remaining.as_millis() as u64);
+        }
+        // A Start/Restart during backoff is honored immediately.
+        match rx.try_recv() {
+            Ok(HostCommand::Start | HostCommand::Restart) => {
+                state.reset_storm_state();
+                return false;
+            }
+            Ok(HostCommand::GracefulStop) => {
+                state.request_stop_with_timeout(STOP_TIMEOUT);
+                return true;
+            }
+            Ok(HostCommand::ForceKill) => {
+                let _ = state.force_kill_stopped();
+                return true;
+            }
+            Ok(_) => {}
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => return true,
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    state.is_stopping()
+    !state.wants_running()
 }
 
 #[cfg(test)]
@@ -737,6 +1104,9 @@ mod tests {
             state.request_stop();
             assert!(!pid_alive(first_pid));
             assert!(!pid_alive(second_pid));
+            // The supervisor only exits on an app-exit latch; end it so the
+            // scoped thread can join.
+            state.latch_app_exit();
         });
     }
 
@@ -765,6 +1135,212 @@ mod tests {
             let second_pid = state.child_id().expect("second pid");
             state.request_stop();
             assert!(!pid_alive(second_pid));
+            state.latch_app_exit();
+        });
+    }
+
+    // --- dispatch-driven orchestration ------------------------------------
+
+    #[test]
+    fn dispatch_graceful_stop_actually_stops_host_and_does_not_relaunch() {
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let _first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            let first_pid = state.child_id().expect("first pid");
+            // Reducer accepts GracefulStop from Ready.
+            assert!(matches!(
+                state.dispatch(HostCommand::GracefulStop),
+                HostCommandResult::Accepted { .. }
+            ));
+            // The supervisor performs the real stop: child gone, no relaunch.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                let snapshot = state.lifecycle_snapshot();
+                if snapshot.phase == HostLifecycleState::Stopped {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(!pid_alive(first_pid));
+            assert_eq!(
+                state.lifecycle_snapshot().phase,
+                HostLifecycleState::Stopped,
+                "graceful stop must settle the snapshot at Stopped"
+            );
+            // No second ready must arrive while stopped.
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(rx.try_recv().is_err(), "host must not relaunch after stop");
+            state.latch_app_exit();
+        });
+    }
+
+    #[test]
+    fn dispatch_start_after_stop_relaunches_host() {
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            let first_pid = state.child_id().expect("first pid");
+            // GracefulStop must be accepted from Ready.
+            assert!(matches!(
+                state.dispatch(HostCommand::GracefulStop),
+                HostCommandResult::Accepted { .. }
+            ));
+            // Wait until the supervisor reports Stopped (child reaped), not
+            // merely until the pid is gone: dispatch(Start) is only accepted
+            // from Stopped/Failed/Backoff, so racing the snapshot would flake.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                let snapshot = state.lifecycle_snapshot();
+                if snapshot.phase == HostLifecycleState::Stopped {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert_eq!(
+                state.lifecycle_snapshot().phase,
+                HostLifecycleState::Stopped,
+                "graceful stop must settle the snapshot at Stopped"
+            );
+            assert!(!pid_alive(first_pid));
+            // Start again: a new generation must come up.
+            assert!(matches!(
+                state.dispatch(HostCommand::Start),
+                HostCommandResult::Accepted { .. }
+            ));
+            let second = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("second ready after start");
+            assert_ne!(first.token, second.token);
+            let second_pid = state.child_id().expect("second pid");
+            state.dispatch(HostCommand::ForceKill);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && pid_alive(second_pid) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!pid_alive(second_pid));
+            state.latch_app_exit();
+        });
+    }
+
+    #[test]
+    fn dispatch_force_kill_stops_without_relaunch() {
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let _first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            let first_pid = state.child_id().expect("first pid");
+            assert!(matches!(
+                state.dispatch(HostCommand::ForceKill),
+                HostCommandResult::Accepted { .. }
+            ));
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                let snapshot = state.lifecycle_snapshot();
+                if snapshot.phase == HostLifecycleState::Stopped {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(!pid_alive(first_pid));
+            assert_eq!(
+                state.lifecycle_snapshot().phase,
+                HostLifecycleState::Stopped,
+                "force kill must settle the snapshot at Stopped"
+            );
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(rx.try_recv().is_err(), "force kill must not relaunch");
+            state.latch_app_exit();
+        });
+    }
+
+    #[test]
+    fn dispatch_restart_while_ready_restarts_host() {
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            let first_pid = state.child_id().expect("first pid");
+            assert!(matches!(
+                state.dispatch(HostCommand::Restart),
+                HostCommandResult::Accepted { .. }
+            ));
+            let second = rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("second ready after restart");
+            assert_ne!(first.token, second.token);
+            let second_pid = state.child_id().expect("second pid");
+            assert!(!pid_alive(first_pid));
+            state.dispatch(HostCommand::GracefulStop);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && pid_alive(second_pid) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!pid_alive(second_pid));
+            state.latch_app_exit();
+        });
+    }
+
+    #[test]
+    fn dispatch_reload_while_ready_relaunches_via_exit_51() {
+        let state = HostState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                supervise_loop(&state, None, |ready| {
+                    let _ = tx.send(ready);
+                });
+            });
+            let first = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first ready");
+            let first_pid = state.child_id().expect("first pid");
+            assert!(matches!(
+                state.dispatch(HostCommand::Reload),
+                HostCommandResult::Accepted { .. }
+            ));
+            let second = rx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("second ready after reload");
+            assert_ne!(first.token, second.token);
+            let second_pid = state.child_id().expect("second pid");
+            assert!(!pid_alive(first_pid));
+            state.dispatch(HostCommand::ForceKill);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && pid_alive(second_pid) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(!pid_alive(second_pid));
+            state.latch_app_exit();
         });
     }
 }

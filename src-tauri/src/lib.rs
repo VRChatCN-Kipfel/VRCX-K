@@ -32,6 +32,14 @@ fn get_host_lifecycle(state: tauri::State<HostState>) -> HostLifecycleStateRespo
     }
 }
 
+/// Dispatch a host lifecycle command to the supervisor.
+///
+/// Stable Rust-owned entry point shared by Tauri IPC (`invoke` from the web
+/// view) and, through `HostLifecycleFacade`, the #6 tray router. The verdict
+/// is synchronous (Accepted/Noop/Rejected against the current snapshot);
+/// Accepted commands are executed by the supervisor thread off this caller,
+/// so this command never blocks on host RPC or process teardown. The host
+/// process tree is only ever touched by that supervisor thread.
 #[tauri::command]
 fn dispatch_host_command(
     state: tauri::State<HostState>,
