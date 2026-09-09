@@ -41,6 +41,20 @@ export type AppInfo = {
 export type PathKind = "config" | "data" | "cache" | "temp" | "home"
 
 /**
+ * Dev-watch event pushed host → shell → face (issue #11 wiring). This is a
+ * #11-owned event shape (not a #7 lifecycle DTO): plain camelCase JSON, errors
+ * reduced to strings so kkrpc JSON transport never sees Error objects.
+ */
+export type DevWatchPush = {
+  type: string
+  entryId?: string
+  path?: string
+  status?: string
+  error?: string
+  entries?: string[]
+}
+
+/**
  * Shell (Rust) API exposed to the host — the system capability surface.
  * Mirrors `src-tauri/src/shell_sys.rs` exactly; each nested member maps to a
  * dot-namespaced kkrpc method on the Rust side.
@@ -82,6 +96,8 @@ export type ShellSysAPI = {
       dir(): Promise<Record<PathKind, string>>
       resolve(kind: PathKind): Promise<string>
     }
+    /** Fire-and-forget dev-watch event relay to the shell (which emits `dev-watch` to the face). */
+    devWatchEvent(event: DevWatchPush): Promise<boolean>
   }
 }
 

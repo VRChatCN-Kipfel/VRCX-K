@@ -5,51 +5,37 @@ import { Context } from "cordis"
 import type { Entry } from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
 import Loader from "@cordisjs/plugin-loader"
-import { HOST_VERSION, HOST_RESTART_EXIT } from "./api"
+import { HOST_VERSION } from "./api"
 import { log } from "./log"
 import { ShutdownSignal } from "./signal"
-import { gracefulStopWithTimeout } from "./lifecycle"
-import { connectShellStdio } from "./stdio"
+import { makeRestartRequester } from "./restart"
+import { connectShellStdio, type DevWatchPush } from "./stdio"
 import { listenHostWs } from "./ws"
-import { DevWatch } from "./dev-watch"
+import { DevWatch, type DevWatchEvent } from "./dev-watch"
 
 export { HOST_RESTART_EXIT as EXIT_RESTART } from "./api"
 
 /** How long to wait for the include tree (and its plugin entries) to settle. */
 const INCLUDE_SETTLE_TIMEOUT_MS = 15_000
 
-/**
- * Whole-host restart requester for dev-watch `restart-required` outcomes.
- *
- * Restart storms are capped on the Rust side (#7 stable-window logic), but we
- * still rate-limit per entry here (60s) and add a grace period after startup
- * so an early dev error does not immediately burn a restart. When a shell is
- * attached we reuse the existing exit-51 path (graceful stop, then 51) — the
- * shell supervisor owns the actual restart; we never spawn or supervise.
- */
-function makeRestartRequester(ctx: Context, shellAttached: boolean) {
-  const lastRequest = new Map<string, number>()
-  const startedAt = Date.now()
-  const RATE_LIMIT_MS = 60_000
-  const GRACE_MS = 10_000
-  let restarting = false
-
-  return (info: { entryId: string; error?: unknown }) => {
-    const now = Date.now()
-    const last = lastRequest.get(info.entryId) ?? 0
-    if (now - last < RATE_LIMIT_MS || now - startedAt < GRACE_MS) {
-      log(`dev restart-required ${info.entryId} suppressed (rate limit / startup grace)`)
-      return
+/** Normalize a DevWatchEvent into the JSON-safe wire shape for the shell. */
+function toDevWatchPush(event: DevWatchEvent): DevWatchPush {
+  const base: DevWatchPush = { type: event.type }
+  if (event.type === "reload") {
+    base.entryId = event.entryId
+    base.status = event.result.status
+    if (event.result.error !== undefined) {
+      base.error = event.result.error instanceof Error ? event.result.error.message : String(event.result.error)
     }
-    lastRequest.set(info.entryId, now)
-    log(`dev restart-required ${info.entryId}: ${info.error ? String(info.error) : "unknown error"}`)
-    if (!shellAttached || restarting) return
-    restarting = true
-    log("requesting host restart (exit 51)")
-    void gracefulStopWithTimeout(ctx, "restart").finally(() => {
-      setTimeout(() => process.exit(HOST_RESTART_EXIT), 10)
-    })
+  } else if (event.type === "change" || event.type === "unowned" || event.type === "ambiguous") {
+    base.path = event.path
+    if ("entryIds" in event && event.entryIds) base.entries = event.entryIds
+  } else if (event.type === "config-refreshed") {
+    base.entries = event.entries
+  } else if (event.type === "config-error" || event.type === "watcher-error") {
+    base.error = event.error instanceof Error ? event.error.message : String(event.error)
   }
+  return base
 }
 
 async function readDevMap(): Promise<Record<string, string[]> | undefined> {
@@ -110,6 +96,7 @@ async function bootstrap() {
 
   // ── Dev watcher (issue #11) — strictly opt-in ──────────────────────────
   let devWatch: DevWatch | undefined
+  let pushDevWatch: ((event: DevWatchPush) => void) | undefined
   if (process.env.VRCXK_DEV_WATCH === "1") {
     const include = includeEntry.subtree as unknown as InstanceType<typeof Include>
     if (!include) throw new Error("include subtree unavailable for dev watch")
@@ -121,14 +108,17 @@ async function bootstrap() {
       configFile,
       devMap,
       onState: (event) => {
+        // Structured stderr log always.
         if (event.type === "reload") {
           const { entryId, result } = event
           log(`dev reload ${entryId}: ${result.status}${result.error ? ` (${String(result.error)})` : ""}`)
         } else if (event.type === "config-refreshed") {
           log(`dev config refreshed: ${event.entries.join(", ")}`)
         }
+        // Cross-process relay (host → shell → face) when a shell is attached.
+        pushDevWatch?.(toDevWatchPush(event))
       },
-      onRestartRequired: makeRestartRequester(ctx, shellAttached),
+      onRestartRequired: makeRestartRequester(ctx, { shellAttached }),
     })
     await devWatch.start()
     log(`dev watch enabled (map: ${Object.keys(devMap ?? {}).length} explicit entries)`)
@@ -142,6 +132,16 @@ async function bootstrap() {
   if (process.env.VRCXK_SHELL === "1") {
     const shell = connectShellStdio(ctx)
     await shell.ready(ready)
+    // Bind the dev-watch relay now that the shell API proxy exists. Events
+    // emitted before this point were logged only; the relay is fire-and-forget
+    // so a shell without the handler (or a dropped pipe) never breaks dev.
+    if (devWatch) {
+      pushDevWatch = (event) => {
+        void shell.shell.devWatchEvent(event).catch((error: unknown) => {
+          log(`dev watch push failed: ${String(error)}`)
+        })
+      }
+    }
   }
 }
 
