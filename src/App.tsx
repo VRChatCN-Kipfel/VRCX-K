@@ -4,8 +4,14 @@ import { useEffect, useRef, useState } from "react"
 import { Toaster, toast } from "sonner"
 import "./App.css"
 import { connectHostWs, type HostReady, type HostWsAPI } from "./host"
+import { DevWatchPanel } from "./devWatchPanel"
 
 type Status = "connecting" | "connected" | "reconnecting"
+
+// Dev-only affordance: the dev-watch panel is compiled in dev builds only
+// (`tauri dev`), and additionally requires the Tauri runtime — a bare Vite
+// browser session cannot receive Tauri events.
+const devWatchVisible = import.meta.env.DEV && isTauri()
 
 function statusLabel(status: Status, version: string | null) {
   if (status === "connected" && version) return `已连接（${version}）`
@@ -140,6 +146,7 @@ function App() {
         </button>
         {pingMsg ? <p className="ping">{pingMsg}</p> : null}
       </main>
+      {devWatchVisible ? <DevWatchPanel /> : null}
       <Toaster richColors position="top-right" />
     </>
   )
