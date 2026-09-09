@@ -180,11 +180,10 @@ impl TrayMenuSnapshot {
         if total > MAX_ITEMS {
             return Err("too many items".into());
         }
-        self.groups
-            .retain(|g| g.visible && g.items.iter().any(item_visible));
         for g in &mut self.groups {
             g.items = normalize_items(std::mem::take(&mut g.items));
         }
+        self.groups.retain(|g| g.visible && !g.items.is_empty());
         self.groups
             .sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
         Ok(self)
@@ -211,34 +210,33 @@ fn validate_items(
         if !ids.insert(id.clone()) {
             return Err(format!("duplicate id: {id}"));
         }
-        if visible {
-            match item {
-                TrayItem::Action(v) => {
-                    validate_label(&v.label)?;
-                    validate_action(&v.action, core_owned)?;
-                }
-                TrayItem::Check(v) => {
-                    validate_label(&v.label)?;
-                    validate_action(&v.action, core_owned)?;
-                    if v.radio_group.is_some() {
-                        return Err("check item cannot have radio_group".into());
-                    }
-                }
-                TrayItem::Radio(v) => {
-                    validate_label(&v.label)?;
-                    validate_action(&v.action, core_owned)?;
-                    let g = v
-                        .radio_group
-                        .as_ref()
-                        .ok_or("radio item requires radio_group")?;
-                    *radios.entry(g.clone()).or_default() += usize::from(v.checked);
-                }
-                TrayItem::Submenu(v) => {
-                    validate_label(&v.label)?;
-                    validate_items(&mut v.items, depth + 1, ids, core_owned)?;
-                }
-                TrayItem::Separator(_) => {}
+        match item {
+            TrayItem::Action(v) => {
+                validate_label(&v.label)?;
+                validate_action(&v.action, core_owned)?;
             }
+            TrayItem::Check(v) => {
+                validate_label(&v.label)?;
+                validate_action(&v.action, core_owned)?;
+                if v.radio_group.is_some() {
+                    return Err("check item cannot have radio_group".into());
+                }
+            }
+            TrayItem::Radio(v) => {
+                validate_label(&v.label)?;
+                validate_action(&v.action, core_owned)?;
+                let g = v
+                    .radio_group
+                    .as_ref()
+                    .ok_or("radio item requires radio_group")?;
+                validate_id(g)?;
+                *radios.entry(g.clone()).or_default() += usize::from(v.checked && visible);
+            }
+            TrayItem::Submenu(v) => {
+                validate_label(&v.label)?;
+                count += validate_items(&mut v.items, depth + 1, ids, core_owned)?;
+            }
+            TrayItem::Separator(_) => {}
         }
     }
     if radios.values().any(|checked| *checked > 1) {
@@ -298,7 +296,15 @@ fn item_visible(item: &TrayItem) -> bool {
     *item_meta(item).2
 }
 fn normalize_items(mut items: Vec<TrayItem>) -> Vec<TrayItem> {
-    items.retain(item_visible);
+    for item in &mut items {
+        if let TrayItem::Submenu(submenu) = item {
+            submenu.items = normalize_items(std::mem::take(&mut submenu.items));
+        }
+    }
+    items.retain(|item| {
+        item_visible(item)
+            && !matches!(item, TrayItem::Submenu(submenu) if submenu.items.is_empty())
+    });
     items.sort_by(|a, b| {
         item_meta(a)
             .1
@@ -398,6 +404,31 @@ mod tests {
         snapshot.revision = MAX_SAFE_INTEGER + 1;
         assert!(snapshot.normalize().is_err());
     }
+    #[test]
+    fn rejects_hidden_invalid_subtrees_and_cleans_empty_submenus() {
+        let mut hidden = action("hidden.invalid", 0);
+        if let TrayItem::Action(item) = &mut hidden {
+            item.visible = false;
+            item.action.command = "bad command".into();
+        }
+        assert!(snap(vec![group("host.invalid", 0, vec![hidden])])
+            .normalize()
+            .is_err());
+
+        let empty = TrayItem::Submenu(TraySubmenuItem {
+            id: "empty.submenu".into(),
+            order: 0,
+            label: "Empty".into(),
+            enabled: true,
+            visible: true,
+            items: vec![],
+        });
+        let normalized = snap(vec![group("host.empty", 0, vec![empty])])
+            .normalize()
+            .unwrap();
+        assert!(normalized.groups.is_empty());
+    }
+
     #[test]
     fn rejects_source_target_escalation() {
         let mut host_group = group("host.group", 0, vec![action("host.action", 0)]);
