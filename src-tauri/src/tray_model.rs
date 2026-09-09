@@ -332,6 +332,8 @@ fn normalize_items(mut items: Vec<TrayItem>) -> Vec<TrayItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
     fn action(id: &str, order: i32) -> TrayItem {
         TrayItem::Action(TrayActionItem {
             id: id.into(),
@@ -502,5 +504,332 @@ mod tests {
         .normalize()
         .unwrap();
         assert_eq!(n.groups.len(), 1);
+    }
+
+    fn mk_action(
+        id: &str,
+        command: &str,
+        target: TrayActionTarget,
+        label: &str,
+        args: Vec<Value>,
+    ) -> TrayItem {
+        TrayItem::Action(TrayActionItem {
+            id: id.into(),
+            order: 0,
+            label: label.into(),
+            enabled: true,
+            visible: true,
+            action: TrayAction {
+                target,
+                command: command.into(),
+                args,
+                danger: TrayDanger::Safe,
+                confirm: false,
+            },
+        })
+    }
+
+    #[test]
+    fn rejects_invalid_action_commands_labels_and_arg_limits() {
+        // Empty command.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_action("a", "", TrayActionTarget::Host, "a", vec![])]
+        )])
+        .normalize()
+        .is_err());
+        // Command with characters outside [A-Za-z0-9._-].
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_action(
+                "a",
+                "bad command",
+                TrayActionTarget::Host,
+                "a",
+                vec![]
+            )]
+        )])
+        .normalize()
+        .is_err());
+        // Command longer than 128 chars.
+        let long_command = "x".repeat(129);
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_action(
+                "a",
+                &long_command,
+                TrayActionTarget::Host,
+                "a",
+                vec![]
+            )]
+        )])
+        .normalize()
+        .is_err());
+        // Empty label.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_action(
+                "a",
+                "do.work",
+                TrayActionTarget::Host,
+                "",
+                vec![]
+            )]
+        )])
+        .normalize()
+        .is_err());
+        // Label longer than 256 chars.
+        let long_label = "l".repeat(257);
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_action(
+                "a",
+                "do.work",
+                TrayActionTarget::Host,
+                &long_label,
+                vec![]
+            )]
+        )])
+        .normalize()
+        .is_err());
+        // More than 16 action args.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_action(
+                "a",
+                "do.work",
+                TrayActionTarget::Host,
+                "a",
+                vec![json!(1); 17]
+            )]
+        )])
+        .normalize()
+        .is_err());
+        // 16 args is the boundary and is accepted.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_action(
+                "a",
+                "do.work",
+                TrayActionTarget::Host,
+                "a",
+                vec![json!(1); 16]
+            )]
+        )])
+        .normalize()
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_item_ids_and_cross_group_duplicate_ids() {
+        // Item id with illegal characters.
+        let mut bad = action("bad id", 0);
+        if let TrayItem::Action(v) = &mut bad {
+            v.id = "bad id!".into();
+        }
+        assert!(snap(vec![group("g", 0, vec![bad])]).normalize().is_err());
+        // Item id too long (>128).
+        let mut long = action("x", 0);
+        if let TrayItem::Action(v) = &mut long {
+            v.id = "i".repeat(129);
+        }
+        assert!(snap(vec![group("g", 0, vec![long])]).normalize().is_err());
+        // Duplicate ids across two different groups are rejected (global registry).
+        assert!(snap(vec![
+            group("g1", 0, vec![action("dup", 0)]),
+            group("g2", 1, vec![action("dup", 0)])
+        ])
+        .normalize()
+        .is_err());
+        // Duplicate between an item and its submenu child.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![TrayItem::Submenu(TraySubmenuItem {
+                id: "sub".into(),
+                order: 0,
+                label: "Sub".into(),
+                enabled: true,
+                visible: true,
+                items: vec![action("sub", 0)],
+            })]
+        )])
+        .normalize()
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_excessive_groups_items_and_submenu_depth() {
+        // More than MAX_GROUPS (64) groups.
+        let many: Vec<TrayGroup> = (0..65)
+            .map(|i| group(&format!("g{i}"), i as i32, vec![action("x", 0)]))
+            .collect();
+        assert!(snap(many).normalize().is_err());
+        // Item budget overflow via a single group with 513 top-level items.
+        let overflow: Vec<TrayItem> = (0..513)
+            .map(|i| action(&format!("i{i}"), i as i32))
+            .collect();
+        assert!(snap(vec![group("g", 0, overflow)]).normalize().is_err());
+        // Item budget counts submenu children (500 top + 13 nested = 513).
+        let nested: Vec<TrayItem> = (0..13)
+            .map(|i| action(&format!("n{i}"), i as i32))
+            .collect();
+        let mut parent_items: Vec<TrayItem> = (0..500)
+            .map(|i| action(&format!("t{i}"), (i + 1000) as i32))
+            .collect();
+        parent_items.push(TrayItem::Submenu(TraySubmenuItem {
+            id: "sub".into(),
+            order: 5000,
+            label: "Sub".into(),
+            enabled: true,
+            visible: true,
+            items: nested,
+        }));
+        assert!(snap(vec![group("g", 0, parent_items)]).normalize().is_err());
+        // Depth limit: nesting deeper than MAX_DEPTH (8) is rejected. The
+        // top-level items live at depth 1 and every submenu adds one, so 8
+        // nested submenus (depth 9) is over the limit while 7 is the max.
+        let mut deep = action("leaf", 0);
+        for level in 0..8 {
+            deep = TrayItem::Submenu(TraySubmenuItem {
+                id: format!("depth{level}"),
+                order: 0,
+                label: "Deep".into(),
+                enabled: true,
+                visible: true,
+                items: vec![deep],
+            });
+        }
+        assert!(snap(vec![group("g", 0, vec![deep])]).normalize().is_err());
+        // Depth of exactly MAX_DEPTH (7 nested submenus) is accepted.
+        let mut ok_depth = action("leaf", 0);
+        for level in 0..7 {
+            ok_depth = TrayItem::Submenu(TraySubmenuItem {
+                id: format!("depth{level}"),
+                order: 0,
+                label: "Deep".into(),
+                enabled: true,
+                visible: true,
+                items: vec![ok_depth],
+            });
+        }
+        assert!(snap(vec![group("g", 0, vec![ok_depth])])
+            .normalize()
+            .is_ok());
+    }
+
+    #[test]
+    fn rejects_misused_radio_grouping_and_honors_visibility() {
+        let mk_radio = |id: &str, checked: bool, visible: bool, radio_group: Option<&str>| {
+            TrayItem::Radio(TrayStateItem {
+                id: id.into(),
+                order: 0,
+                label: id.into(),
+                enabled: true,
+                visible,
+                checked,
+                radio_group: radio_group.map(str::to_string),
+                action: TrayAction {
+                    target: TrayActionTarget::Host,
+                    command: "do.work".into(),
+                    args: vec![],
+                    danger: TrayDanger::Safe,
+                    confirm: false,
+                },
+            })
+        };
+        // Check item must not carry a radio_group.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![TrayItem::Check(TrayStateItem {
+                id: "c".into(),
+                order: 0,
+                label: "C".into(),
+                enabled: true,
+                visible: true,
+                checked: false,
+                radio_group: Some("r".into()),
+                action: TrayAction {
+                    target: TrayActionTarget::Host,
+                    command: "do.work".into(),
+                    args: vec![],
+                    danger: TrayDanger::Safe,
+                    confirm: false,
+                },
+            })]
+        )])
+        .normalize()
+        .is_err());
+        // Radio item without a radio_group is rejected.
+        assert!(
+            snap(vec![group("g", 0, vec![mk_radio("r", false, true, None)])])
+                .normalize()
+                .is_err()
+        );
+        // Radio group id must itself be a valid id.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![mk_radio("r", false, true, Some("bad group!"))]
+        )])
+        .normalize()
+        .is_err());
+        // Two visible checked radios in the same group are rejected.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![
+                mk_radio("a", true, true, Some("r")),
+                mk_radio("b", true, true, Some("r"))
+            ]
+        )])
+        .normalize()
+        .is_err());
+        // A hidden checked radio does not count toward exclusivity.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![
+                mk_radio("a", true, true, Some("r")),
+                mk_radio("b", true, false, Some("r"))
+            ]
+        )])
+        .normalize()
+        .is_ok());
+        // Radios in distinct groups never conflict.
+        assert!(snap(vec![group(
+            "g",
+            0,
+            vec![
+                mk_radio("a", true, true, Some("r1")),
+                mk_radio("b", true, true, Some("r2"))
+            ]
+        )])
+        .normalize()
+        .is_ok());
+    }
+
+    #[test]
+    fn group_label_and_invalid_group_ids_are_validated() {
+        // A group label longer than 256 chars is rejected.
+        let mut g = group("g", 0, vec![action("x", 0)]);
+        g.label = Some("l".repeat(257));
+        assert!(snap(vec![g]).normalize().is_err());
+        // A non-core group cannot claim a core.* id.
+        assert!(snap(vec![group("core.window", 0, vec![action("x", 0)])])
+            .normalize()
+            .is_err());
+        // A core group with a host-target action is rejected.
+        let mut cg = group("core.window", 0, vec![action("x", 0)]);
+        cg.source = TraySource::Core;
+        assert!(snap(vec![cg]).normalize().is_err());
     }
 }

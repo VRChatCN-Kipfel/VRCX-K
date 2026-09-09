@@ -297,52 +297,264 @@ fn item_kind(item: &TrayItem) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::same_structure;
+    use super::{find_action, same_structure};
     use crate::tray_model::*;
 
-    fn snapshot(label: &str, checked: bool) -> TrayMenuSnapshot {
+    fn core_action_item(id: &str, order: i32) -> TrayItem {
+        TrayItem::Action(TrayActionItem {
+            id: id.into(),
+            order,
+            label: id.into(),
+            enabled: true,
+            visible: true,
+            action: TrayAction {
+                target: TrayActionTarget::Core,
+                command: "window.show".into(),
+                args: vec![],
+                danger: TrayDanger::Safe,
+                confirm: false,
+            },
+        })
+    }
+
+    fn check_item(id: &str, order: i32, checked: bool) -> TrayItem {
+        TrayItem::Check(TrayStateItem {
+            id: id.into(),
+            order,
+            label: id.into(),
+            enabled: true,
+            visible: true,
+            checked,
+            radio_group: None,
+            action: TrayAction {
+                target: TrayActionTarget::Core,
+                command: "window.show".into(),
+                args: vec![],
+                danger: TrayDanger::Safe,
+                confirm: false,
+            },
+        })
+    }
+
+    fn radio_item(id: &str, order: i32, checked: bool) -> TrayItem {
+        let TrayItem::Check(v) = check_item(id, order, checked) else {
+            unreachable!()
+        };
+        TrayItem::Radio(TrayStateItem {
+            radio_group: Some("group".into()),
+            ..v
+        })
+    }
+
+    fn submenu(id: &str, order: i32, items: Vec<TrayItem>) -> TrayItem {
+        TrayItem::Submenu(TraySubmenuItem {
+            id: id.into(),
+            order,
+            label: id.into(),
+            enabled: true,
+            visible: true,
+            items,
+        })
+    }
+
+    fn separator(id: &str, order: i32) -> TrayItem {
+        TrayItem::Separator(TraySeparator {
+            id: id.into(),
+            order,
+            visible: true,
+        })
+    }
+
+    fn group(id: &str, order: i32, items: Vec<TrayItem>) -> TrayGroup {
+        TrayGroup {
+            id: id.into(),
+            order,
+            label: None,
+            visible: true,
+            source: TraySource::Core,
+            items,
+        }
+    }
+
+    fn snap(groups: Vec<TrayGroup>) -> TrayMenuSnapshot {
         TrayMenuSnapshot {
             schema_version: 1,
             generation: 1,
             revision: 1,
-            groups: vec![TrayGroup {
-                id: "core.test".into(),
-                order: 0,
-                label: None,
-                visible: true,
-                source: TraySource::Core,
-                items: vec![TrayItem::Check(TrayStateItem {
-                    id: "core.test.check".into(),
-                    order: 0,
-                    label: label.into(),
-                    enabled: true,
-                    visible: true,
-                    checked,
-                    radio_group: None,
-                    action: TrayAction {
-                        target: TrayActionTarget::Core,
-                        command: "window.show".into(),
-                        args: vec![],
-                        danger: TrayDanger::Safe,
-                        confirm: false,
-                    },
-                })],
-            }],
+            groups,
         }
+    }
+
+    /// A single-check-item core snapshot with a stable item id.
+    fn check_snap(label: &str, checked: bool) -> TrayMenuSnapshot {
+        let mut snapshot = snap(vec![group(
+            "core.test",
+            0,
+            vec![check_item("core.test.check", 0, checked)],
+        )]);
+        if let TrayItem::Check(v) = &mut snapshot.groups[0].items[0] {
+            v.label = label.into();
+        }
+        snapshot
     }
 
     #[test]
     fn property_changes_patch_but_order_changes_rebuild() {
-        let first = snapshot("First", false);
-        let mut property = snapshot("Second", true);
+        let first = check_snap("First", false);
+        let mut property = check_snap("Second", true);
+        // label/checked are properties → patchable.
         assert!(same_structure(&first, &property));
-        property.groups[0].items[0] = {
-            let mut item = property.groups[0].items[0].clone();
-            if let TrayItem::Check(v) = &mut item {
-                v.order = 2;
-            }
-            item
-        };
+        // order participates in structure → rebuild.
+        if let TrayItem::Check(v) = &mut property.groups[0].items[0] {
+            v.order = 2;
+        }
         assert!(!same_structure(&first, &property));
+    }
+
+    #[test]
+    fn label_enabled_checked_are_patchable_properties() {
+        let base = check_snap("Base", false);
+        assert!(same_structure(&base, &check_snap("Relabeled", false)));
+        assert!(same_structure(&base, &check_snap("Base", true)));
+        let mut disabled = check_snap("Base", false);
+        if let TrayItem::Check(v) = &mut disabled.groups[0].items[0] {
+            v.enabled = false;
+        }
+        assert!(same_structure(&base, &disabled));
+    }
+
+    #[test]
+    fn structure_changes_force_rebuild() {
+        let left = snap(vec![group("g", 0, vec![core_action_item("a", 0)])]);
+
+        // Same id, different kind.
+        let kind = snap(vec![group("g", 0, vec![check_item("a", 0, false)])]);
+        assert!(!same_structure(&left, &kind));
+
+        // Same id/kind, different visibility.
+        let mut hidden = left.clone();
+        if let TrayItem::Action(v) = &mut hidden.groups[0].items[0] {
+            v.visible = false;
+        }
+        assert!(!same_structure(&left, &hidden));
+
+        // Group identity/order/source changes.
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group("other", 0, vec![core_action_item("a", 0)])])
+        ));
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group("g", 1, vec![core_action_item("a", 0)])])
+        ));
+        let mut host_source = left.clone();
+        host_source.groups[0].source = TraySource::Host;
+        assert!(!same_structure(&left, &host_source));
+
+        // Item count / membership changes.
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group(
+                "g",
+                0,
+                vec![core_action_item("a", 0), core_action_item("b", 1)]
+            )])
+        ));
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group("g", 0, vec![core_action_item("b", 0)])])
+        ));
+    }
+
+    #[test]
+    fn structure_recursion_covers_submenu_children() {
+        let nested = |items: Vec<TrayItem>| vec![submenu("sub", 0, items)];
+        let left = snap(vec![group("g", 0, nested(vec![core_action_item("a", 0)]))]);
+
+        // Child label is a property change.
+        let mut relabeled = snap(vec![group("g", 0, nested(vec![core_action_item("a", 0)]))]);
+        if let TrayItem::Action(v) = &mut relabeled.groups[0].items[0] {
+            v.label = "renamed".into();
+        }
+        assert!(same_structure(&left, &relabeled));
+
+        // Child order, kind, removal, and submenu id all force rebuild.
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group("g", 0, nested(vec![core_action_item("a", 1)]))])
+        ));
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group("g", 0, nested(vec![check_item("a", 0, false)]))])
+        ));
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group("g", 0, vec![core_action_item("other", 9)])])
+        ));
+        assert!(!same_structure(
+            &left,
+            &snap(vec![group(
+                "g",
+                0,
+                vec![submenu("renamed-sub", 0, vec![core_action_item("a", 0)])]
+            )])
+        ));
+    }
+
+    #[test]
+    fn find_action_walks_groups_submenus_and_state_items() {
+        let snapshot = snap(vec![group(
+            "core.controls",
+            0,
+            vec![
+                core_action_item("core.window.show", 0),
+                submenu(
+                    "core.developer",
+                    10,
+                    vec![core_action_item("core.devtools.open", 0)],
+                ),
+                check_item("core.option.check", 20, true),
+                radio_item("core.option.radio", 30, false),
+                separator("sep", 40),
+            ],
+        )]);
+        assert_eq!(
+            find_action(&snapshot, "core.window.show").unwrap().command,
+            "window.show"
+        );
+        assert_eq!(
+            find_action(&snapshot, "core.devtools.open").unwrap().target,
+            TrayActionTarget::Core
+        );
+        assert_eq!(
+            find_action(&snapshot, "core.option.check").unwrap().target,
+            TrayActionTarget::Core
+        );
+        assert_eq!(
+            find_action(&snapshot, "core.option.radio").unwrap().target,
+            TrayActionTarget::Core
+        );
+        // Separators and unknown ids carry no action.
+        assert!(find_action(&snapshot, "sep").is_none());
+        assert!(find_action(&snapshot, "missing").is_none());
+    }
+
+    #[test]
+    fn item_helpers_pin_kind_ids_orders_and_visibility() {
+        use super::{item_id, item_kind, item_order, item_visible};
+        let items = [
+            core_action_item("a", 0),
+            check_item("b", 1, false),
+            radio_item("c", 2, false),
+            submenu("d", 3, vec![]),
+            separator("e", 4),
+        ];
+        let kinds: Vec<u8> = items.iter().map(item_kind).collect();
+        assert_eq!(kinds, vec![0, 1, 2, 3, 4]);
+        let ids: Vec<&str> = items.iter().map(item_id).collect();
+        assert_eq!(ids, vec!["a", "b", "c", "d", "e"]);
+        let orders: Vec<i32> = items.iter().map(item_order).collect();
+        assert_eq!(orders, vec![0, 1, 2, 3, 4]);
+        assert!(items.iter().all(|i| item_visible(i)));
     }
 }

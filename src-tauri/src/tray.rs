@@ -504,4 +504,108 @@ mod tests {
                 .enabled
         );
     }
+
+    /// Every action command declared in the core snapshot must be routable by
+    /// `route_core_action`'s allowlist, and every declared action must be
+    /// target=Core or target=App (never target=Host business RPC).
+    #[test]
+    fn core_snapshot_declares_only_routable_allowlisted_commands() {
+        let snapshot = core_snapshot().normalize().unwrap();
+        let group = &snapshot.groups[0];
+        let mut expected: Vec<&str> = vec![
+            "window.show",
+            "window.close",
+            "webview.reload",
+            "host.start",
+            "host.stop.graceful",
+            "host.restart",
+            "host.reload",
+            "app.restart.graceful",
+            "app.quit.graceful",
+            "app.quit.force",
+        ];
+        #[cfg(debug_assertions)]
+        expected.push("devtools.open");
+        expected.sort_unstable();
+
+        let mut commands: Vec<&str> = group
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TrayItem::Action(action) => Some(action.action.command.as_str()),
+                _ => None,
+            })
+            .collect();
+        commands.sort_unstable();
+        assert_eq!(
+            commands, expected,
+            "declared commands must match the router allowlist"
+        );
+
+        // No core item may be a host business RPC action.
+        for item in &group.items {
+            if let TrayItem::Action(action) = item {
+                assert_ne!(
+                    action.action.target,
+                    TrayActionTarget::Host,
+                    "core tray items must never target the host RPC bus"
+                );
+            }
+        }
+    }
+
+    /// Structural invariants of the fixed bottom group: ids are unique and
+    /// `core.`-prefixed, orders are strictly increasing, and every `force`
+    /// command is Destructive with confirmation while graceful commands are
+    /// Safe without confirmation.
+    #[test]
+    fn core_snapshot_ids_unique_orders_increasing_and_danger_semantics() {
+        let snapshot = core_snapshot().normalize().unwrap();
+        let group = &snapshot.groups[0];
+        let mut ids = Vec::new();
+        let mut orders = Vec::new();
+        for item in &group.items {
+            if let TrayItem::Action(action) = item {
+                assert!(
+                    action.id.starts_with("core."),
+                    "id {} must be core.*",
+                    action.id
+                );
+                assert!(
+                    ids.iter().all(|x| *x != action.id),
+                    "duplicate id {}",
+                    action.id
+                );
+                ids.push(action.id.as_str());
+                orders.push(action.order);
+                let force = action.action.command.ends_with("force");
+                assert_eq!(
+                    action.action.danger,
+                    if force {
+                        TrayDanger::Destructive
+                    } else {
+                        TrayDanger::Safe
+                    },
+                    "danger of {} must match force semantics",
+                    action.id
+                );
+                assert_eq!(
+                    action.action.confirm, force,
+                    "confirm of {} must match force",
+                    action.id
+                );
+            }
+        }
+        let mut sorted = orders.clone();
+        sorted.sort_unstable();
+        assert_eq!(orders, sorted, "orders must be strictly increasing");
+        assert_eq!(
+            match group.items.last() {
+                Some(TrayItem::Action(action)) => action.id.as_str(),
+                _ => "",
+            },
+            "core.app.quit.force",
+            "force quit must remain the absolute last item"
+        );
+    }
 }
