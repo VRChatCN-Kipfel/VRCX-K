@@ -31,11 +31,18 @@ const STABLE_WINDOW: Duration = Duration::from_secs(30);
 
 /// Tunable crash/restart storm policy.
 ///
-/// The defaults are the production values; tests may construct a HostState
-/// with a compressed policy (short window, small backoff, lower cap) so the
-/// storm paths are exercised without multi-second sleeps. This is a
-/// configuration surface, not a test-only backdoor: operators could tune the
-/// same values later.
+/// Production defaults (`StormPolicy::default()`):
+/// - `stable_window`: 30s — a host that reaches Ready must stay up this long
+///   before its crash/restart streak is forgiven;
+/// - `initial_backoff` / `max_backoff`: 500ms .. 8s — exponential backoff
+///   between respawn attempts inside a storm;
+/// - `max_failures`: 8 — after this many windowed exits the supervisor parks
+///   in `Failed` until an explicit Start/Restart.
+///
+/// Tests may construct a HostState with a compressed policy (short window,
+/// small backoff, lower cap) so the storm paths are exercised without
+/// multi-second sleeps. This is a configuration surface, not a test-only
+/// backdoor: operators could tune the same values later.
 #[derive(Clone, Copy, Debug)]
 struct StormPolicy {
     stable_window: Duration,
