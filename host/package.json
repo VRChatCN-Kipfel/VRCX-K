@@ -1,9 +1,9 @@
-{
+﻿{
   "name": "@vrcx-k/host",
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "VRCX-K host — Cordis (bun) runtime. The 'brain'.",
+  "description": "VRCX-K host 鈥?Cordis (bun) runtime. The 'brain'.",
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun build --compile src/index.ts --outfile dist/host",
@@ -13,7 +13,11 @@
   "dependencies": {
     "@cordisjs/plugin-include": "1.0.5",
     "@cordisjs/plugin-loader": "1.0.0-rc.6",
+
     "ajv": "^8.20.0",
+
+    "chokidar": "4.0.3",
+
     "cordis": "4.0.0-rc.9",
     "kkrpc": "2.1.0",
     "ws": "^8.21.3"

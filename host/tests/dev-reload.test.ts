@@ -1,0 +1,236 @@
+// Unit tests for dev-reload.ts: cache invalidation + reload state machine
+// with injected fake dependencies (no real Cordis runtime needed).
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { collectCacheKeysUnderRoots, invalidateCache, reloadPluginEntry, type ReloadDeps } from "../src/dev-reload"
+
+const roots: string[] = []
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
+
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "vrcxk-reload-"))
+  roots.push(root)
+  const pluginDir = join(root, "plugins")
+  await Bun.$`mkdir -p ${pluginDir}`.quiet()
+  const entryFile = join(pluginDir, "index.ts")
+  const utilFile = join(pluginDir, "util.ts")
+  await writeFile(entryFile, "export function apply() {}\n")
+  await writeFile(utilFile, "export const v = 1\n")
+  return { root, pluginDir, entryFile, utilFile }
+}
+
+type FiberLike = { uid: number | null; dispose(): Promise<void>; runtime?: { callback?: unknown }; await(): Promise<unknown> }
+
+function fakeEntry(overrides: Partial<{ fiber: FiberLike | null; id: string; config: unknown; root: string }> = {}) {
+  const root = overrides.root ?? "C:/work"
+  let fiber: FiberLike | null = overrides.fiber ?? null
+  const entry = {
+    id: overrides.id ?? "test",
+    options: {
+      id: "test",
+      name: "./plugins/index.ts",
+      config: overrides.config ?? {},
+    },
+    parent: {
+      tree: {
+        ctx: { baseUrl: `file:///${root.replaceAll("\\", "/")}/` },
+      },
+    },
+    getOuterStack: () => [],
+    loader: { unwrapExports: (exports: unknown) => exports },
+    get fiber() {
+      return fiber
+    },
+    set fiber(value: FiberLike | null) {
+      fiber = value
+    },
+  }
+  return entry as unknown as Parameters<typeof reloadPluginEntry>[0]
+}
+
+function makeDeps(overrides: Partial<ReloadDeps> = {}): ReloadDeps {
+  const applyLog: string[] = []
+  return {
+    loadEntryModule: async () => ({ apply: () => {} }),
+    pluginOnEntryCtx: async (_entry, plugin, config) => {
+      const callback = (plugin as { apply?: unknown }).apply ?? plugin
+      void config
+      return {
+        uid: 99,
+        await: async () => {
+          applyLog.push("await")
+          if (typeof callback === "function") {
+            ;(callback as () => void)()
+          } else if (callback && typeof callback === "object") {
+            ;((callback as { apply: () => void }).apply)()
+          }
+        },
+      }
+    },
+    log: () => {},
+    ...overrides,
+  }
+}
+
+describe("collectCacheKeysUnderRoots", () => {
+  test("collects only keys under the given roots (Windows separators folded)", () => {
+    const cache: Record<string, unknown> = {
+      "C:\\work\\plugins\\index.ts": {},
+      "c:/work/plugins/util.ts": {},
+      "C:\\work\\plugins\\sub\\a.ts": {},
+      "C:\\work\\other.ts": {},
+      "C:\\work\\plugins-evil.ts": {},
+    }
+    const keys = collectCacheKeysUnderRoots(["C:\\work\\plugins"], cache)
+    expect(keys.sort()).toEqual(["C:\\work\\plugins\\index.ts", "C:\\work\\plugins\\sub\\a.ts", "c:/work/plugins/util.ts"])
+  })
+
+  test("invalidateCache deletes only the matching keys", () => {
+    const cache: Record<string, unknown> = {
+      "C:\\work\\plugins\\index.ts": {},
+      "C:\\work\\plugins\\util.ts": {},
+      "C:\\work\\node_modules\\x.ts": {},
+    }
+    const dropped = invalidateCache(["C:\\work\\plugins"], cache)
+    expect(dropped).toBe(2)
+    expect(cache["C:\\work\\plugins\\index.ts"]).toBeUndefined()
+    expect(cache["C:\\work\\node_modules\\x.ts"]).toBeDefined()
+  })
+})
+
+describe("reloadPluginEntry state machine", () => {
+  test("returns skipped when the entry has no fiber", async () => {
+    const entry = fakeEntry()
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps())
+    expect(result.status).toBe("skipped")
+  })
+
+  test("keeps old fiber when the fresh import fails (strong rollback)", async () => {
+    const disposeCalls: string[] = []
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() {} },
+      dispose: async () => {
+        disposeCalls.push("dispose")
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
+      loadEntryModule: async () => {
+        throw new Error("syntax error")
+      },
+    }))
+    expect(result.status).toBe("kept-old")
+    expect(result.phase).toBe("import")
+    expect(disposeCalls).toHaveLength(0) // old fiber untouched
+  })
+
+  test("keeps old fiber when the module is not a plugin", async () => {
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() {} },
+      dispose: async () => {
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
+      loadEntryModule: async () => ({ notAPlugin: true }),
+    }))
+    expect(result.status).toBe("kept-old")
+    expect(result.phase).toBe("import")
+  })
+
+  test("restores old module when the new fiber apply fails", async () => {
+    const applyCalls: string[] = []
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() { applyCalls.push("old") } },
+      dispose: async () => {
+        applyCalls.push("dispose")
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    let failOnce = true
+    const deps = makeDeps({
+      loadEntryModule: async () => ({ apply: () => applyCalls.push("new") }),
+      pluginOnEntryCtx: async (_entry, plugin) => {
+        // first call = the new plugin (fails); second call = restore (old callback succeeds)
+        if (failOnce) {
+          failOnce = false
+          const newApply = (plugin as { apply: () => void }).apply
+          return {
+            uid: 2,
+            await: async () => {
+              newApply()
+              throw new Error("apply exploded")
+            },
+          }
+        }
+        return {
+          uid: 3,
+          await: async () => {
+            ;(plugin as { apply: () => void }).apply()
+          },
+        }
+      },
+    })
+    const result = await reloadPluginEntry(entry, ["./plugins"], deps)
+    expect(result.status).toBe("restored-old")
+    expect(result.phase).toBe("swap")
+    expect(applyCalls).toContain("old") // old module restored
+  })
+
+  test("returns restart-required when restore also fails", async () => {
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() {} },
+      dispose: async () => {
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
+      loadEntryModule: async () => ({ apply: () => {} }),
+      pluginOnEntryCtx: async () => {
+        throw new Error("always fails")
+      },
+    }))
+    expect(result.status).toBe("restart-required")
+    expect(result.phase).toBe("swap")
+  })
+
+  test("reloads successfully and swaps entry.fiber", async () => {
+    const calls: string[] = []
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() { calls.push("old-apply") } },
+      dispose: async () => {
+        calls.push("dispose")
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const deps = makeDeps({
+      loadEntryModule: async () => ({ apply: () => calls.push("new-apply") }),
+      pluginOnEntryCtx: async () => ({
+        uid: 5,
+        await: async () => calls.push("new-await"),
+      }),
+    })
+    const result = await reloadPluginEntry(entry, ["./plugins"], deps)
+    expect(result.status).toBe("reloaded")
+    expect(calls).toEqual(["dispose", "new-await"])
+  })
+})
