@@ -5,6 +5,7 @@ mod process_tree;
 mod shell_sys;
 mod tray;
 pub mod tray_model;
+mod tray_renderer;
 mod tray_schema;
 
 use host::{supervise_loop, HostReady, HostState};
@@ -22,9 +23,7 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
-            }
+            let _ = tray::show_main_window(app);
         }));
     }
 
