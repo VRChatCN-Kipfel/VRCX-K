@@ -1,3 +1,7 @@
+use crate::host_lifecycle::{
+    reduce_command, HostCommand, HostCommandResult, HostLifecycleFacade, HostLifecycleState,
+    HostSnapshot,
+};
 use crate::kkrpc_stdio::Peer;
 use crate::process_tree::ProcessTree;
 use crate::shell_sys::register_shell_handlers;
@@ -33,13 +37,14 @@ pub struct HostSession {
     pub ready: HostReady,
 }
 
-#[derive(Default)]
 struct HostInner {
     generation: u64,
+    command_epoch: u64,
     stopping: bool,
     tree: Option<ProcessTree>,
     peer: Option<Arc<Peer>>,
     ready: Option<HostReady>,
+    lifecycle: HostSnapshot,
 }
 
 impl HostInner {
@@ -55,9 +60,52 @@ pub struct HostState {
     inner: Mutex<HostInner>,
 }
 
+impl Default for HostInner {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            command_epoch: 0,
+            stopping: false,
+            tree: None,
+            peer: None,
+            ready: None,
+            lifecycle: HostSnapshot::new(),
+        }
+    }
+}
+
+impl HostLifecycleFacade for HostState {
+    fn snapshot(&self) -> HostSnapshot {
+        self.lifecycle_snapshot()
+    }
+
+    fn dispatch(&self, command: HostCommand) -> HostCommandResult {
+        HostState::dispatch(self, command)
+    }
+}
+
 impl HostState {
     pub fn snapshot(&self) -> Option<HostReady> {
         self.inner.lock().expect("host").ready.clone()
+    }
+
+    pub fn lifecycle_snapshot(&self) -> HostSnapshot {
+        self.inner.lock().expect("host").lifecycle.clone()
+    }
+
+    pub fn dispatch(&self, command: HostCommand) -> HostCommandResult {
+        let mut inner = self.inner.lock().expect("host");
+        let result = reduce_command(&mut inner.lifecycle, command);
+        inner.command_epoch = inner.command_epoch.wrapping_add(1);
+        inner.stopping = matches!(
+            inner.lifecycle.desired,
+            crate::host_lifecycle::HostDesiredState::Stopped
+                | crate::host_lifecycle::HostDesiredState::AppExit
+        );
+        if inner.stopping {
+            inner.command_epoch = inner.command_epoch.wrapping_add(1);
+        }
+        result
     }
 
     pub fn is_stopping(&self) -> bool {
@@ -102,16 +150,24 @@ impl HostState {
         }
     }
 
+    pub fn latch_stop(&self) {
+        let mut inner = self.inner.lock().expect("host");
+        inner.stopping = true;
+        inner.command_epoch = inner.command_epoch.wrapping_add(1);
+        inner.lifecycle.phase = HostLifecycleState::Stopping;
+        inner.lifecycle.desired = crate::host_lifecycle::HostDesiredState::Stopped;
+    }
+
     pub fn request_stop(&self) {
+        self.request_stop_with_timeout(STOP_TIMEOUT);
+    }
+
+    pub fn request_stop_with_timeout(&self, timeout: Duration) {
         // Start one watchdog before writing the RPC. A wedged host must not
-        // receive a fresh 30s child-exit wait after consuming the RPC timeout.
-        let deadline = Instant::now() + STOP_TIMEOUT;
-        let peer = {
-            let mut inner = self.inner.lock().expect("host");
-            inner.stopping = true;
-            inner.generation = inner.generation.wrapping_add(1);
-            inner.peer.clone()
-        };
+        // receive a fresh child-exit wait after consuming the RPC timeout.
+        let deadline = Instant::now() + timeout;
+        self.latch_stop();
+        let peer = self.inner.lock().expect("host").peer.clone();
         if let Some(peer) = peer {
             let _ = peer.call_timeout("stop", vec![], stop_rpc_timeout(deadline));
         }
@@ -168,6 +224,9 @@ impl HostState {
         inner.tree = Some(tree);
         inner.peer = Some(peer);
         inner.ready = None;
+        inner.lifecycle.generation = generation;
+        inner.lifecycle.phase = HostLifecycleState::Starting;
+        inner.lifecycle.pid = inner.tree.as_ref().map(ProcessTree::id);
         Ok(())
     }
 
@@ -177,15 +236,11 @@ impl HostState {
             return Err(());
         }
         inner.ready = Some(ready.clone());
+        inner.lifecycle.phase = HostLifecycleState::Ready;
+        inner.lifecycle.pid = inner.tree.as_ref().map(ProcessTree::id);
+        inner.lifecycle.port = Some(ready.port);
+        inner.lifecycle.last_error = None;
         Ok(ready)
-    }
-
-    fn generation(&self) -> Result<u64, String> {
-        let inner = self.inner.lock().expect("host");
-        if inner.stopping {
-            return Err("stopping".into());
-        }
-        Ok(inner.generation)
     }
 
     fn still_current(&self, generation: u64) -> bool {
@@ -308,8 +363,35 @@ pub fn spawn_host() -> Result<HostSession, String> {
 }
 
 fn spawn_host_into(state: &HostState, app: Option<&AppHandle>) -> Result<HostReady, String> {
-    let generation = state.generation()?;
+    {
+        let mut inner = state.inner.lock().expect("host");
+        if inner.stopping {
+            return Err("stopping".into());
+        }
+        inner.lifecycle.phase = HostLifecycleState::Starting;
+        inner.lifecycle.desired = crate::host_lifecycle::HostDesiredState::Running;
+    }
+    // Allocate the public generation only after the process has spawned and is
+    // ready to be adopted; failed Command::spawn must not consume a generation.
     let starting = start_host_process(app)?;
+    let generation = {
+        let mut inner = state.inner.lock().expect("host");
+        let Some(next_generation) = inner.generation.checked_add(1) else {
+            drop(inner);
+            let mut tree = starting.tree;
+            tree.kill_tree();
+            return Err("host generation exceeds JSON safe integer range".into());
+        };
+        if next_generation > crate::host_lifecycle::MAX_SAFE_INTEGER {
+            drop(inner);
+            let mut tree = starting.tree;
+            tree.kill_tree();
+            return Err("host generation exceeds JSON safe integer range".into());
+        }
+        inner.generation = next_generation;
+        inner.lifecycle.generation = inner.generation;
+        inner.generation
+    };
     let peer = starting.peer.clone();
     if let Err(mut tree) = state.adopt_inflight(generation, starting.tree, peer) {
         tree.kill_tree();

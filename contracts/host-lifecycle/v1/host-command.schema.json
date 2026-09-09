@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vrcx-k.dev/contracts/host-lifecycle/v1/host-command.schema.json",
+  "title": "VRCX-K Host Lifecycle Command",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "command"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "command": {
+      "type": "string",
+      "enum": ["start", "graceful_stop", "force_kill", "restart", "reload"]
+    }
+  }
+}

@@ -1,4 +1,5 @@
 mod host;
+mod host_lifecycle;
 mod kkrpc_stdio;
 mod notify;
 mod process_tree;
@@ -6,11 +7,69 @@ mod shell_sys;
 mod tray;
 
 use host::{supervise_loop, HostReady, HostState};
+use host_lifecycle::{HostCommand, HostCommandResult, HostSnapshot};
+use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Manager, RunEvent};
+
+#[derive(Default)]
+struct AppLifecycle {
+    restart_requested: AtomicBool,
+}
+
+impl AppLifecycle {
+    fn begin_restart(&self) -> Result<(), &'static str> {
+        if self.restart_requested.swap(true, Ordering::AcqRel) {
+            Err("app restart already in progress")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HostLifecycleStateResponse {
+    snapshot: HostSnapshot,
+}
 
 #[tauri::command]
 fn get_host_ready(state: tauri::State<HostState>) -> Option<HostReady> {
     state.snapshot()
+}
+
+#[tauri::command]
+fn get_host_lifecycle(state: tauri::State<HostState>) -> HostLifecycleStateResponse {
+    HostLifecycleStateResponse {
+        snapshot: state.lifecycle_snapshot(),
+    }
+}
+
+#[tauri::command]
+fn dispatch_host_command(
+    state: tauri::State<HostState>,
+    command: HostCommand,
+) -> HostCommandResult {
+    state.dispatch(command)
+}
+
+#[tauri::command]
+fn restart_app_graceful(
+    app: tauri::AppHandle,
+    state: tauri::State<HostState>,
+    lifecycle: tauri::State<AppLifecycle>,
+) -> Result<(), String> {
+    // Latch before returning so duplicate commands and the supervisor both see
+    // the restart intent immediately. Slow graceful cleanup never blocks the
+    // Tauri command thread; request_stop includes the shared deadline/force
+    // fallback before request_restart is invoked.
+    lifecycle.begin_restart().map_err(str::to_owned)?;
+    state.latch_stop();
+    std::thread::spawn(move || {
+        let state = app.state::<HostState>();
+        state.request_stop();
+        app.request_restart();
+    });
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,7 +91,13 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .manage(HostState::default())
-        .invoke_handler(tauri::generate_handler![get_host_ready])
+        .manage(AppLifecycle::default())
+        .invoke_handler(tauri::generate_handler![
+            get_host_ready,
+            get_host_lifecycle,
+            dispatch_host_command,
+            restart_app_graceful
+        ])
         .setup(|app| {
             tray::setup(app.handle())?;
             let handle = app.handle().clone();
@@ -55,4 +120,19 @@ pub fn run() {
                 app.state::<HostState>().request_stop();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_restart_latch_accepts_once_and_rejects_duplicates() {
+        let lifecycle = AppLifecycle::default();
+        assert_eq!(lifecycle.begin_restart(), Ok(()));
+        assert_eq!(
+            lifecycle.begin_restart(),
+            Err("app restart already in progress")
+        );
+    }
 }
