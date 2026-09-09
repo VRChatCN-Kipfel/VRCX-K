@@ -125,6 +125,7 @@ pub enum TrayActionTarget {
     #[default]
     Host,
     Core,
+    App,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -169,7 +170,12 @@ impl TrayMenuSnapshot {
             if let Some(label) = &group.label {
                 validate_label(label)?;
             }
-            total += validate_items(&mut group.items, 1, &mut ids)?;
+            total += validate_items(
+                &mut group.items,
+                1,
+                &mut ids,
+                group.source == TraySource::Core,
+            )?;
         }
         if total > MAX_ITEMS {
             return Err("too many items".into());
@@ -189,6 +195,7 @@ fn validate_items(
     items: &mut [TrayItem],
     depth: usize,
     ids: &mut HashSet<String>,
+    core_owned: bool,
 ) -> Result<usize, String> {
     if depth > MAX_DEPTH {
         return Err("submenu nesting too deep".into());
@@ -208,18 +215,18 @@ fn validate_items(
             match item {
                 TrayItem::Action(v) => {
                     validate_label(&v.label)?;
-                    validate_action(&v.action)?;
+                    validate_action(&v.action, core_owned)?;
                 }
                 TrayItem::Check(v) => {
                     validate_label(&v.label)?;
-                    validate_action(&v.action)?;
+                    validate_action(&v.action, core_owned)?;
                     if v.radio_group.is_some() {
                         return Err("check item cannot have radio_group".into());
                     }
                 }
                 TrayItem::Radio(v) => {
                     validate_label(&v.label)?;
-                    validate_action(&v.action)?;
+                    validate_action(&v.action, core_owned)?;
                     let g = v
                         .radio_group
                         .as_ref()
@@ -228,7 +235,7 @@ fn validate_items(
                 }
                 TrayItem::Submenu(v) => {
                     validate_label(&v.label)?;
-                    validate_items(&mut v.items, depth + 1, ids)?;
+                    validate_items(&mut v.items, depth + 1, ids, core_owned)?;
                 }
                 TrayItem::Separator(_) => {}
             }
@@ -240,7 +247,12 @@ fn validate_items(
     Ok(count)
 }
 
-fn validate_action(action: &TrayAction) -> Result<(), String> {
+fn validate_action(action: &TrayAction, core_owned: bool) -> Result<(), String> {
+    if (!core_owned && action.target != TrayActionTarget::Host)
+        || (core_owned && action.target == TrayActionTarget::Host)
+    {
+        return Err("action target is not allowed for group source".into());
+    }
     if action.command.is_empty()
         || action.command.len() > 128
         || !action
@@ -385,6 +397,22 @@ mod tests {
         snapshot.generation = 0;
         snapshot.revision = MAX_SAFE_INTEGER + 1;
         assert!(snapshot.normalize().is_err());
+    }
+    #[test]
+    fn rejects_source_target_escalation() {
+        let mut host_group = group("host.group", 0, vec![action("host.action", 0)]);
+        if let TrayItem::Action(item) = &mut host_group.items[0] {
+            item.action.target = TrayActionTarget::Core;
+        }
+        assert!(snap(vec![host_group]).normalize().is_err());
+
+        let mut core_group = group("core.window", 0, vec![action("core.window.show", 0)]);
+        core_group.source = TraySource::Core;
+        assert!(snap(vec![core_group.clone()]).normalize().is_err());
+        if let TrayItem::Action(item) = &mut core_group.items[0] {
+            item.action.target = TrayActionTarget::App;
+        }
+        assert!(snap(vec![core_group]).normalize().is_ok());
     }
     #[test]
     fn rejects_multiple_checked_radio_items() {

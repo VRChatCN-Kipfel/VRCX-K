@@ -14,90 +14,145 @@
   "$defs": {
     "TrayGroup": {
       "title": "TrayGroup",
+      "oneOf": [
+        { "$ref": "#/$defs/HostTrayGroup" },
+        { "$ref": "#/$defs/CoreTrayGroup" }
+      ]
+    },
+    "HostTrayGroup": {
+      "title": "HostTrayGroup",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "order", "label", "visible", "source", "items"],
       "properties": {
         "id": { "$ref": "#/$defs/Id" },
-        "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+        "order": { "$ref": "#/$defs/Order" },
         "label": { "type": ["string", "null"], "maxLength": 256 },
         "visible": { "type": "boolean" },
-        "source": { "$ref": "#/$defs/TraySource" },
-        "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/TrayItem" } }
+        "source": { "type": "string", "enum": ["host", "plugin"] },
+        "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/HostOwnedItem" } }
       }
     },
-    "TrayItem": {
-      "title": "TrayItem",
+    "CoreTrayGroup": {
+      "title": "CoreTrayGroup",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "order", "label", "visible", "source", "items"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Id" },
+        "order": { "$ref": "#/$defs/Order" },
+        "label": { "type": ["string", "null"], "maxLength": 256 },
+        "visible": { "type": "boolean" },
+        "source": { "const": "core" },
+        "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/CoreOwnedItem" } }
+      }
+    },
+    "HostOwnedItem": {
+      "title": "HostOwnedItem",
       "oneOf": [
-        { "$ref": "#/$defs/TrayActionItem" },
-        { "$ref": "#/$defs/TrayCheckItem" },
-        { "$ref": "#/$defs/TrayRadioItem" },
-        { "$ref": "#/$defs/TraySubmenuItem" },
+        { "$ref": "#/$defs/HostActionItem" },
+        { "$ref": "#/$defs/HostCheckItem" },
+        { "$ref": "#/$defs/HostRadioItem" },
+        { "$ref": "#/$defs/HostSubmenuItem" },
         { "$ref": "#/$defs/TraySeparator" }
       ]
     },
-    "TrayActionItem": {
-      "title": "TrayActionItem",
+    "CoreOwnedItem": {
+      "title": "CoreOwnedItem",
+      "oneOf": [
+        { "$ref": "#/$defs/CoreActionItem" },
+        { "$ref": "#/$defs/CoreCheckItem" },
+        { "$ref": "#/$defs/CoreRadioItem" },
+        { "$ref": "#/$defs/CoreSubmenuItem" },
+        { "$ref": "#/$defs/TraySeparator" }
+      ]
+    },
+    "HostActionItem": {
+      "title": "HostActionItem",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "action"],
       "properties": {
-        "kind": { "const": "action" },
-        "id": { "$ref": "#/$defs/Id" },
-        "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
-        "label": { "$ref": "#/$defs/Label" },
-        "enabled": { "type": "boolean" },
-        "visible": { "type": "boolean" },
-        "action": { "$ref": "#/$defs/TrayAction" }
+        "kind": { "const": "action" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "action": { "$ref": "#/$defs/HostAction" }
       }
     },
-    "TrayCheckItem": {
-      "title": "TrayCheckItem",
+    "CoreActionItem": {
+      "title": "CoreActionItem",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "order", "label", "enabled", "visible", "action"],
+      "properties": {
+        "kind": { "const": "action" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "action": { "$ref": "#/$defs/CoreAction" }
+      }
+    },
+    "HostCheckItem": {
+      "title": "HostCheckItem",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
       "properties": {
-        "kind": { "const": "check" },
-        "id": { "$ref": "#/$defs/Id" },
-        "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
-        "label": { "$ref": "#/$defs/Label" },
-        "enabled": { "type": "boolean" },
-        "visible": { "type": "boolean" },
-        "checked": { "type": "boolean" },
-        "radioGroup": { "type": ["string", "null"], "maxLength": 128 },
-        "action": { "$ref": "#/$defs/TrayAction" }
+        "kind": { "const": "check" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "checked": { "type": "boolean" }, "radioGroup": { "type": "null" }, "action": { "$ref": "#/$defs/HostAction" }
       }
     },
-    "TrayRadioItem": {
-      "title": "TrayRadioItem",
+    "CoreCheckItem": {
+      "title": "CoreCheckItem",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
       "properties": {
-        "kind": { "const": "radio" },
-        "id": { "$ref": "#/$defs/Id" },
-        "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
-        "label": { "$ref": "#/$defs/Label" },
-        "enabled": { "type": "boolean" },
-        "visible": { "type": "boolean" },
-        "checked": { "type": "boolean" },
-        "radioGroup": { "$ref": "#/$defs/Id" },
-        "action": { "$ref": "#/$defs/TrayAction" }
+        "kind": { "const": "check" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "checked": { "type": "boolean" }, "radioGroup": { "type": "null" }, "action": { "$ref": "#/$defs/CoreAction" }
       }
     },
-    "TraySubmenuItem": {
-      "title": "TraySubmenuItem",
+    "HostRadioItem": {
+      "title": "HostRadioItem",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
+      "properties": {
+        "kind": { "const": "radio" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "checked": { "type": "boolean" }, "radioGroup": { "$ref": "#/$defs/Id" }, "action": { "$ref": "#/$defs/HostAction" }
+      }
+    },
+    "CoreRadioItem": {
+      "title": "CoreRadioItem",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
+      "properties": {
+        "kind": { "const": "radio" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "checked": { "type": "boolean" }, "radioGroup": { "$ref": "#/$defs/Id" }, "action": { "$ref": "#/$defs/CoreAction" }
+      }
+    },
+    "HostSubmenuItem": {
+      "title": "HostSubmenuItem",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "items"],
       "properties": {
-        "kind": { "const": "submenu" },
-        "id": { "$ref": "#/$defs/Id" },
-        "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
-        "label": { "$ref": "#/$defs/Label" },
-        "enabled": { "type": "boolean" },
-        "visible": { "type": "boolean" },
-        "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/TrayItem" } }
+        "kind": { "const": "submenu" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/HostOwnedItem" } }
+      }
+    },
+    "CoreSubmenuItem": {
+      "title": "CoreSubmenuItem",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "order", "label", "enabled", "visible", "items"],
+      "properties": {
+        "kind": { "const": "submenu" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
+        "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/CoreOwnedItem" } }
       }
     },
     "TraySeparator": {
@@ -106,29 +161,36 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "visible"],
       "properties": {
-        "kind": { "const": "separator" },
-        "id": { "$ref": "#/$defs/Id" },
-        "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
-        "visible": { "type": "boolean" }
+        "kind": { "const": "separator" }, "id": { "$ref": "#/$defs/Id" },
+        "order": { "$ref": "#/$defs/Order" }, "visible": { "type": "boolean" }
       }
     },
-    "TrayAction": {
-      "title": "TrayAction",
+    "HostAction": {
+      "title": "HostAction",
       "type": "object",
       "additionalProperties": false,
       "required": ["target", "command", "args", "danger", "confirm"],
       "properties": {
-        "target": { "$ref": "#/$defs/TrayActionTarget" },
-        "command": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
-        "args": { "type": "array", "maxItems": 16, "items": {} },
-        "danger": { "$ref": "#/$defs/TrayDanger" },
-        "confirm": { "type": "boolean" }
+        "target": { "const": "host" }, "command": { "$ref": "#/$defs/Command" },
+        "args": { "$ref": "#/$defs/Args" }, "danger": { "$ref": "#/$defs/TrayDanger" }, "confirm": { "type": "boolean" }
       }
     },
-    "TraySource": { "type": "string", "enum": ["core", "host", "plugin"] },
-    "TrayActionTarget": { "type": "string", "enum": ["host", "core"] },
+    "CoreAction": {
+      "title": "CoreAction",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "command", "args", "danger", "confirm"],
+      "properties": {
+        "target": { "type": "string", "enum": ["core", "app"] }, "command": { "$ref": "#/$defs/Command" },
+        "args": { "$ref": "#/$defs/Args" }, "danger": { "$ref": "#/$defs/TrayDanger" }, "confirm": { "type": "boolean" }
+      }
+    },
+    "TrayActionTarget": { "type": "string", "enum": ["host", "core", "app"] },
     "TrayDanger": { "type": "string", "enum": ["safe", "stateful", "disruptive", "destructive"] },
+    "Args": { "type": "array", "maxItems": 16, "items": {} },
+    "Command": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
     "Id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
-    "Label": { "type": "string", "minLength": 1, "maxLength": 256 }
+    "Label": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "Order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
   }
 }

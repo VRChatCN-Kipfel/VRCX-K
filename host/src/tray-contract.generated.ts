@@ -5,12 +5,18 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
+export type TrayGroup = HostTrayGroup | CoreTrayGroup;
 export type Id = string;
-export type TraySource = "core" | "host" | "plugin";
-export type TrayItem = TrayActionItem | TrayCheckItem | TrayRadioItem | TraySubmenuItem | TraySeparator;
+export type Order = number;
+export type HostOwnedItem = HostActionItem | HostCheckItem | HostRadioItem | HostSubmenuItem | TraySeparator;
 export type Label = string;
-export type TrayActionTarget = "host" | "core";
+export type Command = string;
+/**
+ * @maxItems 16
+ */
+export type Args = unknown[];
 export type TrayDanger = "safe" | "stateful" | "disruptive" | "destructive";
+export type CoreOwnedItem = CoreActionItem | CoreCheckItem | CoreRadioItem | CoreSubmenuItem | TraySeparator;
 
 export interface TrayMenuSnapshot {
   schemaVersion: 1;
@@ -21,73 +27,131 @@ export interface TrayMenuSnapshot {
    */
   groups: TrayGroup[];
 }
-export interface TrayGroup {
+export interface HostTrayGroup {
   id: Id;
-  order: number;
+  order: Order;
   label: string | null;
   visible: boolean;
-  source: TraySource;
+  source: "host" | "plugin";
   /**
    * @maxItems 512
    */
-  items: TrayItem[];
+  items: HostOwnedItem[];
 }
-export interface TrayActionItem {
+export interface HostActionItem {
   kind: "action";
   id: Id;
-  order: number;
+  order: Order;
   label: Label;
   enabled: boolean;
   visible: boolean;
-  action: TrayAction;
+  action: HostAction;
 }
-export interface TrayAction {
-  target: TrayActionTarget;
-  command: string;
-  /**
-   * @maxItems 16
-   */
-  args: unknown[];
+export interface HostAction {
+  target: "host";
+  command: Command;
+  args: Args;
   danger: TrayDanger;
   confirm: boolean;
 }
-export interface TrayCheckItem {
+export interface HostCheckItem {
   kind: "check";
   id: Id;
-  order: number;
+  order: Order;
   label: Label;
   enabled: boolean;
   visible: boolean;
   checked: boolean;
-  radioGroup: string | null;
-  action: TrayAction;
+  radioGroup: null;
+  action: HostAction;
 }
-export interface TrayRadioItem {
+export interface HostRadioItem {
   kind: "radio";
   id: Id;
-  order: number;
+  order: Order;
   label: Label;
   enabled: boolean;
   visible: boolean;
   checked: boolean;
   radioGroup: Id;
-  action: TrayAction;
+  action: HostAction;
 }
-export interface TraySubmenuItem {
+export interface HostSubmenuItem {
   kind: "submenu";
   id: Id;
-  order: number;
+  order: Order;
   label: Label;
   enabled: boolean;
   visible: boolean;
   /**
    * @maxItems 512
    */
-  items: TrayItem[];
+  items: HostOwnedItem[];
 }
 export interface TraySeparator {
   kind: "separator";
   id: Id;
-  order: number;
+  order: Order;
   visible: boolean;
+}
+export interface CoreTrayGroup {
+  id: Id;
+  order: Order;
+  label: string | null;
+  visible: boolean;
+  source: "core";
+  /**
+   * @maxItems 512
+   */
+  items: CoreOwnedItem[];
+}
+export interface CoreActionItem {
+  kind: "action";
+  id: Id;
+  order: Order;
+  label: Label;
+  enabled: boolean;
+  visible: boolean;
+  action: CoreAction;
+}
+export interface CoreAction {
+  target: "core" | "app";
+  command: Command;
+  args: Args;
+  danger: TrayDanger;
+  confirm: boolean;
+}
+export interface CoreCheckItem {
+  kind: "check";
+  id: Id;
+  order: Order;
+  label: Label;
+  enabled: boolean;
+  visible: boolean;
+  checked: boolean;
+  radioGroup: null;
+  action: CoreAction;
+}
+export interface CoreRadioItem {
+  kind: "radio";
+  id: Id;
+  order: Order;
+  label: Label;
+  enabled: boolean;
+  visible: boolean;
+  checked: boolean;
+  radioGroup: Id;
+  action: CoreAction;
+}
+export interface CoreSubmenuItem {
+  kind: "submenu";
+  id: Id;
+  order: Order;
+  label: Label;
+  enabled: boolean;
+  visible: boolean;
+  /**
+   * @maxItems 512
+   */
+  items: CoreOwnedItem[];
 }
