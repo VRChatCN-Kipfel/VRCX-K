@@ -43,7 +43,7 @@
         "order": { "$ref": "#/$defs/Order" },
         "label": { "type": ["string", "null"], "maxLength": 256 },
         "visible": { "type": "boolean" },
-        "source": { "const": "core" },
+        "source": { "type": "string", "enum": ["core"] },
         "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/CoreOwnedItem" } }
       }
     },
@@ -73,7 +73,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "action"],
       "properties": {
-        "kind": { "const": "action" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["action"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "action": { "$ref": "#/$defs/HostAction" }
       }
@@ -84,7 +84,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "action"],
       "properties": {
-        "kind": { "const": "action" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["action"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "action": { "$ref": "#/$defs/CoreAction" }
       }
@@ -95,7 +95,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
       "properties": {
-        "kind": { "const": "check" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["check"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "checked": { "type": "boolean" }, "radioGroup": { "type": "null" }, "action": { "$ref": "#/$defs/HostAction" }
       }
@@ -106,7 +106,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
       "properties": {
-        "kind": { "const": "check" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["check"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "checked": { "type": "boolean" }, "radioGroup": { "type": "null" }, "action": { "$ref": "#/$defs/CoreAction" }
       }
@@ -117,7 +117,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
       "properties": {
-        "kind": { "const": "radio" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["radio"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "checked": { "type": "boolean" }, "radioGroup": { "$ref": "#/$defs/Id" }, "action": { "$ref": "#/$defs/HostAction" }
       }
@@ -128,7 +128,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "checked", "radioGroup", "action"],
       "properties": {
-        "kind": { "const": "radio" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["radio"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "checked": { "type": "boolean" }, "radioGroup": { "$ref": "#/$defs/Id" }, "action": { "$ref": "#/$defs/CoreAction" }
       }
@@ -139,7 +139,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "items"],
       "properties": {
-        "kind": { "const": "submenu" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["submenu"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/HostOwnedItem" } }
       }
@@ -150,7 +150,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "label", "enabled", "visible", "items"],
       "properties": {
-        "kind": { "const": "submenu" }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
+        "kind": { "type": "string", "enum": ["submenu"] }, "id": { "$ref": "#/$defs/Id" }, "order": { "$ref": "#/$defs/Order" },
         "label": { "$ref": "#/$defs/Label" }, "enabled": { "type": "boolean" }, "visible": { "type": "boolean" },
         "items": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/CoreOwnedItem" } }
       }
@@ -161,7 +161,7 @@
       "additionalProperties": false,
       "required": ["kind", "id", "order", "visible"],
       "properties": {
-        "kind": { "const": "separator" }, "id": { "$ref": "#/$defs/Id" },
+        "kind": { "type": "string", "enum": ["separator"] }, "id": { "$ref": "#/$defs/Id" },
         "order": { "$ref": "#/$defs/Order" }, "visible": { "type": "boolean" }
       }
     },
@@ -171,7 +171,7 @@
       "additionalProperties": false,
       "required": ["target", "command", "args", "danger", "confirm"],
       "properties": {
-        "target": { "const": "host" }, "command": { "$ref": "#/$defs/Command" },
+        "target": { "type": "string", "enum": ["host"] }, "command": { "$ref": "#/$defs/Command" },
         "args": { "$ref": "#/$defs/Args" }, "danger": { "$ref": "#/$defs/TrayDanger" }, "confirm": { "type": "boolean" }
       }
     },

@@ -205,13 +205,9 @@ mod tests {
         }]);
         validate_wire_shape(&host_ok).unwrap();
 
-        // KNOWN TYPIFY LIMITATION: the untagged `TrayGroup` oneOf does not
-        // discriminate host-group item targets, so wire validation ACCEPTS a
-        // host group whose action targets core/app. The Rust domain layer
-        // (`tray_model::TrayMenuSnapshot::normalize`) rejects such escalation
-        // (non-core groups only allow target=host), so the semantic gate lives
-        // there. This test pins the wire behavior so a future schema/tooling
-        // change that tightens it is noticed.
+        // Host-group actions must target host only: core/app targets are now
+        // rejected at the wire layer (HostAction.target is a single-value
+        // enum), so privilege escalation cannot ride an untagged oneOf.
         for target in ["core", "app"] {
             let mut escalation = valid_snapshot();
             escalation["groups"] = json!([{
@@ -224,8 +220,8 @@ mod tests {
                 }]
             }]);
             assert!(
-                validate_wire_shape(&escalation).is_ok(),
-                "wire layer currently accepts host group target={target} (typify oneOf limit)"
+                validate_wire_shape(&escalation).is_err(),
+                "host group target={target} must be rejected at the wire layer"
             );
         }
 
@@ -253,19 +249,30 @@ mod tests {
                 "missing {missing} must be rejected"
             );
         }
-        // KNOWN TYPIFY LIMITATION: the untagged `TrayGroup` oneOf also does
-        // not reject an unknown source value at the wire layer. The domain
-        // normalize() layer rejects such groups semantically; this pins the
-        // wire behavior for future tooling changes.
+        // Unknown source values are rejected at the wire layer: host/plugin
+        // groups validate against the two-value source enum and core groups
+        // against the single-value core enum, so no unknown source can match.
         let mut bad_source = valid_snapshot();
         bad_source["groups"] = json!([{
             "id": "g", "order": 0, "label": null, "visible": true, "source": "kernel",
             "items": []
         }]);
         assert!(
-            validate_wire_shape(&bad_source).is_ok(),
-            "wire layer currently accepts unknown source (typify oneOf limit)"
+            validate_wire_shape(&bad_source).is_err(),
+            "unknown source must be rejected at the wire layer"
         );
+        // plugin groups remain valid (two-value host/plugin enum preserved).
+        let mut plugin_ok = valid_snapshot();
+        plugin_ok["groups"] = json!([{
+            "id": "plugin.g", "order": 0, "label": null, "visible": true, "source": "plugin",
+            "items": [{
+                "kind": "action", "id": "plugin.a", "order": 0, "label": "A",
+                "enabled": true, "visible": true,
+                "action": { "target": "host", "command": "do.work", "args": [],
+                            "danger": "safe", "confirm": false }
+            }]
+        }]);
+        validate_wire_shape(&plugin_ok).unwrap();
     }
 
     #[test]
@@ -294,5 +301,91 @@ mod tests {
         let mut no_gen = valid_snapshot();
         no_gen.as_object_mut().unwrap().remove("generation");
         assert!(validate_wire_shape(&no_gen).is_err());
+    }
+
+    /// Wire-layer source/target matrix: escalation is rejected in both
+    /// directions and nested (submenu) items are covered by the recursion of
+    /// the generated item types.
+    #[test]
+    fn wire_layer_enforces_source_target_ownership_matrix() {
+        let snapshot = |source: &str, target: &str| {
+            json!({
+                "schemaVersion": 1, "generation": 0, "revision": 0,
+                "groups": [{
+                    "id": format!("{source}.g"), "order": 0, "label": null,
+                    "visible": true, "source": source,
+                    "items": [{
+                        "kind": "action", "id": format!("{source}.a"), "order": 0,
+                        "label": "A", "enabled": true, "visible": true,
+                        "action": { "target": target, "command": "do.work", "args": [],
+                                    "danger": "safe", "confirm": false }
+                    }]
+                }]
+            })
+        };
+        // Legal pairs pass; escalation fails.
+        for (source, target) in [
+            ("core", "core"),
+            ("core", "app"),
+            ("host", "host"),
+            ("plugin", "host"),
+        ] {
+            assert!(
+                validate_wire_shape(&snapshot(source, target)).is_ok(),
+                "{source} group with {target} action must pass"
+            );
+        }
+        for (source, target) in [
+            ("core", "host"),
+            ("host", "core"),
+            ("host", "app"),
+            ("plugin", "core"),
+            ("plugin", "app"),
+        ] {
+            assert!(
+                validate_wire_shape(&snapshot(source, target)).is_err(),
+                "{source} group with {target} action must be rejected"
+            );
+        }
+        // A core group with an app-target action nested inside a submenu also
+        // fails: item recursion is strict per level.
+        let nested = json!({
+            "schemaVersion": 1, "generation": 0, "revision": 0,
+            "groups": [{
+                "id": "host.g", "order": 0, "label": null, "visible": true, "source": "host",
+                "items": [{
+                    "kind": "submenu", "id": "host.sub", "order": 0, "label": "Sub",
+                    "enabled": true, "visible": true,
+                    "items": [{
+                        "kind": "action", "id": "host.sub.a", "order": 0, "label": "A",
+                        "enabled": true, "visible": true,
+                        "action": { "target": "app", "command": "do.work", "args": [],
+                                    "danger": "safe", "confirm": false }
+                    }]
+                }]
+            }]
+        });
+        assert!(
+            validate_wire_shape(&nested).is_err(),
+            "host submenu containing an app-target action must be rejected"
+        );
+        // The same nesting inside a core group is legal (core owns app items).
+        let nested_core = json!({
+            "schemaVersion": 1, "generation": 0, "revision": 0,
+            "groups": [{
+                "id": "core.g", "order": 0, "label": null, "visible": true, "source": "core",
+                "items": [{
+                    "kind": "submenu", "id": "core.sub", "order": 0, "label": "Sub",
+                    "enabled": true, "visible": true,
+                    "items": [{
+                        "kind": "action", "id": "core.sub.a", "order": 0, "label": "A",
+                        "enabled": true, "visible": true,
+                        "action": { "target": "app", "command": "do.work", "args": [],
+                                    "danger": "safe", "confirm": false }
+                    }]
+                }]
+            }]
+        });
+        validate_wire_shape(&nested_core).unwrap();
     }
 }
