@@ -116,10 +116,12 @@ describe("HostWatcher", () => {
   test("close prevents pending callbacks and is idempotent", async () => {
     const { root, entry, pluginRoot } = await fixture()
     let callbackCount = 0
+    const events: WatcherEvent[] = []
     const watcher = new HostWatcher({
       roots: [root],
       debounceMs: 100,
       bindings: [binding("plugin", entry, [pluginRoot])],
+      onEvent: (event) => events.push(event),
       onChange: () => { callbackCount++ },
     })
     await watcher.start()
@@ -129,5 +131,6 @@ describe("HostWatcher", () => {
     await new Promise((resolve) => setTimeout(resolve, 150))
     expect(callbackCount).toBe(0)
     expect(watcher.getWatched()).toEqual({})
+    expect(events.filter((event) => event.type === "closed")).toHaveLength(1)
   })
 })

@@ -25,6 +25,8 @@ export class HostWatcher {
   private pending = new Set<string>()
   private closed = false
   private flushing?: Promise<void>
+  private closing?: Promise<void>
+  private closedEventEmitted = false
   private readonly bindings = new Map<string, EntryBinding>()
   private readonly debounceMs: number
 
@@ -103,16 +105,27 @@ export class HostWatcher {
   }
 
   async close() {
+    if (this.closing) return this.closing
     if (this.closed && !this.watcher && !this.flushing) return
-    this.closed = true
-    if (this.timer) clearTimeout(this.timer)
-    this.timer = undefined
-    this.pending.clear()
-    const watcher = this.watcher
-    this.watcher = undefined
-    if (watcher) await watcher.close()
-    await this.flushing
-    this.options.onEvent?.({ type: "closed" })
+    this.closing = (async () => {
+      this.closed = true
+      if (this.timer) clearTimeout(this.timer)
+      this.timer = undefined
+      this.pending.clear()
+      const watcher = this.watcher
+      this.watcher = undefined
+      if (watcher) await watcher.close()
+      await this.flushing
+      if (!this.closedEventEmitted) {
+        this.closedEventEmitted = true
+        this.options.onEvent?.({ type: "closed" })
+      }
+    })()
+    try {
+      await this.closing
+    } finally {
+      this.closing = undefined
+    }
   }
 
   async dispose() {
