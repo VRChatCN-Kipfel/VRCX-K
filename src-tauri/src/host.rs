@@ -162,6 +162,7 @@ impl HostState {
         self.latch_desired(crate::host_lifecycle::HostDesiredState::AppExit);
     }
 
+    #[cfg(test)]
     pub fn request_stop(&self) {
         self.request_stop_with_timeout(STOP_TIMEOUT);
     }
@@ -173,6 +174,7 @@ impl HostState {
         );
     }
 
+    #[cfg(test)]
     pub fn request_stop_with_timeout(&self, timeout: Duration) {
         self.request_stop_with_desired(timeout, crate::host_lifecycle::HostDesiredState::Stopped);
     }

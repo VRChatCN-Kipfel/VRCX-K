@@ -73,6 +73,8 @@ fn dispatch_app_command(
             });
         }
         AppCommand::QuitForce => {
+            // Force quit is allowed to escalate an in-flight graceful worker;
+            // taking and killing the tree makes that worker observe no child.
             state.force_app_exit();
             app.exit(0);
         }
@@ -123,9 +125,37 @@ pub fn run() {
     builder
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-                app.state::<HostState>().request_stop();
+        .run(|app, event| match event {
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                // An OS/user exit not initiated by dispatch_app_command enters
+                // the same Rust-owned graceful path. Prevent this first exit;
+                // the worker calls app.exit(0) only after stop/force cleanup.
+                let request = AppCommandRequest {
+                    schema_version: app_lifecycle::APP_LIFECYCLE_SCHEMA_VERSION,
+                    command: AppCommand::QuitGraceful,
+                };
+                let lifecycle = app.state::<AppLifecycle>();
+                if matches!(
+                    lifecycle.dispatch(request),
+                    AppCommandResult::Accepted { .. }
+                ) {
+                    api.prevent_exit();
+                    app.state::<HostState>().latch_app_exit();
+                    let exit_app = app.clone();
+                    std::thread::spawn(move || {
+                        let state = exit_app.state::<HostState>();
+                        state.request_app_exit_graceful();
+                        exit_app.exit(0);
+                    });
+                }
             }
+            RunEvent::Exit => {
+                // Final non-blocking safety net only. Explicit/OS graceful
+                // paths already reaped the child; force quit already took it.
+                app.state::<HostState>().latch_app_exit();
+            }
+            _ => {}
         });
 }

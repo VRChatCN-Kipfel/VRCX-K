@@ -77,18 +77,31 @@ impl AppLifecycle {
             AppCommand::QuitGraceful => AppIntent::Quitting,
             AppCommand::QuitForce => AppIntent::ForceQuitting,
         };
-        match self.intent.compare_exchange(
-            AppIntent::Running as u8,
-            next as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => AppCommandResult::Accepted { command },
-            Err(current) if current == next as u8 => AppCommandResult::Noop { command },
-            Err(_) => AppCommandResult::Rejected {
-                command,
-                reason: "another application lifecycle command is in progress".into(),
-            },
+        loop {
+            let current = self.intent.load(Ordering::Acquire);
+            if current == next as u8 {
+                return AppCommandResult::Noop { command };
+            }
+            // Force quit is an emergency escape hatch and may always escalate a
+            // graceful restart/quit. The in-flight graceful worker is fenced by
+            // HostState's AppExit latch/process-tree take and becomes harmless.
+            let may_transition = current == AppIntent::Running as u8
+                || (next == AppIntent::ForceQuitting && current != AppIntent::ForceQuitting as u8);
+            if !may_transition {
+                return AppCommandResult::Rejected {
+                    command,
+                    reason: "another application lifecycle command is in progress".into(),
+                };
+            }
+            match self.intent.compare_exchange(
+                current,
+                next as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return AppCommandResult::Accepted { command },
+                Err(_) => continue,
+            }
         }
     }
 }
@@ -140,6 +153,27 @@ mod tests {
         assert!(matches!(
             lifecycle.begin(AppCommand::RestartGraceful),
             AppCommandResult::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn force_quit_escalates_graceful_intent() {
+        let lifecycle = AppLifecycle::default();
+        assert!(matches!(
+            lifecycle.begin(AppCommand::QuitGraceful),
+            AppCommandResult::Accepted { .. }
+        ));
+        assert!(matches!(
+            lifecycle.begin(AppCommand::QuitForce),
+            AppCommandResult::Accepted {
+                command: AppCommand::QuitForce
+            }
+        ));
+        assert!(matches!(
+            lifecycle.begin(AppCommand::QuitForce),
+            AppCommandResult::Noop {
+                command: AppCommand::QuitForce
+            }
         ));
     }
 }
