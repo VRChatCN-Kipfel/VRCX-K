@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vrcx-k.dev/contracts/host-lifecycle/v1/host-lifecycle.schema.json",
+  "title": "VRCX-K Host Lifecycle Snapshot",
+  "description": "Versioned Rust shell ↔ host lifecycle DTO. Tokens are intentionally excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generation",
+    "phase",
+    "desired",
+    "pid",
+    "port",
+    "attempt",
+    "nextRetryMs",
+    "lastExit",
+    "lastError"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generation": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "phase": { "$ref": "#/$defs/hostLifecycleState" },
+    "desired": { "$ref": "#/$defs/hostDesiredState" },
+    "pid": { "type": ["integer", "null"], "minimum": 0 },
+    "port": { "type": ["integer", "null"], "minimum": 0, "maximum": 65535 },
+    "attempt": { "type": "integer", "minimum": 0 },
+    "nextRetryMs": { "type": ["integer", "null"], "minimum": 0 },
+    "lastExit": { "anyOf": [{ "$ref": "#/$defs/hostExitSummary" }, { "type": "null" }] },
+    "lastError": { "type": ["string", "null"], "maxLength": 4096 }
+  },
+  "$defs": {
+    "hostLifecycleState": {
+      "type": "string",
+      "enum": ["stopped", "starting", "ready", "stopping", "backoff", "failed"]
+    },
+    "hostDesiredState": {
+      "type": "string",
+      "enum": ["running", "stopped", "app_exit"]
+    },
+    "hostCommand": {
+      "type": "string",
+      "enum": ["start", "graceful_stop", "force_kill", "restart", "reload"]
+    },
+    "hostExitSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "signal", "kind"],
+      "properties": {
+        "code": { "type": ["integer", "null"] },
+        "signal": { "type": ["string", "null"], "maxLength": 64 },
+        "kind": { "type": "string", "enum": ["restart_requested", "stopped", "crashed"] }
+      }
+    },
+    "hostCommandResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "generation"],
+          "properties": {
+            "kind": { "const": "accepted" },
+            "generation": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "phase"],
+          "properties": {
+            "kind": { "const": "noop" },
+            "phase": { "$ref": "#/$defs/hostLifecycleState" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "phase", "reason"],
+          "properties": {
+            "kind": { "const": "rejected" },
+            "phase": { "$ref": "#/$defs/hostLifecycleState" },
+            "reason": { "type": "string", "maxLength": 4096 }
+          }
+        }
+      ]
+    }
+  }
+}
