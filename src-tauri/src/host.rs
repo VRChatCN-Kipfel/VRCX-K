@@ -1212,13 +1212,15 @@ fn find_packaged_host(resource_dir: &Path) -> Option<PathBuf> {
 ///    VRCXK_HOST_DIR overrides kept).
 fn resolve_host_launch(app: Option<&AppHandle>) -> Result<HostLaunch, String> {
     let explicit = std::env::var("VRCXK_HOST_BIN").ok().map(PathBuf::from);
-    resolve_host_launch_with(app, explicit)
+    let cwd_override = std::env::var_os("VRCXK_HOST_DIR").map(PathBuf::from);
+    resolve_host_launch_with(app, explicit, cwd_override)
 }
 
-/// Pure core of `resolve_host_launch` (env value passed in for testability).
+/// Pure core of `resolve_host_launch` (env values passed in for testability).
 fn resolve_host_launch_with(
     app: Option<&AppHandle>,
     explicit: Option<PathBuf>,
+    cwd_override: Option<PathBuf>,
 ) -> Result<HostLaunch, String> {
     // 1. Explicit compiled override (fail fast).
     if let Some(program) = explicit {
@@ -1229,17 +1231,15 @@ fn resolve_host_launch_with(
             ));
         }
         // Runtime files (cordis.yml/plugins) resolve via cwd. Default to the
-        // binary's directory (packaged layout); VRCXK_HOST_DIR overrides for
-        // debug runs against a source tree with the runtime files in place.
-        let cwd = std::env::var_os("VRCXK_HOST_DIR")
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(|| {
-                program
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("."))
-            });
+        // binary's directory (packaged layout); the dir override (from
+        // VRCXK_HOST_DIR) redirects debug runs to a tree holding the runtime
+        // files, but only when that directory actually exists.
+        let cwd = cwd_override.filter(|p| p.is_dir()).unwrap_or_else(|| {
+            program
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
         return Ok(HostLaunch::compiled(program, cwd));
     }
 
@@ -1839,17 +1839,37 @@ mod tests {
     fn resolve_host_launch_uses_explicit_bin_with_fail_fast() {
         // Present override -> compiled launch rooted at its parent dir.
         let dir = fake_resource_dir(&["custom-host.exe"]);
-        let launch = resolve_host_launch_with(None, Some(dir.join("custom-host.exe")))
+        let launch = resolve_host_launch_with(None, Some(dir.join("custom-host.exe")), None)
             .expect("explicit bin resolves");
         assert_eq!(launch.program, dir.join("custom-host.exe"));
         assert_eq!(launch.cwd, dir);
         assert!(launch.args.is_empty());
 
         // Missing override -> fast error, no silent fallback.
-        let err = resolve_host_launch_with(None, Some(dir.join("nope.exe")))
+        let err = resolve_host_launch_with(None, Some(dir.join("nope.exe")), None)
             .expect_err("missing bin must fail");
         assert!(err.contains("VRCXK_HOST_BIN"), "{err}");
         let _ = dir;
+    }
+
+    #[test]
+    fn resolve_host_launch_honors_cwd_override_only_when_it_exists() {
+        let bin_dir = fake_resource_dir(&["custom-host.exe"]);
+        let runtime_dir = fake_resource_dir(&["cordis.yml"]);
+        let program = bin_dir.join("custom-host.exe");
+
+        // Existing runtime dir override wins over the binary's directory.
+        let launch =
+            resolve_host_launch_with(None, Some(program.clone()), Some(runtime_dir.clone()))
+                .expect("resolves");
+        assert_eq!(launch.cwd, runtime_dir);
+
+        // A non-existent override is ignored (falls back to bin dir).
+        let missing = runtime_dir.join("does-not-exist");
+        let launch =
+            resolve_host_launch_with(None, Some(program.clone()), Some(missing)).expect("resolves");
+        assert_eq!(launch.cwd, bin_dir);
+        let _ = (bin_dir, runtime_dir);
     }
 
     #[test]
@@ -1857,9 +1877,44 @@ mod tests {
         // No override and no AppHandle -> dev source launch (bun).
         // Requires the checked-out host/ tree (same precondition as the
         // existing spawn tests).
-        let launch = resolve_host_launch_with(None, None).expect("dev source resolves");
+        let launch = resolve_host_launch_with(None, None, None).expect("dev source resolves");
         assert!(!launch.args.is_empty(), "source launch runs src/index.ts");
         assert_eq!(launch.args[0], "src/index.ts");
         assert!(launch.cwd.join("src/index.ts").is_file());
+    }
+
+    // --- remaining supervisor branch coverage ------------------------------
+
+    #[test]
+    fn note_exit_window_boundary_is_inclusive() {
+        // Just inside the window (elapsed < window) -> counts; just outside
+        // (elapsed >= window) -> forgiven. Exercises the >= boundary exactly.
+        let state = storm_state(Duration::from_millis(100), 8);
+        // 99ms elapsed of a 100ms window: inside -> 51 counts.
+        force_ready_at(&state, Instant::now() - Duration::from_millis(99));
+        assert!(state.note_exit(true), "inside window counts and backs off");
+        assert_eq!(state.fail_streak(), 1);
+        // 100ms elapsed == window: outside -> forgiven, no count.
+        force_ready_at(&state, Instant::now() - Duration::from_millis(100));
+        assert!(!state.note_exit(true), "at window edge 51 is legitimate");
+        assert_eq!(state.fail_streak(), 0);
+    }
+
+    #[test]
+    fn host_reload_without_peer_records_last_error() {
+        // Reload executed when no Ready host/peer exists must not panic and
+        // must surface the failure on the snapshot.
+        let state = HostState::default();
+        state.host_reload();
+        let snapshot = state.lifecycle_snapshot();
+        assert!(
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("reload requested without a ready host"),
+            "unexpected last_error: {:?}",
+            snapshot.last_error
+        );
     }
 }

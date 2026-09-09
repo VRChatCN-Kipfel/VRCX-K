@@ -344,4 +344,90 @@ mod tests {
             Err("host generation exceeds JSON safe integer range")
         );
     }
+
+    /// Every (command, phase) verdict of the reducer, derived directly from
+    /// the match arms in `reduce_command`. Guards against accidental future
+    /// drift in any cell of the state machine.
+    #[test]
+    fn reducer_full_command_phase_matrix() {
+        use HostCommand::{ForceKill, GracefulStop, Reload, Restart, Start};
+        use HostLifecycleState::*;
+
+        // (command, phase, expected verdict kind, phase after, desired after)
+        // Desired states are written fully qualified: `Stopped`/`Running` are
+        // also lifecycle phase names, so bare names would be ambiguous.
+        use HostDesiredState::{Running, Stopped as DesiredStopped};
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(
+            HostCommand,
+            HostLifecycleState,
+            &str,
+            HostLifecycleState,
+            HostDesiredState,
+        )> = vec![
+            // Start
+            (Start, Stopped, "accepted", Starting, Running),
+            (Start, Starting, "noop", Starting, Running),
+            (Start, Ready, "noop", Ready, Running),
+            (Start, Stopping, "rejected", Stopping, Running),
+            (Start, Backoff, "accepted", Starting, Running),
+            (Start, Failed, "accepted", Starting, Running),
+            // GracefulStop
+            (GracefulStop, Stopped, "noop", Stopped, Running),
+            (GracefulStop, Starting, "accepted", Stopping, DesiredStopped),
+            (GracefulStop, Ready, "accepted", Stopping, DesiredStopped),
+            (GracefulStop, Stopping, "noop", Stopping, Running),
+            (GracefulStop, Backoff, "accepted", Stopping, DesiredStopped),
+            (GracefulStop, Failed, "rejected", Failed, Running),
+            // ForceKill
+            (ForceKill, Stopped, "noop", Stopped, Running),
+            (ForceKill, Starting, "accepted", Stopping, DesiredStopped),
+            (ForceKill, Ready, "accepted", Stopping, DesiredStopped),
+            (ForceKill, Stopping, "accepted", Stopping, DesiredStopped),
+            (ForceKill, Backoff, "noop", Backoff, Running),
+            (ForceKill, Failed, "noop", Failed, Running),
+            // Restart
+            (Restart, Stopped, "accepted", Starting, Running),
+            (Restart, Starting, "noop", Starting, Running),
+            (Restart, Ready, "accepted", Starting, Running),
+            (Restart, Stopping, "rejected", Stopping, Running),
+            (Restart, Backoff, "accepted", Starting, Running),
+            (Restart, Failed, "accepted", Starting, Running),
+            // Reload
+            (Reload, Stopped, "rejected", Stopped, Running),
+            (Reload, Starting, "rejected", Starting, Running),
+            (Reload, Ready, "accepted", Ready, Running),
+            (Reload, Stopping, "rejected", Stopping, Running),
+            (Reload, Backoff, "rejected", Backoff, Running),
+            (Reload, Failed, "rejected", Failed, Running),
+        ];
+
+        for (command, phase, kind, phase_after, desired_after) in cases {
+            let mut snapshot = HostSnapshot::new();
+            snapshot.phase = phase;
+            snapshot.desired = Running;
+            let result = reduce_command(&mut snapshot, command);
+            let actual_kind = match &result {
+                HostCommandResult::Accepted { .. } => "accepted",
+                HostCommandResult::Noop { .. } => "noop",
+                HostCommandResult::Rejected { .. } => "rejected",
+            };
+            assert_eq!(
+                actual_kind, kind,
+                "verdict mismatch for {command:?} from {phase:?}"
+            );
+            // A Noop/Rejected verdict must not mutate the snapshot's phase;
+            // Accepted cells set their documented phase/desired.
+            assert_eq!(
+                snapshot.phase, phase_after,
+                "phase after {command:?} from {phase:?} differs"
+            );
+            assert_eq!(
+                snapshot.desired, desired_after,
+                "desired after {command:?} from {phase:?} differs"
+            );
+            // generation must never be advanced by the reducer itself.
+            assert_eq!(snapshot.generation, 0, "reducer must not bump generation");
+        }
+    }
 }

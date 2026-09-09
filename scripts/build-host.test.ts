@@ -55,4 +55,20 @@ describe("target triple resolution", () => {
     },
     30_000, // first rustc invocation can be a slow cold start on Windows
   )
+
+  test("fails fast when no triple source is available", () => {
+    const previousEnv = process.env.TAURI_ENV_TARGET_TRIPLE
+    const previousPath = process.env.PATH
+    try {
+      delete process.env.TAURI_ENV_TARGET_TRIPLE
+      // Empty PATH: the rustc probe cannot find the compiler.
+      process.env.PATH = ""
+      expect(() => resolveTargetTriple()).toThrow(/cannot resolve target triple/)
+    } finally {
+      if (previousEnv !== undefined) process.env.TAURI_ENV_TARGET_TRIPLE = previousEnv
+      else delete process.env.TAURI_ENV_TARGET_TRIPLE
+      if (previousPath !== undefined) process.env.PATH = previousPath
+      else delete process.env.PATH
+    }
+  })
 })

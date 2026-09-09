@@ -176,4 +176,59 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn facade_dispatch_rejects_unsupported_schema_version() {
+        // The facade (used by the tray router / IPC) validates the versioned
+        // request envelope before latching anything.
+        let lifecycle = AppLifecycle::default();
+        let request = AppCommandRequest {
+            schema_version: APP_LIFECYCLE_SCHEMA_VERSION + 1,
+            command: AppCommand::QuitForce,
+        };
+        let result = AppLifecycleFacade::dispatch(&lifecycle, request);
+        assert!(matches!(
+            result,
+            AppCommandResult::Rejected {
+                command: AppCommand::QuitForce,
+                ..
+            }
+        ));
+        // Rejected before latching: a valid request afterwards is Accepted.
+        let ok = AppCommandRequest {
+            schema_version: APP_LIFECYCLE_SCHEMA_VERSION,
+            command: AppCommand::QuitGraceful,
+        };
+        assert!(matches!(
+            AppLifecycleFacade::dispatch(&lifecycle, ok),
+            AppCommandResult::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn force_quit_escalates_restart_in_progress_and_graceful_conflicts_stay_rejected() {
+        let lifecycle = AppLifecycle::default();
+        // Restart in progress…
+        assert!(matches!(
+            lifecycle.begin(AppCommand::RestartGraceful),
+            AppCommandResult::Accepted { .. }
+        ));
+        // …a different graceful command conflicts…
+        assert!(matches!(
+            lifecycle.begin(AppCommand::QuitGraceful),
+            AppCommandResult::Rejected { .. }
+        ));
+        // …but force quit is the emergency escape hatch and escalates…
+        assert!(matches!(
+            lifecycle.begin(AppCommand::QuitForce),
+            AppCommandResult::Accepted {
+                command: AppCommand::QuitForce
+            }
+        ));
+        // …after which restart cannot be started again (force is terminal).
+        assert!(matches!(
+            lifecycle.begin(AppCommand::RestartGraceful),
+            AppCommandResult::Rejected { .. }
+        ));
+    }
 }
