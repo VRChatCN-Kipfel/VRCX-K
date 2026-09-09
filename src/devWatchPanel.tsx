@@ -18,61 +18,31 @@
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
+import {
+  appendLog,
+  MAX_LOG,
+  summarize,
+  toastPlan,
+  type DevWatchLog,
+  type DevWatchPush,
+} from "./devWatchCore"
 
-/** Wire shape relayed by host/src/stdio.ts `DevWatchPush`. */
-export type DevWatchPush = {
-  type: string
-  entryId?: string
-  path?: string
-  status?: string
-  error?: string
-  entries?: string[]
-}
-
-/** One received event kept in the panel log. */
-export type DevWatchLog = {
-  seq: number
-  at: Date
-  push: DevWatchPush
-}
-
-const MAX_LOG = 8
-
-function summarize(push: DevWatchPush): string {
-  if (push.entryId) return push.entryId
-  if (push.path) return push.path
-  if (push.entries && push.entries.length > 0) return `${push.entries.length} entry(ies)`
-  return ""
-}
-
-/** Reload result wording per host ReloadStatus. */
-function reloadToast(status: string | undefined, push: DevWatchPush) {
-  const target = push.entryId ? `${push.entryId}` : "entry"
-  switch (status) {
-    case "reloaded":
-      toast.success(`Dev reload: ${target} 已重载`)
+function showToast(push: DevWatchPush) {
+  const plan = toastPlan(push)
+  if (!plan) return
+  switch (plan.level) {
+    case "success":
+      toast.success(plan.title, { description: plan.description })
       break
-    case "kept-old":
-      toast.warning(`Dev reload: ${target} 保留旧模块（导入失败）`, {
-        description: push.error,
-      })
+    case "warning":
+      toast.warning(plan.title, { description: plan.description })
       break
-    case "restored-old":
-      toast.warning(`Dev reload: ${target} 已回滚旧模块`, { description: push.error })
+    case "error":
+      toast.error(plan.title, { description: plan.description })
       break
-    case "restart-required":
-      toast.error(`Dev reload: ${target} 需要重启宿主`, {
-        description: push.error ?? "模块无法就地恢复，请重启宿主后重试",
-      })
+    case "info":
+      toast(plan.title, { description: plan.description })
       break
-    case "timeout":
-      toast.error(`Dev reload: ${target} 超时`, { description: push.error })
-      break
-    default:
-      // reload with an unexpected/missing status still deserves a line.
-      toast(push.error ? `Dev reload failed: ${target}` : `Dev reload: ${target}`, {
-        description: push.error,
-      })
   }
 }
 
@@ -89,17 +59,8 @@ export function DevWatchPanel() {
       if (cancelled) return
       const seq = ++seqRef.current
       setEverReceived(true)
-      setLogs((prev) => [{ seq, at: new Date(), push }, ...prev].slice(0, MAX_LOG))
-
-      if (push.type === "reload") {
-        reloadToast(push.status, push)
-      } else if (push.type === "config-error" || push.type === "watcher-error") {
-        toast.error(`Dev watch: ${push.type}`, { description: push.error })
-      } else if (push.type === "started") {
-        toast("Dev watch 已启动")
-      }
-      // change/unowned/ambiguous/config-refreshed/closed stay in the panel
-      // log only — no toast storm while hot-reloading files.
+      setLogs((prev) => appendLog(prev, { seq, at: new Date(), push }, MAX_LOG))
+      showToast(push)
     }
 
     void listen<DevWatchPush>("dev-watch", (event) => onPush(event.payload)).then((fn) => {
