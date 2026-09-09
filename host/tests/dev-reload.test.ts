@@ -233,4 +233,121 @@ describe("reloadPluginEntry state machine", () => {
     expect(result.status).toBe("reloaded")
     expect(calls).toEqual(["dispose", "new-await"])
   })
+
+  test("keeps old fiber when the fresh import times out", async () => {
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() {} },
+      dispose: async () => {
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const disposeCalls: string[] = []
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
+      timeoutMs: 30,
+      loadEntryModule: () => new Promise<never>(() => {}), // never resolves
+      pluginOnEntryCtx: async () => {
+        disposeCalls.push("unexpected")
+        return { uid: 2, await: async () => {} }
+      },
+    }))
+    expect(result.status).toBe("kept-old")
+    expect(result.phase).toBe("import")
+    expect(disposeCalls).toHaveLength(0) // old fiber untouched
+    expect(entry.fiber).toBe(oldFiber)
+  })
+
+  test("returns restart-required when the new fiber build times out and restore also times out", async () => {
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() {} },
+      dispose: async () => {
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
+      timeoutMs: 30,
+      loadEntryModule: async () => ({ apply: () => {} }),
+      pluginOnEntryCtx: () => new Promise<never>(() => {}), // swap AND restore both hang
+    }))
+    expect(result.status).toBe("restart-required")
+    expect(result.phase).toBe("swap")
+  })
+
+  test("returns restart-required when the old fiber dispose throws", async () => {
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() {} },
+      dispose: async () => {
+        throw new Error("disposer exploded")
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
+      loadEntryModule: async () => ({ apply: () => {} }),
+    }))
+    expect(result.status).toBe("restart-required")
+    expect(result.phase).toBe("swap")
+    // Entry was NOT rebuilt over the half-torn fiber.
+    expect(entry.fiber).toBe(oldFiber)
+  })
+
+  test("returns restart-required when there is no old callback to restore", async () => {
+    // old fiber without a runtime callback → restore is impossible.
+    const oldFiber = {
+      uid: 1,
+      dispose: async () => {
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber })
+    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
+      loadEntryModule: async () => ({ apply: () => {} }),
+      pluginOnEntryCtx: async () => {
+        throw new Error("new fiber fails")
+      },
+    }))
+    expect(result.status).toBe("restart-required")
+    expect(result.phase).toBe("swap")
+  })
+
+  test("restores the require.cache snapshot when the fresh import fails", async () => {
+    const { root, entryFile, utilFile } = await fixture()
+    const oldFiber = {
+      uid: 1,
+      runtime: { callback: function oldApply() {} },
+      dispose: async () => {
+        ;(oldFiber as { uid: number | null }).uid = null
+      },
+      await: async () => {},
+    }
+    const entry = fakeEntry({ fiber: oldFiber, root })
+    // Seed the real require.cache with sentinels for the entry + its util.
+    const cache = require.cache as unknown as Record<string, unknown>
+    const entryKey = entryFile
+    const utilKey = utilFile
+    cache[entryKey] = { sentinel: "entry-v1" }
+    cache[utilKey] = { sentinel: "util-v1" }
+    try {
+      const result = await reloadPluginEntry(entry, [join(root, "plugins")], makeDeps({
+        loadEntryModule: async () => {
+          throw new Error("syntax error")
+        },
+      }))
+      expect(result.status).toBe("kept-old")
+      // Strong rollback: both cache entries are back (they were deleted before
+      // the import attempt and restored on failure).
+      expect(cache[entryKey]).toEqual({ sentinel: "entry-v1" })
+      expect(cache[utilKey]).toEqual({ sentinel: "util-v1" })
+    } finally {
+      delete cache[entryKey]
+      delete cache[utilKey]
+    }
+  })
 })

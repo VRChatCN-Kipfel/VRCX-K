@@ -133,4 +133,85 @@ describe("HostWatcher", () => {
     expect(watcher.getWatched()).toEqual({})
     expect(events.filter((event) => event.type === "closed")).toHaveLength(1)
   })
+
+  test("start is idempotent: repeated start keeps one watcher and one started event", async () => {
+    const { root, entry, pluginRoot } = await fixture()
+    const events: WatcherEvent[] = []
+    const watcher = new HostWatcher({
+      roots: [root],
+      debounceMs: 20,
+      bindings: [binding("plugin", entry, [pluginRoot])],
+      onEvent: (event) => events.push(event),
+    })
+    await watcher.start()
+    await watcher.start()
+    await watcher.start()
+    await waitFor(events, (event) => event.type === "started")
+    // allow any duplicate ready events to surface
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(events.filter((event) => event.type === "started")).toHaveLength(1)
+    await watcher.close()
+  })
+
+  test("setBindings swaps the mapping index without restarting the watcher", async () => {
+    const { root, entry, pluginRoot } = await fixture()
+    const otherEntry = join(root, "plugin", "other.ts")
+    await writeFile(otherEntry, "other")
+    const events: WatcherEvent[] = []
+    const changes: string[] = []
+    const watcher = new HostWatcher({
+      roots: [root],
+      debounceMs: 20,
+      bindings: [binding("plugin", entry, [pluginRoot])],
+      onEvent: (event) => events.push(event),
+      onChange: (path) => changes.push(path),
+    })
+    await watcher.start()
+    await waitFor(events, (event) => event.type === "started")
+
+    // Swap: the old binding is gone, a new entry now maps the same root.
+    watcher.setBindings([binding("renamed", otherEntry, [pluginRoot])])
+    await writeFile(join(pluginRoot, "util.ts"), "shared")
+    await waitFor(changes, (path) => path === join(pluginRoot, "util.ts"))
+    // The change mapped to the NEW binding id.
+    const reloadEvent = events.find((event) => event.type === "change") as { mapping?: { kind: string; entryIds: string[] } } | undefined
+    expect(reloadEvent?.mapping?.entryIds).toEqual(["renamed"])
+    await watcher.close()
+  })
+
+  test("close during an in-flight flush waits for it and emits closed once", async () => {
+    const { root, entry, pluginRoot } = await fixture()
+    const events: WatcherEvent[] = []
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    let entered = false
+    const watcher = new HostWatcher({
+      roots: [root],
+      debounceMs: 20,
+      bindings: [binding("plugin", entry, [pluginRoot])],
+      onEvent: (event) => events.push(event),
+      onChange: async () => {
+        entered = true
+        await blocked
+      },
+    })
+    await watcher.start()
+    await waitFor(events, (event) => event.type === "started")
+    await writeFile(entry, "trigger")
+    // Wait until onChange is inside the blocked callback.
+    const deadline = Date.now() + 3_000
+    while (!entered && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
+    expect(entered).toBe(true)
+    const closing = watcher.close()
+    // close waits for the in-flight flush; release it, then close resolves.
+    release()
+    await closing
+    expect(events.filter((event) => event.type === "closed")).toHaveLength(1)
+    // No further events after close.
+    await writeFile(entry, "after-close")
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(events.filter((event) => event.type === "change")).toHaveLength(1)
+    await watcher.close() // idempotent
+    expect(events.filter((event) => event.type === "closed")).toHaveLength(1)
+  })
 })

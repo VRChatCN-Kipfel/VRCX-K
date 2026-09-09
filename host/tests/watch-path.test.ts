@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { binding, canonicalFileUrl, canonicalPath, mapPath } from "../src/watch-path"
+import { binding, canonicalExistingPath, canonicalFileUrl, canonicalPath, mapPath } from "../src/watch-path"
 
 const root = join(import.meta.dir, "fixtures", "watcher")
 
@@ -20,6 +22,35 @@ describe("watch path normalization", () => {
     const path = join(root, "alpha", "index.ts")
     expect(canonicalPath(`${canonicalFileUrl(path)}?cache=1#entry`)).toBe(canonicalPath(path))
     expect(() => canonicalPath("https://example.test/plugin.ts")).toThrow(/file:/)
+  })
+
+  test("rejects a URL object with a non-file protocol", () => {
+    expect(() => canonicalPath(new URL("https://example.test/plugin.ts"))).toThrow(/file:/)
+    expect(() => canonicalPath(new URL("http://example.test/x.ts"))).toThrow(/file:/)
+  })
+
+  test("canonicalExistingPath resolves symlinks and falls back to lexical when missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "vrcxk-watchpath-"))
+    try {
+      const target = join(dir, "target.ts")
+      const link = join(dir, "link.ts")
+      await writeFile(target, "x")
+      try {
+        await symlink(target, link)
+      } catch {
+        // Symlinks may be unavailable (Windows privileges); fall back to a
+        // plain-file identity check for the resolved path.
+        expect(await canonicalExistingPath(target)).toBe(canonicalPath(target))
+        return
+      }
+      // Symlink resolves to the real target path.
+      expect(await canonicalExistingPath(link)).toBe(canonicalPath(target))
+      // Missing file falls back to the lexical canonical path (no throw).
+      const missing = join(dir, "missing.ts")
+      expect(await canonicalExistingPath(missing)).toBe(canonicalPath(missing))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

@@ -54,6 +54,8 @@ export type DevWatchOptions = {
   /** Watched root directories (defaults to the include config's dir + plugin dirs). */
   roots?: string[]
   debounceMs?: number
+  /** Per-reload timeout (default 10s, see dev-reload). */
+  timeoutMs?: number
   /** Called for every structured dev-watch event. */
   onState?: (event: DevWatchEvent) => void
   /**
@@ -78,6 +80,7 @@ export class DevWatch {
   private readonly onState?: (event: DevWatchEvent) => void
   private readonly onRestartRequired?: (info: { entryId: string; error?: unknown }) => void
   private readonly debounceMs: number
+  private readonly timeoutMs?: number
   private chokidar?: ReturnType<typeof watch>
   private queues = new Map<string, ReloadQueueEntry>()
   private configTimer?: ReturnType<typeof setTimeout>
@@ -94,6 +97,7 @@ export class DevWatch {
     this.devMap = new Map(Object.entries(options.devMap ?? {}))
     this.onState = options.onState
     this.onRestartRequired = options.onRestartRequired
+    this.timeoutMs = options.timeoutMs
     // 250ms trailing debounce: Windows chokidar often emits a second
     // (delayed) event for the same atomic-save rename; a single logical save
     // must map to a single reload.
@@ -322,6 +326,7 @@ export class DevWatch {
         return fiber
       },
       log: (line) => this.log(line),
+      timeoutMs: this.timeoutMs,
     })
   }
 

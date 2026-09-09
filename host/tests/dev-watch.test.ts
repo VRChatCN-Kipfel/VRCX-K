@@ -250,4 +250,60 @@ describe("DevWatch live reload", () => {
     expect(alphaEntry.fiber?.uid).not.toBeNull()
     await watch.close()
   }, 60_000)
+
+  test("invalid YAML reports config-error and keeps the running tree", async () => {
+    const { configFile } = await makeHost()
+    const events: DevWatchEvent[] = []
+    const include = includeEntry!.subtree!
+    const watch = new DevWatch({
+      include,
+      configFile,
+      onState: (e) => events.push(e),
+    })
+    await watch.start()
+    await waitEvent(events, (e) => e.type === "started")
+    await new Promise((r) => setTimeout(r, 200))
+
+    const entriesBefore = [...include.entries()].map((e: Entry) => e.id)
+    const countBefore = (globalThis as Record<string, unknown>).__alphaCount as number
+    // Write invalid YAML via atomic rename (no transient empty-file state).
+    await atomicWrite(configFile, "- id: alpha\n  name: [unclosed\n")
+    const errEvent = await waitEvent(events, (e) => e.type === "config-error")
+    expect(errEvent.type).toBe("config-error")
+    // Running tree is untouched: same entries, no extra applies.
+    const entriesAfter = [...include.entries()].map((e: Entry) => e.id)
+    expect(entriesAfter).toEqual(entriesBefore)
+    expect((globalThis as Record<string, unknown>).__alphaCount).toBe(countBefore)
+
+    // Fixing the file recovers via a later refresh.
+    await writeFile(configFile, `- id: alpha\n  name: ./plugins/alpha.ts\n`)
+    await waitEvent(events, (e) => e.type === "config-refreshed")
+    await watch.close()
+  }, 30_000)
+
+  test("close discards pending file events and emits closed once", async () => {
+    const { root, configFile, entryFile } = await makeHost()
+    const events: DevWatchEvent[] = []
+    const include = includeEntry!.subtree!
+    const watch = new DevWatch({
+      include,
+      configFile,
+      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      onState: (e) => events.push(e),
+      debounceMs: 5000, // long debounce so the pending event never flushes
+    })
+    await watch.start()
+    await waitEvent(events, (e) => e.type === "started")
+    await new Promise((r) => setTimeout(r, 200))
+
+    await atomicWrite(entryFile, (await Bun.file(entryFile).text()) + "// close-race\n")
+    // Close immediately: the debounce timer is cancelled, the event dropped.
+    await watch.close()
+    await new Promise((r) => setTimeout(r, 300))
+    expect(events.some((e) => e.type === "reload")).toBe(false)
+    expect(events.filter((e) => e.type === "closed")).toHaveLength(1)
+    // Idempotent.
+    await watch.close()
+    expect(events.filter((e) => e.type === "closed")).toHaveLength(1)
+  }, 30_000)
 })

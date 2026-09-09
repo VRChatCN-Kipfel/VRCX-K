@@ -68,10 +68,13 @@ test("deadline promise resolves on timeout", async () => {
 test("begin is a one-shot gate: a second begin while stopping returns false and keeps the first reason", () => {
   const signal = new ShutdownSignal()
   expect(signal.begin(100, 10_000, "stop")).toBe(true)
-  expect(signal.begin(100, 10_000, "restart")).toBe(false)
+  const firstDeadline = signal.deadline
+  // A second, concurrent begin must NOT reset the deadline window.
+  expect(signal.begin(5000, 10_000, "restart")).toBe(false)
   // First trigger's reason/deadline are preserved.
   expect(signal.reason).toBe("stop")
-  expect(signal.deadline).not.toBeNull()
+  expect(signal.deadline).toBe(firstDeadline)
+  expect(signal.remaining).toBeLessThanOrEqual(100 + 50) // still the short first window
 })
 
 test("graceful stop gate: a concurrent second stop does not run cleanup twice", async () => {
