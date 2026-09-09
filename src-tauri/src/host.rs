@@ -11,7 +11,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 pub const HOST_RESTART_EXIT: i32 = 51;
 // A cooperative stop is allowed to take time while the host remains responsive.
@@ -944,21 +944,22 @@ struct StartingHost {
 }
 
 fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
-    let bun = find_bun();
-    let host_dir = host_dir();
-    if !host_dir.join("src/index.ts").is_file() {
-        return Err(format!("host entry missing at {}", host_dir.display()));
-    }
+    let launch = resolve_host_launch(app)?;
 
-    let mut cmd = Command::new(&bun);
-    cmd.arg("src/index.ts")
-        .current_dir(&host_dir)
+    let mut cmd = Command::new(&launch.program);
+    cmd.args(&launch.args)
+        .current_dir(&launch.cwd)
         .env("VRCXK_SHELL", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    let mut tree = ProcessTree::spawn(&mut cmd)
-        .map_err(|err| format!("spawn {} in {}: {err}", bun.display(), host_dir.display()))?;
+    let mut tree = ProcessTree::spawn(&mut cmd).map_err(|err| {
+        format!(
+            "spawn {} in {}: {err}",
+            launch.program.display(),
+            launch.cwd.display()
+        )
+    })?;
 
     let stdout = tree.child_stdout().ok_or("host stdout")?;
     let stdin = tree.child_stdin().ok_or("host stdin")?;
@@ -1128,6 +1129,132 @@ fn host_dir() -> PathBuf {
         .join("../host")
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from("../host"))
+}
+
+/// A resolved host launch specification (compiled sidecar or dev source).
+#[derive(Debug)]
+struct HostLaunch {
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+impl HostLaunch {
+    fn source() -> Result<Self, String> {
+        let bun = find_bun();
+        let host_dir = host_dir();
+        if !host_dir.join("src/index.ts").is_file() {
+            return Err(format!("host entry missing at {}", host_dir.display()));
+        }
+        Ok(Self {
+            program: bun,
+            args: vec!["src/index.ts".into()],
+            cwd: host_dir,
+        })
+    }
+
+    fn compiled(program: PathBuf, cwd: PathBuf) -> Self {
+        Self {
+            program,
+            args: vec![],
+            cwd,
+        }
+    }
+}
+
+/// Tauri strips the target-triple suffix from external binaries inside the
+/// bundle: `host-x86_64-pc-windows-msvc.exe` ships as `host.exe` next to the
+/// main executable on Windows (no suffix on Unix).
+fn packaged_host_name() -> &'static str {
+    if cfg!(windows) {
+        "host.exe"
+    } else {
+        "host"
+    }
+}
+
+/// Current host Rust target triple with the sidecar file suffix, e.g.
+/// `host-x86_64-pc-windows-msvc.exe`. tauri-build injects the exact triple
+/// (`TAURI_ENV_TARGET_TRIPLE`) at compile time.
+fn host_triple_suffixed_name() -> String {
+    let triple = env!("TAURI_ENV_TARGET_TRIPLE");
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    format!("host-{triple}{exe}")
+}
+
+/// Probe a directory for a usable compiled host binary: first the bundled
+/// name (`host[.exe]`, triple suffix stripped), then a dev-placed sidecar
+/// named with the host triple. Exposed for tests with fake directories.
+fn find_packaged_host(resource_dir: &Path) -> Option<PathBuf> {
+    let bundled = resource_dir.join(packaged_host_name());
+    if bundled.is_file() {
+        return Some(bundled);
+    }
+    let dev_sidecar = resource_dir.join(host_triple_suffixed_name());
+    if dev_sidecar.is_file() {
+        return Some(dev_sidecar);
+    }
+    None
+}
+
+/// Resolve how to launch the host.
+///
+/// Priority (highest first):
+/// 1. `VRCXK_HOST_BIN`: explicit compiled binary override; fails fast when
+///    the file does not exist (no silent fallback — debugging/tests).
+/// 2. Packaged: when an `AppHandle` is available and `resource_dir()` holds
+///    the bundled sidecar (`host[.exe]`, triple suffix stripped by Tauri),
+///    run it with the resource dir as cwd so the host finds its runtime
+///    files (`cordis.yml`, `plugins/`) beside itself. If the resource dir
+///    only holds a dev-placed `host-<triple>[.exe]`, use that too.
+/// 3. Dev source: current default for `cargo tauri dev`/tests — `bun` +
+///    `src/index.ts` in the checked-out `host/` dir (VRCXK_BUN /
+///    VRCXK_HOST_DIR overrides kept).
+fn resolve_host_launch(app: Option<&AppHandle>) -> Result<HostLaunch, String> {
+    let explicit = std::env::var("VRCXK_HOST_BIN").ok().map(PathBuf::from);
+    resolve_host_launch_with(app, explicit)
+}
+
+/// Pure core of `resolve_host_launch` (env value passed in for testability).
+fn resolve_host_launch_with(
+    app: Option<&AppHandle>,
+    explicit: Option<PathBuf>,
+) -> Result<HostLaunch, String> {
+    // 1. Explicit compiled override (fail fast).
+    if let Some(program) = explicit {
+        if !program.is_file() {
+            return Err(format!(
+                "VRCXK_HOST_BIN set but not a file: {}",
+                program.display()
+            ));
+        }
+        // Runtime files (cordis.yml/plugins) resolve via cwd. Default to the
+        // binary's directory (packaged layout); VRCXK_HOST_DIR overrides for
+        // debug runs against a source tree with the runtime files in place.
+        let cwd = std::env::var_os("VRCXK_HOST_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| {
+                program
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."))
+            });
+        return Ok(HostLaunch::compiled(program, cwd));
+    }
+
+    // 2. Packaged sidecar next to the app resources.
+    if let Some(app) = app {
+        let Ok(resource_dir) = app.path().resource_dir() else {
+            return Err("cannot resolve Tauri resource dir".into());
+        };
+        if let Some(program) = find_packaged_host(&resource_dir) {
+            return Ok(HostLaunch::compiled(program, resource_dir));
+        }
+    }
+
+    // 3. Dev source (default).
+    HostLaunch::source()
 }
 
 #[cfg(test)]
@@ -1671,5 +1798,68 @@ mod tests {
             assert!(!pid_alive(pid));
             state.latch_app_exit();
         });
+    }
+
+    // --- host launch resolver ---------------------------------------------
+
+    /// A throwaway directory with the given file names created inside.
+    fn fake_resource_dir(names: &[&str]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "vrcxk-resolver-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in names {
+            std::fs::write(dir.join(name), b"fake host binary").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn find_packaged_host_prefers_bundled_name_then_dev_sidecar() {
+        let triple_name = host_triple_suffixed_name();
+        // Only the dev-placed sidecar (host-<triple>.exe) exists.
+        let dir = fake_resource_dir(&[triple_name.as_str()]);
+        let found = find_packaged_host(&dir).expect("dev sidecar found");
+        assert_eq!(found.file_name().unwrap(), triple_name.as_str());
+        // Both exist: the bundled name wins (Tauri-stripped host.exe).
+        let dir2 = fake_resource_dir(&[triple_name.as_str(), packaged_host_name()]);
+        let found2 = find_packaged_host(&dir2).expect("bundled found");
+        assert_eq!(found2.file_name().unwrap(), packaged_host_name());
+        // Nothing present: None.
+        let dir3 = fake_resource_dir(&[]);
+        assert!(find_packaged_host(&dir3).is_none());
+        let _ = (dir, dir2, dir3);
+    }
+
+    #[test]
+    fn resolve_host_launch_uses_explicit_bin_with_fail_fast() {
+        // Present override -> compiled launch rooted at its parent dir.
+        let dir = fake_resource_dir(&["custom-host.exe"]);
+        let launch = resolve_host_launch_with(None, Some(dir.join("custom-host.exe")))
+            .expect("explicit bin resolves");
+        assert_eq!(launch.program, dir.join("custom-host.exe"));
+        assert_eq!(launch.cwd, dir);
+        assert!(launch.args.is_empty());
+
+        // Missing override -> fast error, no silent fallback.
+        let err = resolve_host_launch_with(None, Some(dir.join("nope.exe")))
+            .expect_err("missing bin must fail");
+        assert!(err.contains("VRCXK_HOST_BIN"), "{err}");
+        let _ = dir;
+    }
+
+    #[test]
+    fn resolve_host_launch_defaults_to_dev_source_without_app() {
+        // No override and no AppHandle -> dev source launch (bun).
+        // Requires the checked-out host/ tree (same precondition as the
+        // existing spawn tests).
+        let launch = resolve_host_launch_with(None, None).expect("dev source resolves");
+        assert!(!launch.args.is_empty(), "source launch runs src/index.ts");
+        assert_eq!(launch.args[0], "src/index.ts");
+        assert!(launch.cwd.join("src/index.ts").is_file());
     }
 }
