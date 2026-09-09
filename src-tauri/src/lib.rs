@@ -4,6 +4,8 @@ mod notify;
 mod process_tree;
 mod shell_sys;
 mod tray;
+pub mod tray_model;
+mod tray_schema;
 
 use host::{supervise_loop, HostReady, HostState};
 use tauri::{Emitter, Manager, RunEvent};
