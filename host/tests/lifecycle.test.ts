@@ -64,3 +64,69 @@ test("deadline promise resolves on timeout", async () => {
   const outcome = await signal.deadlinePromise
   expect(outcome).toBe("timeout")
 })
+
+test("begin is a one-shot gate: a second begin while stopping returns false and keeps the first reason", () => {
+  const signal = new ShutdownSignal()
+  expect(signal.begin(100, 10_000, "stop")).toBe(true)
+  const firstDeadline = signal.deadline
+  // A second, concurrent begin must NOT reset the deadline window.
+  expect(signal.begin(5000, 10_000, "restart")).toBe(false)
+  // First trigger's reason/deadline are preserved.
+  expect(signal.reason).toBe("stop")
+  expect(signal.deadline).toBe(firstDeadline)
+  expect(signal.remaining).toBeLessThanOrEqual(100 + 50) // still the short first window
+})
+
+test("graceful stop gate: a concurrent second stop does not run cleanup twice", async () => {
+  const signal = new ShutdownSignal()
+  let disposeRuns = 0
+  const ctx = {
+    signal,
+    registry: new Map(),
+    fiber: {
+      _disposables: {
+        clear: () => [
+          async () => {
+            disposeRuns++
+            // Hang until the deadline so the first call stays in flight.
+            await new Promise<void>(() => {})
+          },
+        ],
+      },
+    },
+  }
+
+  // First call acquires the gate and starts cleanup (which hangs on the
+  // disposer until the 60ms deadline).
+  const first = gracefulStopWithTimeout(ctx as never, "stop", 30, 60)
+  // Second, concurrent request (e.g. stdio stop RPC racing the dev-watch
+  // restart requester) must be a no-op.
+  const second = await gracefulStopWithTimeout(ctx as never, "restart", 30, 60)
+  expect(second).toBe(false)
+  await first
+  expect(disposeRuns).toBe(1) // cleanup ran exactly once
+  expect(signal.reason).toBe("stop") // first trigger's reason preserved
+})
+
+test("graceful stop gate: a lone stop still returns true and cleans up", async () => {
+  const signal = new ShutdownSignal()
+  let disposeRuns = 0
+  const ctx = {
+    signal,
+    registry: new Map(),
+    fiber: {
+      _disposables: {
+        clear: () => [
+          async () => {
+            disposeRuns++
+          },
+        ],
+      },
+    },
+  }
+  const acquired = await gracefulStopWithTimeout(ctx as never, "stop", 30, 500)
+  expect(acquired).toBe(true)
+  expect(disposeRuns).toBe(1)
+  expect(signal.stopping).toBe(true)
+  expect(signal.reason).toBe("stop")
+})

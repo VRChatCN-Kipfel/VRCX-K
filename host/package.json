@@ -6,14 +6,23 @@
   "description": "VRCX-K host — Cordis (bun) runtime. The 'brain'.",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build --compile src/index.ts --outfile dist/host",
-    "test": "bun test"
+    "build": "bun run ../scripts/build-host.ts",
+    "test": "bun test",
+    "generate:tray-contract": "json2ts ../contracts/tray-menu.schema.json -o src/tray-contract.generated.ts --maxItems -1"
   },
   "dependencies": {
     "@cordisjs/plugin-include": "1.0.5",
     "@cordisjs/plugin-loader": "1.0.0-rc.6",
+
+    "ajv": "^8.20.0",
+
+    "chokidar": "4.0.3",
+
     "cordis": "4.0.0-rc.9",
     "kkrpc": "2.1.0",
     "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "^16.0.0"
   }
 }

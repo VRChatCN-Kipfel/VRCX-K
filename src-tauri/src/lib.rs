@@ -1,16 +1,114 @@
+mod app_lifecycle;
 mod host;
+mod host_lifecycle;
 mod kkrpc_stdio;
 mod notify;
 mod process_tree;
 mod shell_sys;
 mod tray;
+pub mod tray_model;
+mod tray_renderer;
+mod tray_schema;
 
+use app_lifecycle::{
+    AppCommand, AppCommandRequest, AppCommandResult, AppLifecycle, AppLifecycleFacade,
+};
 use host::{supervise_loop, HostReady, HostState};
+use host_lifecycle::{HostCommand, HostCommandResult, HostSnapshot};
+use serde::Serialize;
+use std::time::Duration;
 use tauri::{Emitter, Manager, RunEvent};
+
+/// Upper bound for a graceful app exit started by another path. Longer than the
+/// supervisor's 30s stop watchdog, so a healthy-but-slow teardown is never cut
+/// short; it only exists so a dead worker cannot make the app unquittable.
+const EXIT_WATCHDOG: Duration = Duration::from_secs(45);
+
+#[derive(Clone, Debug, Serialize)]
+struct HostLifecycleStateResponse {
+    snapshot: HostSnapshot,
+}
 
 #[tauri::command]
 fn get_host_ready(state: tauri::State<HostState>) -> Option<HostReady> {
     state.snapshot()
+}
+
+#[tauri::command]
+fn get_host_lifecycle(state: tauri::State<HostState>) -> HostLifecycleStateResponse {
+    HostLifecycleStateResponse {
+        snapshot: state.lifecycle_snapshot(),
+    }
+}
+
+/// Dispatch a host lifecycle command to the supervisor.
+///
+/// Stable Rust-owned entry point shared by Tauri IPC (`invoke` from the web
+/// view) and, through `HostLifecycleFacade`, the #6 tray router. The verdict
+/// is synchronous (Accepted/Noop/Rejected against the current snapshot);
+/// Accepted commands are executed by the supervisor thread off this caller,
+/// so this command never blocks on host RPC or process teardown. The host
+/// process tree is only ever touched by that supervisor thread.
+#[tauri::command]
+fn dispatch_host_command(
+    state: tauri::State<HostState>,
+    command: HostCommand,
+) -> HostCommandResult {
+    state.dispatch(command)
+}
+
+/// Execute an accepted application command on the Rust-owned lifecycle path.
+///
+/// Shared by the `dispatch_app_command` IPC entry point and the #6 tray
+/// router: the tray route calls this directly (no string IPC) so both callers
+/// observe one orchestration. The caller is responsible for obtaining an
+/// `Accepted` verdict first (idempotent latch); this function performs the
+/// post-accept work — latching AppExit so the supervisor cannot relaunch,
+/// then the graceful/force teardown off the calling thread.
+pub(crate) fn execute_app_command(app: tauri::AppHandle, command: AppCommand) {
+    let state = app.state::<HostState>();
+    // The Rust shell owns process lifecycle. Latch AppExit before returning so
+    // the supervisor cannot relaunch and host/plugin code cannot race this app
+    // command. Graceful work runs off the calling thread.
+    state.latch_app_exit();
+    match command {
+        AppCommand::RestartGraceful => {
+            std::thread::spawn(move || {
+                let state = app.state::<HostState>();
+                state.request_app_exit_graceful();
+                app.request_restart();
+            });
+        }
+        AppCommand::QuitGraceful => {
+            std::thread::spawn(move || {
+                let state = app.state::<HostState>();
+                state.request_app_exit_graceful();
+                app.exit(0);
+            });
+        }
+        AppCommand::QuitForce => {
+            // Force quit is allowed to escalate an in-flight graceful worker;
+            // taking and killing the tree makes that worker observe no child.
+            state.force_app_exit();
+            app.exit(0);
+        }
+    }
+}
+
+#[tauri::command]
+fn dispatch_app_command(
+    app: tauri::AppHandle,
+    _state: tauri::State<HostState>,
+    lifecycle: tauri::State<AppLifecycle>,
+    request: AppCommandRequest,
+) -> AppCommandResult {
+    let command = request.command;
+    let result = lifecycle.dispatch(request);
+    if !matches!(result, AppCommandResult::Accepted { .. }) {
+        return result;
+    }
+    execute_app_command(app.clone(), command);
+    result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,9 +118,7 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
-            }
+            let _ = tray::show_main_window(app);
         }));
     }
 
@@ -32,17 +128,65 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .manage(HostState::default())
-        .invoke_handler(tauri::generate_handler![get_host_ready])
+        .manage(AppLifecycle::default())
+        .invoke_handler(tauri::generate_handler![
+            get_host_ready,
+            get_host_lifecycle,
+            dispatch_host_command,
+            dispatch_app_command
+        ])
+        // Tray-resident window: closing the window hides it instead of
+        // destroying it, so `show_main_window` (tray Show item, tray left
+        // click, single-instance focus) keeps working. Quitting is an explicit
+        // tray action (`app.quit.graceful`/`app.quit.force`), which tears the
+        // process down through `app.exit()` and never goes through here.
+        //
+        // Applies to the MAIN window only: a future secondary window (tool /
+        // dialog) must still be able to close normally.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
+                api.prevent_close();
+                if let Err(err) = window.hide() {
+                    eprintln!("[shell] hide window: {err}");
+                }
+            }
+        })
         .setup(|app| {
             tray::setup(app.handle())?;
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let state = handle.state::<HostState>();
-                supervise_loop(state.inner(), Some(&handle), |ready| {
-                    if let Err(err) = handle.emit("host-ready", &ready) {
-                        eprintln!("[shell] emit host-ready: {err}");
-                    }
-                });
+                let ready_handle = handle.clone();
+                let snapshot_handle = handle.clone();
+                // Change feed cache: the supervisor may observe the snapshot
+                // many times per transition; only real changes reach the tray
+                // and the web view.
+                let mut last_fingerprint: Option<u64> = None;
+                supervise_loop(
+                    state.inner(),
+                    Some(&handle),
+                    move |ready| {
+                        if let Err(err) = ready_handle.emit("host-ready", &ready) {
+                            eprintln!("[shell] emit host-ready: {err}");
+                        }
+                    },
+                    &mut move |snapshot| {
+                        let fingerprint = host_lifecycle::snapshot_fingerprint(snapshot);
+                        if last_fingerprint == Some(fingerprint) {
+                            return;
+                        }
+                        last_fingerprint = Some(fingerprint);
+                        if let Err(err) = tray::refresh(&snapshot_handle) {
+                            eprintln!("[shell] tray refresh: {err}");
+                        }
+                        if let Err(err) = snapshot_handle.emit("host-lifecycle", snapshot) {
+                            eprintln!("[shell] emit host-lifecycle: {err}");
+                        }
+                    },
+                );
             });
             Ok(())
         });
@@ -50,9 +194,59 @@ pub fn run() {
     builder
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-                app.state::<HostState>().request_stop();
+        .run(|app, event| match event {
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                // An OS/user exit not initiated by dispatch_app_command enters
+                // the same Rust-owned graceful path.
+                let request = AppCommandRequest {
+                    schema_version: app_lifecycle::APP_LIFECYCLE_SCHEMA_VERSION,
+                    command: AppCommand::QuitGraceful,
+                };
+                let lifecycle = app.state::<AppLifecycle>();
+                match lifecycle.dispatch(request) {
+                    AppCommandResult::Accepted { .. } => {
+                        // Prevent this exit; the worker calls app.exit(0) only
+                        // after the child is reaped.
+                        api.prevent_exit();
+                        app.state::<HostState>().latch_app_exit();
+                        let exit_app = app.clone();
+                        std::thread::spawn(move || {
+                            let state = exit_app.state::<HostState>();
+                            state.request_app_exit_graceful();
+                            exit_app.exit(0);
+                        });
+                    }
+                    AppCommandResult::Noop { .. } => {
+                        // A graceful quit worker is already in flight and owns
+                        // the exit. Letting the process leave here would orphan
+                        // the child mid-teardown.
+                        api.prevent_exit();
+                        // Watchdog: if that worker dies without exiting (panic
+                        // after the latch), the app must still be quittable.
+                        // The bound exceeds the host stop watchdog (30s) so a
+                        // slow-but-healthy teardown is never cut short.
+                        let watchdog_app = app.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(EXIT_WATCHDOG);
+                            watchdog_app.state::<HostState>().force_app_exit();
+                            watchdog_app.exit(0);
+                        });
+                    }
+                    AppCommandResult::Rejected { reason, .. } => {
+                        // Another lifecycle command (e.g. a restart) owns the
+                        // app; do not block the exit. `RunEvent::Exit` below is
+                        // the guaranteed non-blocking child cleanup.
+                        eprintln!("[shell] exit requested while {reason}; exiting");
+                    }
+                }
             }
+            RunEvent::Exit => {
+                // Final non-blocking safety net: whatever path reached here,
+                // the host process tree must not outlive the shell.
+                app.state::<HostState>().force_app_exit();
+            }
+            _ => {}
         });
 }

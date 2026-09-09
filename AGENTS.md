@@ -88,3 +88,20 @@ VRCX-K/
 - **D1 探针结论（M1-4 关键，见 .temp/D1-findings.md）**：crates.io `kkrpc` Rust crate 0.6.1 是 **JSON-mode 协议**（`{method,args,type,version:"json"}`），与 npm kkrpc 2.1.0 的 **compact 协议**（`{t:"q",op,p,a}`）**不互通**（实测 Rust Client 全 HANG；手写 compact 帧全通）。GitHub main 的 interop/rust 已改 compact 但未发版 → **M1-4 自研 ~100 行 compact 端点**（官方 skill 算法），不依赖 crates.io crate，等官方发版后可换
 - **E′ 探针（M1-4 桥形态定稿，.temp/d1probe/src/bin/e2.rs 全绿）**：Rust 不自研完整 Client，做"轻量喊话"——读循环分发 `q`(服务 host)+`cb`(回调表)，忽略 `r`；**Rust→host 即时信号=裸写 compact 命令帧**（host 事件驱动读循环立即执行，零轮询）；要返回值=带 kkrpc 回调参数→host `t:cb` 回推（实测 612µs）；回调值须 unwrap value-envelope（官方 interop skill 规则）
 - 锁定版本组合：**bun 1.4.2 + cordis 4.0.0-rc.9 + loader 1.0.0-rc.6 + include 1.0.5 + kkrpc 2.1.0**（源态与 compile 态均已实证）
+- 🔧 **M1 修复轮（2026-09，未提交；针对 `b60ebfe4` 复审）**：
+  - **构建自愈**：`src-tauri/build.rs` 发现 `src-tauri/binaries/host-<triple>[.exe]` 缺失时自动执行 `bun run scripts/build-host.ts --target-triple <triple>`（Windows 下先直连 `bun`，失败再经 `cmd /C bun` 兼容 npm shim；可用 `VRCXK_BUN` 指定解释器）。**新克隆直接 `cargo check/test/tauri dev/build` 均可**，不再依赖手工先跑 `build:host`
+  - **窗口语义**：`CloseRequested` → `prevent_close()` + `hide()`（托盘常驻），退出只走托盘 `app.quit.graceful/force`；`RunEvent::Exit` 兜底 `force_app_exit()`，子进程不再可能比壳活得久
+  - **托盘契约闭环**：host→shell `shell.tray.setSnapshot(snapshot) -> {ok,revision,error?}`（经 `tray_schema::validate_wire_shape` + 域模型双重校验，core 组一律拒绝；`source` 改为**必填**，杜绝缺字段被默认成 core 的越权）；shell→host `tray.action({id,command,args})` 通知（`Peer::notify` 裸写 compact 帧，不阻塞 supervisor）
+  - **托盘刷新与缓存**：`HostState` supervisor 在快照指纹（排除每 50ms 跳动的 `nextRetryMs`）变化时回调 → 重投影 `core.host.*` 的 enabled + emit `host-lifecycle`；托盘侧按合并快照指纹缓存，未变化不重建原生菜单
+  - **托盘字段全部落地**：分组 `label` 渲染为原生子菜单；`confirm`/`danger` 走确认对话框；`args` 随 `tray.action` 下发（core/app 动作携带 args 会被模型拒绝）；radio 互斥改为**全快照级**
+  - **host 监督**：ping 失败补 `reap_tree()`（此前唯一漏掉回收的失败路径）；`promote_ready` 清 `nextRetryMs`；退避被 Start 唤醒时不再翻倍；`host_reload` 改非阻塞喊话；代际分配复用 `allocate_generation`
+  - **dev-watch**：`fileURLToPath` 修复（Windows 上 `.pathname` 让 cordis.yml 热刷新彻底失效）；就绪断言恢复为**快速失败**（坏 cordis.yml 亚秒退出，不再空转 15s）；watcher 受 `ctx.signal.stopping` 门控且 disposer 返回 `close()` promise；配置刷新后新增目录自动 `chokidar.add`；路径匹配统一走 `watch-path.ts`
+  - **流程**：新增 `bun run verify`（= `typecheck` + `test` + `build`）、`tsconfig.host.json`（host/scripts 生产代码类型检查，0 error）、`bun run test` 同时跑前端与 host；`cargo clippy -- -D warnings` 与 `cargo fmt --check` 全绿
+  - 实证：`cargo fmt/clippy/check/test`（80 passed）、`bun run verify`（前端 45 + host 107 passed）、`build:host` + sidecar 冒烟（2 passed）、`cargo tauri build` 产出 MSI/NSIS 且 `host.exe` 已作为组件打进安装包
+- 🔍 **M1 修复轮复审（2026-09，三端只读评审）与二轮修复**：
+  - **[严重] 托盘重放门禁与 host 重启解耦**：`TrayState` 曾用 `generation == cached && revision <= cached_revision` 判重放，而 host 的 `TrayService` 是**新进程**（revision 从 1 重计、`generation` 恒 0）→ 重启后首次推送被判"重放"丢弃，托盘保留死进程的菜单。已改为**内容指纹判等**（`TrayCache::accept`，`Ingress::{Changed,Unchanged}`），重启/乱序/重复推送都正确；回归测试 `restarted_host_content_is_never_mistaken_for_a_replay` 在旧逻辑下实测失败
+  - `CloseRequested` 仅对 `label == "main"` 生效（次要窗口可正常关闭）；`ExitRequested` Noop 分支加 45s 退出看门狗（worker 崩了也不会变成不可退出）
+  - `build.rs`：`VRCXK_BUN` 显式指定失败改为 fail-fast（不再静默降级）；sidecar **新鲜度**检查——任一 host 输入（`host/src`、`host/plugins`、`scripts`、`contracts`、`cordis.yml`、锁文件）比产物新就重建，并逐文件 `rerun-if-changed`
+  - 脑/脸：`declaresHeartbeat` 改为**精确匹配**（`heartbeat` id 或 `heartbeat.<ext>` 文件名，避免 `my-heartbeat-monitor` 误伤导致启动失败）；FIBER 状态常量移入无副作用的 `host/src/fiber.ts` 并由 `host/tests/host-wiring.test.ts` 用真实 fiber 钉住；`reduceHostLifecycle` 的 response 分支补 `live` 守卫；dev-watch 去重窗 1500ms → 400ms（不再吞掉人手的第二次保存）；窄屏两个浮层改为上下堆叠
+  - 流程：`tsconfig.test.json` 独立测试 program（bun 类型不再泄漏进生产代码面），`typecheck` 覆盖 app/test/host 三套
+  - 实证：`cargo fmt/clippy/test`（82 passed）、`bun run verify`（前端 46 + host 112 passed）、sidecar 缺失/过期两条路径均触发自动重建

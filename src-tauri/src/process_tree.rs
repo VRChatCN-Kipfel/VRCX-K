@@ -17,15 +17,35 @@ impl ProcessTree {
         let child = cmd.spawn()?;
         #[cfg(windows)]
         {
-            let job = win::Job::create()
-                .ok()
-                .and_then(|job| job.assign(&child).ok().map(|()| job));
-            return Ok(Self { child, job });
+            // A Job Object with KILL_ON_JOB_CLOSE is the primary teardown
+            // mechanism (it also catches grandchildren the child spawns). When
+            // it cannot be created or assigned we still work: `kill_tree` falls
+            // back to `taskkill /T /F`. Both failures are logged rather than
+            // silently swallowed, because the fallback is weaker.
+            let job = match win::Job::create() {
+                Ok(job) => match job.assign(&child) {
+                    Ok(()) => Some(job),
+                    Err(()) => {
+                        eprintln!(
+                            "[shell] AssignProcessToJobObject failed; process-tree teardown falls back to taskkill"
+                        );
+                        None
+                    }
+                },
+                Err(()) => {
+                    eprintln!(
+                        "[shell] CreateJobObject failed; process-tree teardown falls back to taskkill"
+                    );
+                    None
+                }
+            };
+            Ok(Self { child, job })
         }
         #[cfg(not(windows))]
-        Ok(Self { child })
+        {
+            Ok(Self { child })
+        }
     }
-
     #[allow(dead_code)]
     pub fn id(&self) -> u32 {
         self.child.id()
@@ -51,9 +71,13 @@ impl ProcessTree {
     pub fn kill_tree(&mut self) {
         #[cfg(windows)]
         {
-            if let Some(job) = self.job.take() {
-                job.terminate();
-            } else {
+            let killed_by_job = match self.job.take() {
+                Some(job) => job.terminate(),
+                None => false,
+            };
+            if !killed_by_job {
+                // No job (creation/assign failed) or TerminateJobObject
+                // failed: taskkill /T /F is the documented fallback.
                 let _ = Command::new("taskkill")
                     .args(["/T", "/F", "/PID", &self.child.id().to_string()])
                     .status();
@@ -191,10 +215,11 @@ mod win {
             }
         }
 
-        pub fn terminate(self) {
-            unsafe {
-                TerminateJobObject(self.0, 1);
-            }
+        /// Terminate every process in the job. Returns false when the call
+        /// failed, so the caller can fall back to `taskkill /T /F`.
+        pub fn terminate(self) -> bool {
+            let ok = unsafe { TerminateJobObject(self.0, 1) };
+            ok != 0
         }
     }
 

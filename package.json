@@ -13,8 +13,12 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "dev:host": "bun run --cwd host dev",
-    "build:host": "bun run --cwd host build",
-    "test:host": "bun test --cwd host"
+    "build:host": "bun run scripts/build-host.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.host.json",
+    "test:ui": "bun test src",
+    "test:host": "bun test --cwd host",
+    "test": "bun run test:ui && bun run test:host",
+    "verify": "bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

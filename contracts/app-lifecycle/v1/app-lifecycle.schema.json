@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vrcx-k.dev/contracts/app-lifecycle/v1/app-lifecycle.schema.json",
+  "title": "VRCX-K App Lifecycle Command",
+  "description": "Rust-owned application lifecycle facade consumed by tray target=app actions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "command"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "command": {
+      "type": "string",
+      "enum": ["restart_graceful", "quit_graceful", "quit_force"]
+    }
+  },
+  "$defs": {
+    "appCommandResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "command"],
+          "properties": {
+            "kind": { "const": "accepted" },
+            "command": { "$ref": "#/properties/command" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "command"],
+          "properties": {
+            "kind": { "const": "noop" },
+            "command": { "$ref": "#/properties/command" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "command", "reason"],
+          "properties": {
+            "kind": { "const": "rejected" },
+            "command": { "$ref": "#/properties/command" },
+            "reason": { "type": "string", "maxLength": 4096 }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -64,3 +64,306 @@ button:disabled {
     background-color: #0f0f0f98;
   }
 }
+
+/* Dev-only dev-watch panel (see src/devWatchPanel.tsx). Fixed bottom-right,
+   never part of the production layout. */
+.devwatch {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: min(420px, calc(100vw - 32px));
+  max-height: 40vh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  border: 1px solid #d8d8d8;
+  font-size: 12px;
+  line-height: 18px;
+  z-index: 1000;
+}
+
+@media (prefers-color-scheme: dark) {
+  .devwatch {
+    background: #1f1f1f;
+    border-color: #444;
+  }
+}
+
+.devwatch-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.devwatch-title {
+  font-weight: 600;
+}
+
+.devwatch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #b0b0b0;
+}
+
+.devwatch-dot-on {
+  background: #2ecc71;
+}
+
+/* Listener failed — distinct from "no events yet" (grey). */
+.devwatch-dot-bad {
+  background: #e74c3c;
+}
+
+.devwatch-clear {
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 6px;
+  box-shadow: none;
+  background: #ececec;
+}
+
+@media (prefers-color-scheme: dark) {
+  .devwatch-clear {
+    background: #333;
+    color: #eee;
+  }
+}
+
+.devwatch-idle {
+  margin: 0;
+  color: #888;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* #888 on #1f1f1f is too dim for body text; lift it to ~10:1. */
+  .devwatch-idle {
+    color: #c8c8c8;
+  }
+}
+
+.devwatch-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.devwatch-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: #f2f2f2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  .devwatch-item {
+    background: #2a2a2a;
+  }
+}
+
+.devwatch-kind {
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.devwatch-type-error,
+.devwatch-type-config-error,
+.devwatch-type-watcher-error {
+  border-left: 3px solid #e74c3c;
+}
+
+.devwatch-type-reload {
+  border-left: 3px solid #396cd8;
+}
+
+.devwatch-time {
+  color: #999;
+  flex-shrink: 0;
+}
+
+.devwatch-status {
+  color: #555;
+  flex-shrink: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* #555 on the #2a2a2a row background is ~1.9:1; lift it to ~7:1. */
+  .devwatch-status {
+    color: #b8b8b8;
+  }
+}
+
+.devwatch-summary {
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .devwatch-summary {
+    color: #ccc;
+  }
+}
+
+.devwatch-last {
+  margin: 0;
+  color: #777;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Same dim-text defect as .devwatch-idle/.devwatch-status above. */
+  .devwatch-last {
+    color: #b0b0b0;
+  }
+}
+
+/* Host-lifecycle readout (see src/hostLifecyclePanel.tsx). Mirrors the
+   dev-watch panel's visual language, anchored bottom-left so both can coexist. */
+.hostlife {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  width: min(360px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  border: 1px solid #d8d8d8;
+  font-size: 12px;
+  line-height: 18px;
+  z-index: 1000;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hostlife {
+    background: #1f1f1f;
+    border-color: #444;
+  }
+}
+
+.hostlife-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hostlife-title {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.hostlife-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #b0b0b0;
+  flex-shrink: 0;
+}
+
+.hostlife-dot-on {
+  background: #2ecc71;
+}
+
+.hostlife-dot-bad {
+  background: #e74c3c;
+}
+
+.hostlife-state {
+  color: #333;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hostlife-state {
+    color: #ccc;
+  }
+}
+
+.hostlife-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.hostlife-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.hostlife-key {
+  color: #666;
+  min-width: 78px;
+  flex-shrink: 0;
+}
+
+.hostlife-val {
+  color: #222;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hostlife-idle {
+  margin: 0;
+  color: #888;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hostlife-key {
+    color: #aaa;
+  }
+
+  .hostlife-val {
+    color: #eee;
+  }
+
+  .hostlife-idle {
+    color: #c8c8c8;
+  }
+}
+
+/* Narrow viewports: the two fixed overlays (host-life bottom-left, dev-watch
+   bottom-right) would collide below ~860px. Stack them instead — host-life at
+   the top, dev-watch at the bottom — and let both span the width. */
+@media (max-width: 860px) {
+  .hostlife {
+    top: 16px;
+    bottom: auto;
+    left: 16px;
+    right: 16px;
+    width: auto;
+    max-height: 30vh;
+    overflow: auto;
+  }
+
+  .devwatch {
+    left: 16px;
+    right: 16px;
+    width: auto;
+    max-height: 40vh;
+  }
+}

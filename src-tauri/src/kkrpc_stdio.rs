@@ -70,15 +70,20 @@ impl Peer {
         self.call_timeout(method, args, Duration::from_secs(10))
     }
 
-    pub fn call_timeout(
-        &self,
-        method: &str,
-        args: Vec<Value>,
-        timeout: Duration,
-    ) -> Result<Value, String> {
-        let id = format!("r-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = mpsc::channel();
-        self.pending.lock().expect("pending").insert(id.clone(), tx);
+    /// Fire-and-forget request: write the same `call` frame but do not register
+    /// a pending waiter. The host executes the method and its `r` reply is
+    /// ignored (`dispatch` drops responses without a pending sender).
+    ///
+    /// Used by the supervisor thread for signals whose outcome is observed
+    /// through the child process itself (e.g. `restart`, which makes the host
+    /// tear down and exit 51) — blocking the single supervisor thread on a
+    /// 28s RPC would stall command servicing and child reaping.
+    pub fn notify(&self, method: &str, args: Vec<Value>) -> Result<(), String> {
+        let id = format!("n-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        self.write(&Self::request_frame(&id, method, args))
+    }
+
+    fn request_frame(id: &str, method: &str, args: Vec<Value>) -> Value {
         let path: Vec<Value> = method
             .split('.')
             .map(|segment| Value::String(segment.to_string()))
@@ -91,7 +96,19 @@ impl Peer {
         if !args.is_empty() {
             payload.insert("a".into(), Value::Array(args));
         }
-        if let Err(err) = self.write(&Value::Object(payload)) {
+        Value::Object(payload)
+    }
+
+    pub fn call_timeout(
+        &self,
+        method: &str,
+        args: Vec<Value>,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let id = format!("r-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = mpsc::channel();
+        self.pending.lock().expect("pending").insert(id.clone(), tx);
+        if let Err(err) = self.write(&Self::request_frame(&id, method, args)) {
             self.pending.lock().expect("pending").remove(&id);
             return Err(err);
         }

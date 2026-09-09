@@ -1,0 +1,14 @@
+{
+  /* Test program for src/*.test.ts. Separate from tsconfig.json so that bun
+     globals are available to tests without leaking into the production program
+     (and so `tsc` in `bun run build` stays application-only).
+     `types: ["bun"]` is explicit because bun's isolated linker only exposes
+     direct deps at node_modules/, so @types/bun is not auto-included and its
+     `bun-types` reference would otherwise go unresolved. */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src"],
+  "exclude": []
+}

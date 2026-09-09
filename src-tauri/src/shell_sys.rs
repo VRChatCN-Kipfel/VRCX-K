@@ -17,7 +17,7 @@
 use crate::kkrpc_stdio::Peer;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_notification::NotificationExt;
@@ -317,6 +317,42 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
             json!(resolved
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default())
+        }),
+    );
+
+    // shell.devWatchEvent(event) -> bool
+    // #11 wiring: the host relays dev-watch state (reload results, config
+    // refresh, restart-required) to the face by calling this method; the shell
+    // re-emits it as a Tauri `dev-watch` event for the webview. The payload is
+    // a #11-owned plain JSON object (never a #7 lifecycle DTO). Fire-and-forget
+    // on the host side, so an absent handler (tests / no UI) is harmless.
+    peer.on(
+        "shell.devWatchEvent",
+        handler(app.clone(), |app, args| {
+            let payload = args.first().cloned().unwrap_or_else(|| json!({}));
+            match app.emit("dev-watch", payload) {
+                Ok(()) => json!(true),
+                Err(err) => {
+                    eprintln!("[shell] emit dev-watch: {err}");
+                    json!(false)
+                }
+            }
+        }),
+    );
+
+    // shell.tray.setSnapshot(snapshot) -> { ok, revision, error? }
+    // The only ingress for host/plugin-owned declarative tray groups. The
+    // snapshot is validated against the JSON Schema and the domain model before
+    // it is cached; core groups are rejected (Rust-owned). The reply is
+    // synchronous so the host knows whether its menu was accepted.
+    peer.on(
+        "shell.tray.setSnapshot",
+        handler(app.clone(), |app, args| {
+            let payload = args.first().cloned().unwrap_or_else(|| json!({}));
+            let verdict = crate::tray::apply_host_snapshot(app, payload);
+            serde_json::to_value(verdict).unwrap_or_else(
+                |err| json!({ "ok": false, "revision": 0, "error": err.to_string() }),
+            )
         }),
     );
 }

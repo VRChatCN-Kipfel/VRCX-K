@@ -1,4 +1,4 @@
-import { RPCChannel } from "kkrpc"
+import { RPCChannel, type RPCMessage, type Transport } from "kkrpc"
 import {
   stdioJsonTransport,
   type ReadableLike,
@@ -8,12 +8,32 @@ import { HOST_RESTART_EXIT, hostWsAPI } from "./api"
 import { gracefulStopWithTimeout } from "./lifecycle"
 import type { Context } from "cordis"
 import type { HostWsReady } from "./ws"
+import type { TrayMenuSnapshot } from "./tray-contract.generated"
+
+/** Result of `shell.tray.setSnapshot` (mirrors src-tauri/src/shell_sys.rs). */
+export type TraySetSnapshotResult = {
+  ok: boolean
+  revision: number
+  error?: string
+}
+
+/** Payload of the shell → host `tray.action` notification. */
+export type TrayActionEvent = {
+  id: string
+  command: string
+  args: unknown[]
+}
 
 /** Host API exposed to the Rust shell (LocalAPI). */
 export type HostStdioAPI = {
   ping(): Promise<string>
   stop(): Promise<boolean>
   restart(): Promise<boolean>
+  /** Shell → host tray notifications. */
+  tray: {
+    /** A host/plugin-owned tray item was clicked. */
+    action(action: TrayActionEvent): boolean
+  }
 }
 
 /** Dialog options for message/ask. */
@@ -39,6 +59,20 @@ export type AppInfo = {
 
 /** Well-known directory kinds for `shell.path.resolve`. */
 export type PathKind = "config" | "data" | "cache" | "temp" | "home"
+
+/**
+ * Dev-watch event pushed host → shell → face (issue #11 wiring). This is a
+ * #11-owned event shape (not a #7 lifecycle DTO): plain camelCase JSON, errors
+ * reduced to strings so kkrpc JSON transport never sees Error objects.
+ */
+export type DevWatchPush = {
+  type: string
+  entryId?: string
+  path?: string
+  status?: string
+  error?: string
+  entries?: string[]
+}
 
 /**
  * Shell (Rust) API exposed to the host — the system capability surface.
@@ -82,8 +116,34 @@ export type ShellSysAPI = {
       dir(): Promise<Record<PathKind, string>>
       resolve(kind: PathKind): Promise<string>
     }
+    /** Fire-and-forget dev-watch event relay to the shell (which emits `dev-watch` to the face). */
+    devWatchEvent(event: DevWatchPush): Promise<boolean>
+    /**
+     * Tray ingress (host → shell). `shell.tray.setSnapshot` mirrors
+     * `src-tauri/src/shell_sys.rs`; the payload is the `TrayMenuSnapshot` from
+     * contracts/tray-menu.schema.json and may only contain host/plugin-owned
+     * groups.
+     */
+    tray: {
+      setSnapshot(snapshot: TrayMenuSnapshot): Promise<TraySetSnapshotResult>
+    }
   }
 }
+
+/**
+ * Host-facing view of the shell bridge.
+ *
+ * `tray.setSnapshot` is the same remote `shell.tray.setSnapshot` call, exposed
+ * as a host-side namespace so the tray service has one dependency; `onAction`
+ * is a purely local registration (the shell → host `tray.action` notification
+ * arrives on the exposed API, not through the remote proxy).
+ */
+export type ShellTrayBridge = {
+  setSnapshot(snapshot: TrayMenuSnapshot): Promise<TraySetSnapshotResult>
+  onAction(handler: (action: TrayActionEvent) => void): () => void
+}
+
+export type ShellStdioBridge = ShellSysAPI & { tray: ShellTrayBridge }
 
 class ReadableStreamLike implements ReadableLike {
   private listeners = new Set<(chunk: Uint8Array | string) => void>()
@@ -138,30 +198,76 @@ function bunStdioTransport() {
 /**
  * Connect the host to the Rust shell over kkrpc/stdio.
  *
- * `expose` is the host API the shell can call (ping/stop/restart); the
- * returned proxy is the shell's API the host can call (ready + shell.*).
+ * `expose` is the host API the shell can call (ping/stop/restart + the
+ * `tray.action` notification); the returned bridge is the shell's API the host
+ * can call (ready + shell.*, plus the local `tray.onAction` registration).
  *
  * stop/restart run a real graceful fiber teardown before exiting — M1-3
  * issue #8: dispose fibers in reverse order, then exit 0 (stop) or 51
  * (restart).
+ *
+ * `options.transport` exists for tests (an in-memory transport pair); the
+ * default is the real bun stdio transport.
  */
-export function connectShellStdio(ctx: Context) {
-  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(bunStdioTransport(), {
+export function connectShellStdio(ctx: Context, options: { transport?: Transport<RPCMessage> } = {}): ShellStdioBridge {
+  const trayHandlers = new Set<(action: TrayActionEvent) => void>()
+  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(), {
     expose: {
       ping: () => hostWsAPI.ping(),
       stop: async () => {
         console.error("[host] stop requested — graceful shutdown")
-        await gracefulStopWithTimeout(ctx, "stop")
+        const acquired = await gracefulStopWithTimeout(ctx, "stop")
+        if (!acquired) {
+          // A shutdown is already in progress (e.g. dev-watch restart
+          // requester); the first trigger owns the exit. Do not exit 0 here —
+          // the process is already leaving (0 or 51).
+          return true
+        }
         setTimeout(() => process.exit(0), 10)
         return true
       },
       restart: async () => {
         console.error("[host] restart requested — graceful shutdown then exit 51")
-        await gracefulStopWithTimeout(ctx, "restart")
+        const acquired = await gracefulStopWithTimeout(ctx, "restart")
+        if (!acquired) {
+          // Already shutting down; the first trigger owns the exit.
+          return true
+        }
         setTimeout(() => process.exit(HOST_RESTART_EXIT), 10)
         return true
       },
+      tray: {
+        // `tray.action` (shell → host): fan out to every registered handler.
+        // A handler throwing must never break the RPC channel.
+        action: (action: TrayActionEvent) => {
+          for (const handler of [...trayHandlers]) {
+            try {
+              handler(action)
+            } catch (error) {
+              console.error("[host] tray.action handler error", error)
+            }
+          }
+          return true
+        },
+      },
     },
   })
-  return channel.getAPI()
+  const remote = channel.getAPI()
+  // Build the bridge explicitly. The remote proxy is function-shaped and its
+  // `set` trap turns property assignment into an RPC, so own properties must
+  // NOT be added on top of it (Object.create(remote) + `bridge.tray = ...`
+  // silently sends a "set" frame and leaves `tray` undefined).
+  return {
+    ready: (info) => remote.ready(info),
+    shell: remote.shell,
+    tray: {
+      setSnapshot: (snapshot) => remote.shell.tray.setSnapshot(snapshot),
+      onAction: (handler) => {
+        trayHandlers.add(handler)
+        return () => {
+          trayHandlers.delete(handler)
+        }
+      },
+    },
+  }
 }

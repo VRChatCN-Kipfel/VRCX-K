@@ -18,6 +18,14 @@ dist-ssr
 # Cargo workspace build output
 /target/
 
+# Host sidecar artifact (built by scripts/build-host.ts into Tauri's
+# externalBin input dir). The directory itself is tracked via
+# src-tauri/binaries/README.md; only the generated binaries are ignored.
+# (`host/dist/` needs no rule: the `dist` pattern above already covers it.)
+/src-tauri/binaries/host-*
+/src-tauri/binaries/.host-*.tmp-*
+host/dist/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

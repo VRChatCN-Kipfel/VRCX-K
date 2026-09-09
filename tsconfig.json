@@ -20,6 +20,10 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
+  /* Production/build program: application code only. Bun globals must not leak
+     into shipped code, so the bun types live in tsconfig.test.json, which
+     `bun run typecheck` runs over the test files. */
   "include": ["src"],
+  "exclude": ["src/**/*.test.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

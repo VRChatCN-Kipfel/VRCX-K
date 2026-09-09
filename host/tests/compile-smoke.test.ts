@@ -17,10 +17,16 @@ beforeAll(async () => {
 
 let proc: ReturnType<typeof Bun.spawn> | undefined
 
-afterEach(() => {
-  if (proc) killTree(proc.pid)
+// The compiled host is ~85MB; its FIRST spawn after a fresh compile is a cold
+// start (AV scan / page cache) that can exceed the 5s default hook budget.
+// Give the teardown hook room and wait for the child to actually exit before
+// the artifact is unlinked (Windows keeps the file locked while it runs).
+afterEach(async () => {
+  if (!proc) return
+  killTree(proc.pid)
+  await proc.exited.catch(() => {})
   proc = undefined
-})
+}, 30_000)
 
 afterAll(async () => {
   await unlink(outfile).catch(() => {})
@@ -43,7 +49,8 @@ test("compiled host finds cordis.yml via cwd", async () => {
     stdout: "pipe",
     stderr: "pipe",
   })
-  const ready = await readReady(proc.stderr)
+  // Cold start of a compiled sidecar is slow on Windows (see afterEach).
+  const ready = await readReady(proc.stderr, 60_000)
   expect(ready.port).toBeGreaterThan(0)
   expect(ready.token).toMatch(/^[0-9a-f]{64}$/)
   expect(ready.version).toBe(HOST_VERSION)

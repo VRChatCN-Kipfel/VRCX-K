@@ -4,8 +4,20 @@ import { useEffect, useRef, useState } from "react"
 import { Toaster, toast } from "sonner"
 import "./App.css"
 import { connectHostWs, type HostReady, type HostWsAPI } from "./host"
+import { DevWatchPanel } from "./devWatchPanel"
+import { HostLifecyclePanel } from "./hostLifecyclePanel"
 
 type Status = "connecting" | "connected" | "reconnecting"
+
+// Dev-only affordance: the dev-watch panel is compiled in dev builds only
+// (`tauri dev`), and additionally requires the Tauri runtime — a bare Vite
+// browser session cannot receive Tauri events.
+const devWatchVisible = import.meta.env.DEV && isTauri()
+
+// Host lifecycle readout: needs the Tauri runtime (it calls the
+// `get_host_lifecycle` command and listens to the `host-lifecycle` event).
+// Outside Tauri the panel is not mounted at all, so no IPC is attempted.
+const hostLifecycleVisible = isTauri()
 
 function statusLabel(status: Status, version: string | null) {
   if (status === "connected" && version) return `已连接（${version}）`
@@ -140,6 +152,8 @@ function App() {
         </button>
         {pingMsg ? <p className="ping">{pingMsg}</p> : null}
       </main>
+      {devWatchVisible ? <DevWatchPanel /> : null}
+      {hostLifecycleVisible ? <HostLifecyclePanel /> : null}
       <Toaster richColors position="top-right" />
     </>
   )

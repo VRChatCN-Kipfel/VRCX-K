@@ -33,6 +33,7 @@ pub fn notify_simple(
 /// Kept cfg(windows) so non-Windows builds stay clean; the actual WinRT calls
 /// land in F3 (buttons/progress for invites etc.).
 #[cfg(windows)]
+#[allow(dead_code)] // Intentional placeholder: F3 wires the real WinRT path.
 pub fn notify_windows_deep(_app: &AppHandle, _title: &str, _body: &str) -> tauri::Result<()> {
     // TODO(F3): tauri-winrt-notification Toast::new(app_id) with AUMID/icon/buttons.
     // For M1 the simple path (notify_simple) covers the smoke/acceptance; depth
