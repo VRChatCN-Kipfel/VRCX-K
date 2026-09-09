@@ -47,19 +47,47 @@ export const GRACEFUL_STOP_HARD_CAP_MS = 25_000
  * Dispose every fiber in reverse load order, then clear the root fiber's own
  * disposables. Resolves when cleanup finished; rejects nothing (errors are
  * logged, never fatal — the process still exits).
+ *
+ * Since issue #11 the Include config is mounted as a loader-tree entry
+ * (`cordis:include` builtin), so plugin fibers live in nested contexts inside
+ * the loader tree rather than directly on the root registry. We therefore
+ * first dispose every entry fiber across the loader tree (deepest/leaf
+ * entries first, via reverse preorder of `ctx.loader.entries()`), then fall
+ * back to the root registry loop for any remaining root-level plugins, then
+ * clear the root disposables.
  */
 export async function gracefulStop(ctx: Context): Promise<void> {
   const log = (line: string) => console.error("[host]", line)
+  const loader = (ctx as Context & { loader?: { entries?(): Iterable<LoaderEntryLike> } }).loader
 
-  // 1. All plugin runtimes registered on this context.
+  // 1. Dispose every entry fiber in the loader tree (includes the include
+  //    tree via recursion), leaves first.
+  if (loader?.entries) {
+    const entries = [...loader.entries()]
+    log(`graceful stop: disposing ${entries.length} loader tree entr(ies)`)
+    for (const entry of entries.reverse()) {
+      const fiber = entry.fiber
+      if (!fiber || fiber.uid === null) continue
+      // Suppress Loader's config write-back (unload == disable).
+      if (entry.options) entry.options.disabled = true
+      log(`  dispose entry ${entry.id} (${entry.options.name ?? ""})`)
+      try {
+        await fiber.dispose()
+      } catch (err) {
+        console.error("[host] entry fiber dispose error", err)
+      }
+    }
+  }
+
+  // 2. All plugin runtimes registered directly on this context (legacy /
+  //    non-loader-tree plugins; loader-tree fibers are already disposed).
   const runtimes = [...ctx.registry.values()]
-  log(`graceful stop: disposing ${runtimes.length} runtime(s)`)
+  log(`graceful stop: disposing ${runtimes.length} root runtime(s)`)
 
   for (const runtime of runtimes.reverse()) {
     const fibers = [...runtime.fibers]
     log(`  runtime ${runtime.name ?? "(unnamed)"}: ${fibers.length} fiber(s)`)
     for (const fiber of fibers.reverse()) {
-      // Suppress Loader's config write-back (see module doc).
       const entry = (fiber as { entry?: { options?: { disabled?: boolean } } }).entry
       if (entry?.options) entry.options.disabled = true
       log(`    dispose fiber ${fiber.name}`)
@@ -71,7 +99,7 @@ export async function gracefulStop(ctx: Context): Promise<void> {
     }
   }
 
-  // 2. Root fiber's own disposables (Loader/Include/heartbeat effect cleanup).
+  // 3. Root fiber's own disposables (Loader/Include/heartbeat effect cleanup).
   const root = ctx.fiber
   const disposers = root._disposables?.clear() ?? []
   log(`graceful stop: clearing ${disposers.length} root disposable(s)`)
@@ -82,6 +110,12 @@ export async function gracefulStop(ctx: Context): Promise<void> {
       console.error("[host] root disposable error", err)
     }
   }
+}
+
+type LoaderEntryLike = {
+  id: string
+  fiber?: { uid: number | null; dispose(): Promise<void>; name: string } | null
+  options?: { name?: string; disabled?: boolean }
 }
 
 /**
