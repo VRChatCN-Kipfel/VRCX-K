@@ -131,13 +131,27 @@ export class ShutdownSignal {
   }
 
   /**
-   * Called by `gracefulStopWithTimeout` to start the cooperative clock.
-   * Not exposed to plugins — they call `extend()` and check `stopping`.
+   * Try to become the shutdown trigger (the process-wide stopping gate).
+   *
+   * The first caller wins: it sets `stopping`, records its `reason` and starts
+   * the cooperative deadline clock. Any later call while a shutdown is already
+   * in progress is a no-op — it returns `false` and does NOT reset the
+   * deadline or overwrite the reason. This unifies every in-process shutdown
+   * path (stdio stop RPC, stdio restart RPC, dev-watch restart requester) so a
+   * concurrent second request can never double-run fiber cleanup.
+   *
+   * @returns `true` if this call acquired the gate (it owns cleanup + exit);
+   *          `false` if a shutdown is already in progress.
    */
-  begin(initialMs: number, hardCapMs: number, reason: "stop" | "restart"): void {
+  begin(initialMs: number, hardCapMs: number, reason: "stop" | "restart"): boolean {
+    if (this._stopping) {
+      // Already shutting down: keep the first trigger's deadline and reason.
+      return false
+    }
     this._stopping = true
     this._reason = reason
     this._deadline = new RenewableDeadline(initialMs, hardCapMs)
+    return true
   }
 
   /**

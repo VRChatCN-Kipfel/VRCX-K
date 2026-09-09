@@ -167,13 +167,23 @@ export function connectShellStdio(ctx: Context) {
       ping: () => hostWsAPI.ping(),
       stop: async () => {
         console.error("[host] stop requested — graceful shutdown")
-        await gracefulStopWithTimeout(ctx, "stop")
+        const acquired = await gracefulStopWithTimeout(ctx, "stop")
+        if (!acquired) {
+          // A shutdown is already in progress (e.g. dev-watch restart
+          // requester); the first trigger owns the exit. Do not exit 0 here —
+          // the process is already leaving (0 or 51).
+          return true
+        }
         setTimeout(() => process.exit(0), 10)
         return true
       },
       restart: async () => {
         console.error("[host] restart requested — graceful shutdown then exit 51")
-        await gracefulStopWithTimeout(ctx, "restart")
+        const acquired = await gracefulStopWithTimeout(ctx, "restart")
+        if (!acquired) {
+          // Already shutting down; the first trigger owns the exit.
+          return true
+        }
         setTimeout(() => process.exit(HOST_RESTART_EXIT), 10)
         return true
       },

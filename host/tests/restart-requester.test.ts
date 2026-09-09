@@ -17,6 +17,7 @@ function makeHarness(overrides: Partial<RestartRequesterOptions> = {}) {
     },
     gracefulStop: async (reason) => {
       stops.push(reason)
+      return true // fake always acquires the stopping gate
     },
     ...overrides,
   }
@@ -108,5 +109,25 @@ describe("makeRestartRequester", () => {
     await new Promise((r) => setTimeout(r, 30))
     // Only one stop was initiated; entry b hit the in-progress latch.
     expect(stops).toHaveLength(1)
+  })
+
+  test("yields to an in-progress shutdown: no exit-51 when the gate is not acquired", async () => {
+    // Simulates a concurrent stdio stop RPC that already owns the stopping
+    // gate: the requester's gracefulStop resolves false, so it must NOT
+    // schedule a competing exit-51.
+    let clock = 0
+    const exits: number[] = []
+    const requester = makeRestartRequester({} as never, {
+      shellAttached: true,
+      now: () => clock,
+      exitProcess: (code) => {
+        exits.push(code)
+      },
+      gracefulStop: async () => false, // another shutdown path owns the gate
+    })
+    clock = 10_001
+    requester({ entryId: "a", error: new Error("boom") })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(exits).toHaveLength(0) // no competing exit-51
   })
 })

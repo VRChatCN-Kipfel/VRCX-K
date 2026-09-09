@@ -23,15 +23,22 @@ export type RestartRequesterOptions = {
   shellAttached: boolean
   now?: () => number
   exitProcess?: (code: number) => void
-  /** Injectable graceful teardown (tests pass a fake; default is the real host stop). */
-  gracefulStop?: (reason: "stop" | "restart") => Promise<void>
+  /**
+   * Injectable graceful teardown. Resolves `true` when this call acquired the
+   * process-wide stopping gate (it owns the exit); `false` when a shutdown is
+   * already in progress (e.g. a concurrent stdio stop RPC) — the requester
+   * must then NOT schedule its own exit-51.
+   * Tests pass a fake; the default is the real host stop.
+   */
+  gracefulStop?: (reason: "stop" | "restart") => Promise<boolean>
 }
 
 export function makeRestartRequester(ctx: Context, options: RestartRequesterOptions): RestartRequester {
   const shellAttached = options.shellAttached
   const now = options.now ?? Date.now
   const exitProcess = options.exitProcess ?? ((code: number) => process.exit(code))
-  const gracefulStop = options.gracefulStop ?? ((reason: "stop" | "restart") => gracefulStopWithTimeout(ctx, reason))
+  const gracefulStop =
+    options.gracefulStop ?? (async (reason: "stop" | "restart") => gracefulStopWithTimeout(ctx, reason))
   const lastRequest = new Map<string, number>()
   const startedAt = now()
   let restarting = false
@@ -62,7 +69,13 @@ export function makeRestartRequester(ctx: Context, options: RestartRequesterOpti
     }
     restarting = true
     log("requesting host restart (exit 51)")
-    void gracefulStop("restart").finally(() => {
+    void gracefulStop("restart").then((acquired) => {
+      if (!acquired) {
+        // Another shutdown path (e.g. stdio stop RPC) already owns cleanup
+        // and the exit — do not schedule a competing exit-51.
+        log("restart request yielded to an in-progress shutdown (no exit-51 scheduled)")
+        return
+      }
       setTimeout(() => {
         exitProcess(HOST_RESTART_EXIT)
         // In the real host this line never runs (the process is gone). In
