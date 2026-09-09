@@ -1,3 +1,4 @@
+mod app_lifecycle;
 mod host;
 mod host_lifecycle;
 mod kkrpc_stdio;
@@ -6,26 +7,13 @@ mod process_tree;
 mod shell_sys;
 mod tray;
 
+use app_lifecycle::{
+    AppCommand, AppCommandRequest, AppCommandResult, AppLifecycle, AppLifecycleFacade,
+};
 use host::{supervise_loop, HostReady, HostState};
 use host_lifecycle::{HostCommand, HostCommandResult, HostSnapshot};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Manager, RunEvent};
-
-#[derive(Default)]
-struct AppLifecycle {
-    restart_requested: AtomicBool,
-}
-
-impl AppLifecycle {
-    fn begin_restart(&self) -> Result<(), &'static str> {
-        if self.restart_requested.swap(true, Ordering::AcqRel) {
-            Err("app restart already in progress")
-        } else {
-            Ok(())
-        }
-    }
-}
 
 #[derive(Clone, Debug, Serialize)]
 struct HostLifecycleStateResponse {
@@ -53,23 +41,43 @@ fn dispatch_host_command(
 }
 
 #[tauri::command]
-fn restart_app_graceful(
+fn dispatch_app_command(
     app: tauri::AppHandle,
     state: tauri::State<HostState>,
     lifecycle: tauri::State<AppLifecycle>,
-) -> Result<(), String> {
-    // Latch before returning so duplicate commands and the supervisor both see
-    // the restart intent immediately. Slow graceful cleanup never blocks the
-    // Tauri command thread; request_stop includes the shared deadline/force
-    // fallback before request_restart is invoked.
-    lifecycle.begin_restart().map_err(str::to_owned)?;
-    state.latch_stop();
-    std::thread::spawn(move || {
-        let state = app.state::<HostState>();
-        state.request_stop();
-        app.request_restart();
-    });
-    Ok(())
+    request: AppCommandRequest,
+) -> AppCommandResult {
+    let command = request.command;
+    let result = lifecycle.dispatch(request);
+    if !matches!(result, AppCommandResult::Accepted { .. }) {
+        return result;
+    }
+
+    // The Rust shell owns process lifecycle. Latch AppExit before returning so
+    // the supervisor cannot relaunch and host/plugin code cannot race this app
+    // command. Graceful work runs off the Tauri command thread.
+    state.latch_app_exit();
+    match command {
+        AppCommand::RestartGraceful => {
+            std::thread::spawn(move || {
+                let state = app.state::<HostState>();
+                state.request_app_exit_graceful();
+                app.request_restart();
+            });
+        }
+        AppCommand::QuitGraceful => {
+            std::thread::spawn(move || {
+                let state = app.state::<HostState>();
+                state.request_app_exit_graceful();
+                app.exit(0);
+            });
+        }
+        AppCommand::QuitForce => {
+            state.force_app_exit();
+            app.exit(0);
+        }
+    }
+    result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -96,7 +104,7 @@ pub fn run() {
             get_host_ready,
             get_host_lifecycle,
             dispatch_host_command,
-            restart_app_graceful
+            dispatch_app_command
         ])
         .setup(|app| {
             tray::setup(app.handle())?;
@@ -120,19 +128,4 @@ pub fn run() {
                 app.state::<HostState>().request_stop();
             }
         });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn app_restart_latch_accepts_once_and_rejects_duplicates() {
-        let lifecycle = AppLifecycle::default();
-        assert_eq!(lifecycle.begin_restart(), Ok(()));
-        assert_eq!(
-            lifecycle.begin_restart(),
-            Err("app restart already in progress")
-        );
-    }
 }

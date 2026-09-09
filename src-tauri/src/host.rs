@@ -150,23 +150,42 @@ impl HostState {
         }
     }
 
-    pub fn latch_stop(&self) {
+    fn latch_desired(&self, desired: crate::host_lifecycle::HostDesiredState) {
         let mut inner = self.inner.lock().expect("host");
         inner.stopping = true;
         inner.command_epoch = inner.command_epoch.wrapping_add(1);
         inner.lifecycle.phase = HostLifecycleState::Stopping;
-        inner.lifecycle.desired = crate::host_lifecycle::HostDesiredState::Stopped;
+        inner.lifecycle.desired = desired;
+    }
+
+    pub fn latch_app_exit(&self) {
+        self.latch_desired(crate::host_lifecycle::HostDesiredState::AppExit);
     }
 
     pub fn request_stop(&self) {
         self.request_stop_with_timeout(STOP_TIMEOUT);
     }
 
+    pub fn request_app_exit_graceful(&self) {
+        self.request_stop_with_desired(
+            STOP_TIMEOUT,
+            crate::host_lifecycle::HostDesiredState::AppExit,
+        );
+    }
+
     pub fn request_stop_with_timeout(&self, timeout: Duration) {
+        self.request_stop_with_desired(timeout, crate::host_lifecycle::HostDesiredState::Stopped);
+    }
+
+    fn request_stop_with_desired(
+        &self,
+        timeout: Duration,
+        desired: crate::host_lifecycle::HostDesiredState,
+    ) {
         // Start one watchdog before writing the RPC. A wedged host must not
         // receive a fresh child-exit wait after consuming the RPC timeout.
         let deadline = Instant::now() + timeout;
-        self.latch_stop();
+        self.latch_desired(desired);
         let peer = self.inner.lock().expect("host").peer.clone();
         if let Some(peer) = peer {
             let _ = peer.call_timeout("stop", vec![], stop_rpc_timeout(deadline));
@@ -197,6 +216,11 @@ impl HostState {
         if let Some(tree) = inner.tree.as_mut() {
             tree.kill_tree();
         }
+    }
+
+    pub fn force_app_exit(&self) {
+        self.latch_app_exit();
+        self.reap_tree();
     }
 
     fn reap_tree(&self) {
