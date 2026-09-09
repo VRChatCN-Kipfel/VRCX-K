@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@vrcx-k/host",
   "version": "0.0.1",
   "private": true,
@@ -6,7 +6,7 @@
   "description": "VRCX-K host 鈥?Cordis (bun) runtime. The 'brain'.",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "bun build --compile src/index.ts --outfile dist/host",
+    "build": "bun run ../scripts/build-host.ts",
     "test": "bun test",
     "generate:tray-contract": "json2ts ../contracts/tray-menu.schema.json -o src/tray-contract.generated.ts --maxItems -1"
   },

@@ -13,7 +13,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "dev:host": "bun run --cwd host dev",
-    "build:host": "bun run --cwd host build",
+    "build:host": "bun run scripts/build-host.ts",
     "test:host": "bun test --cwd host"
   },
   "dependencies": {
