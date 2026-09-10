@@ -136,22 +136,43 @@ fn ensure_host_sidecar() {
         "--target-triple".into(),
         triple.into(),
     ];
-    let status = spawn_bun(&args, &repo_root);
 
-    match status {
-        Ok(status) if status.success() && artifact.is_file() => {}
-        Ok(status) => panic!(
-            "failed to build the host sidecar ({} exited with {status}); \
-             run `bun run build:host` manually to see the full output",
-            script.display()
-        ),
-        Err(error) => panic!(
-            "cannot build the host sidecar: failed to spawn `bun` ({error}). \
-             Install bun 1.4+ (see AGENTS.md), or set VRCXK_BUN to the bun \
-             executable, or run `bun run build:host` manually to produce {} \
-             before building the shell",
-            artifact.display()
-        ),
+    // The build step is idempotent, so a transient failure is worth retrying
+    // before giving up. On Windows `bun build --compile` reads the `.bun`
+    // virtual store (node_modules/.bun/...) and can hit EPERM while another
+    // process (AV scan, an install handle not yet released) briefly holds a
+    // file — a race that shows up sporadically on CI, never deterministically.
+    // Retry with a short backoff; a real configuration error still fails
+    // hard after the budget is exhausted (never silently downgraded).
+    const ATTEMPTS: u32 = 3;
+    let mut last_failure = String::new();
+    let mut sidecar_ok = false;
+    for attempt in 1..=ATTEMPTS {
+        if attempt > 1 {
+            std::thread::sleep(std::time::Duration::from_millis(1500 * u64::from(attempt - 1)));
+            println!(
+                "cargo:warning=host sidecar build attempt {attempt}/{ATTEMPTS} (previous: {last_failure})"
+            );
+        }
+        match spawn_bun(&args, &repo_root) {
+            Ok(status) if status.success() && artifact.is_file() => {
+                sidecar_ok = true;
+                break;
+            }
+            Ok(status) => {
+                last_failure = format!("`bun run build-host.ts` exited with {status}");
+            }
+            Err(error) => {
+                last_failure = format!("failed to spawn bun: {error}");
+            }
+        }
+    }
+    if !sidecar_ok {
+        panic!(
+            "failed to build the host sidecar after {ATTEMPTS} attempts: {last_failure}. \
+             Run `bun run build:host` manually to see the full output (or set VRCXK_BUN \
+             to the bun executable)"
+        );
     }
 }
 
