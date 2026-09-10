@@ -1,0 +1,91 @@
+# VRCX-K 移动端兼容性验证（当前：Android；将来可扩展 iOS）
+#
+# 目标：验证壳（Rust）+ 脸（React）在移动端能编译打包并冒烟运行。
+# 三端架构里 host 脑（bun+cordis）目前没有任何移动端目标（见
+# scripts/build-host.ts RUST_TO_BUN_TARGET），故移动端只验证壳+脸：
+#   - build.rs 对 Android TARGET 跳过 sidecar 自愈（is_android_target）
+#   - tauri.android.conf.json 覆盖 externalBin=[] 且 beforeBuildCommand 只 build 前端
+#
+# 将来接入 iOS 时：在本文件新增 ios job（runs-on: macos-latest），并同样以
+# tauri.ios.conf.json 覆盖 externalBin=[]（iOS 上 duckdb 等宿主脑也暂无目标）。
+name: mobile-compat
+
+on:
+  push:
+    branches: [rewrite]
+  pull_request:
+    branches: [rewrite]
+  # 手动触发：便于在不改代码时单独跑移动端 job
+  workflow_dispatch:
+
+# 同一分支/PR 的旧 run 自动取消（Android job 成本高，防止叠满队列）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: android (universal APK + emulator smoke)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # 一步：setup bun + 缓存 node_modules（跨分支共享）+ frozen install
+      - name: Setup bun + install deps (cached)
+        uses: WebNaresh/bun-setup-action@v1
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install Rust stable with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      # Android 交叉编译产物（根 /target/ 下各 android target 子目录）跨 job 共享
+      - name: Cache cargo (Android targets)
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Java 17 (required by Android Gradle Plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          # Gradle 依赖缓存（~/.gradle）——Android 构建大头，跨 job 共享
+          cache: gradle
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Android 下 beforeBuildCommand 已由 tauri.android.conf.json 覆盖为纯前端 build
+      - name: Build universal APK (all 4 ABIs, one package)
+        run: bun run tauri android build -- --apk
+
+      - name: Locate APK
+        id: apk
+        run: |
+          # 精确匹配 universal 包（未来 --split-per-abi 产生多个时不会抓错）
+          APK=$(find src-tauri/gen/android -name '*universal*.apk' | head -1)
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "APK: $APK"
+
+      - name: Run emulator smoke (boot + install + launch)
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          profile: pixel_5
+          script: |
+            adb install -r "${{ steps.apk.outputs.apk }}"
+            adb shell am start -n com.vrcxk.app/.MainActivity
+            sleep 8
+            # 冒烟断言：主 Activity 在前台，且进程未崩溃
+            adb shell "dumpsys activity activities | grep -q 'mResumedActivity.*com.vrcxk.app' && echo SMOKE_OK || exit 1"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrcx-k-android-universal
+          path: ${{ steps.apk.outputs.apk }}
+          if-no-files-found: error

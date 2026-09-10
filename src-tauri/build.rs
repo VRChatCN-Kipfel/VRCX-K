@@ -43,7 +43,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    ensure_host_sidecar();
+    // Android: no host brain. The sidecar is a bun-compiled Cordis host and bun
+    // has no Android target (see scripts/build-host.ts RUST_TO_BUN_TARGET), so
+    // there is nothing to build — and `tauri android build` would otherwise
+    // fail-fast in ensure_host_sidecar for a TARGET like aarch64-linux-android.
+    // Android CI only validates the shell + face; the sidecar is desktop-only.
+    if !is_android_target() {
+        ensure_host_sidecar();
+    }
 
     #[cfg(all(windows, target_env = "msvc"))]
     {
@@ -80,6 +87,13 @@ fn sidecar_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
         .join(name)
+}
+
+/// True when compiling for an Android target (`*-linux-android*`).
+fn is_android_target() -> bool {
+    std::env::var("TARGET")
+        .map(|triple| triple.contains("linux-android"))
+        .unwrap_or(false)
 }
 
 fn ensure_host_sidecar() {

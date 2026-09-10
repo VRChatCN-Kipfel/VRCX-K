@@ -1,0 +1,72 @@
+# VRCX-K 桌面端 CI：三平台构建验证
+#
+# 目标：在干净 checkout 上验证"新克隆直接可构建"承诺 + 桌面三端跨架构兼容性
+# （Windows x64 / Linux x64 / macOS arm64，均为原生 runner）。
+# host 脑（bun+cordis）是本流程的主要被测对象之一：sidecar 由 src-tauri/build.rs
+# 在缺失/过期时自动构建（自愈），无需手工先行 build:host。
+name: build
+
+on:
+  push:
+    branches: [rewrite]
+  pull_request:
+    branches: [rewrite]
+  workflow_dispatch:
+
+# 同一分支/PR 的旧 run 自动取消（避免过时构建叠满队列、浪费分钟数）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest        # x86_64 Windows
+          - ubuntu-24.04          # x86_64 Linux
+          - macos-latest          # arm64 macOS
+    steps:
+      - uses: actions/checkout@v4
+
+      # 一步：setup bun + 缓存 node_modules（跨分支共享）+ frozen install
+      #（依赖树小、bun install 快，故主要收益在缓存命中时的 ~0 开销 install）
+      - name: Setup bun + install deps (cached)
+        uses: WebNaresh/bun-setup-action@v1
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # 跨 job / 跨 workflow 共享的 cargo 缓存（key 自动含 Cargo.lock/rustc/OS；
+      # 三平台矩阵各自隔离 key，但同平台不同 job 命中同一缓存）
+      # workspace 根在仓库根，target 在 /target/ —— 用默认 `. -> target`
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Linux system deps (webkit2gtk etc.)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      # 新克隆不手工 build:host → 由 build.rs 自动触发（缺失即建）
+      - name: Cargo check (spawns host sidecar self-heal)
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Frontend + host typecheck
+        run: bun run typecheck
+
+      - name: Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Bun tests (frontend + host)
+        run: bun run test
+
+      - name: Frontend build
+        run: bun run build
