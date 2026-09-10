@@ -1,9 +1,17 @@
-# VRCX-K 桌面端 CI：三平台构建验证
+# VRCX-K CI：桌面三平台 + 移动端（当前 Android）构建验证
 #
-# 目标：在干净 checkout 上验证"新克隆直接可构建"承诺 + 桌面三端跨架构兼容性
-# （Windows x64 / Linux x64 / macOS arm64，均为原生 runner）。
-# host 脑（bun+cordis）是本流程的主要被测对象之一：sidecar 由 src-tauri/build.rs
+# 桌面：在干净 checkout 上验证"新克隆直接可构建"承诺 + 三端跨架构兼容性
+#       （Windows x64 / Linux x64 / macOS arm64，均为原生 runner）。
+# host 脑（bun+cordis）是主要被测对象之一：sidecar 由 src-tauri/build.rs
 # 在缺失/过期时自动构建（自愈），无需手工先行 build:host。
+#
+# mobile（matrix，当前仅 android）：验证壳（Rust）+ 脸（React）在移动端
+# 能编译打包。三端架构里 host 脑（bun+cordis）目前没有任何移动端目标
+# （scripts/build-host.ts RUST_TO_BUN_TARGET 仅桌面），故移动端只验证壳+脸：
+#   - build.rs 对 Android TARGET 跳过 sidecar 自愈（is_android_target）
+#   - tauri.android.conf.json 覆盖 externalBin=[] 且 beforeBuildCommand 只 build 前端
+# 当前为调通期：android job continue-on-error，失败不阻塞整体；将来 iOS
+# 只需在 mobile matrix 加一个 runs-on: macos-latest 条目。
 name: build
 
 on:
@@ -70,3 +78,68 @@ jobs:
 
       - name: Frontend build
         run: bun run build
+
+  mobile:
+    name: mobile (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
+    # 调通期：android 还在高频修错中，失败不应阻塞 desktop 信号。
+    # 移动端验证的是"壳+脸能编译"，与桌面流程独立成熟后去掉此行。
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: android, os: ubuntu-24.04 }
+        # 将来 iOS：- { name: ios, os: macos-latest }（需 tauri.ios.conf.json 覆盖 externalBin=[]）
+    steps:
+      - uses: actions/checkout@v4
+
+      # 一步：setup bun + 缓存 node_modules（跨分支共享）+ frozen install
+      - name: Setup bun + install deps (cached)
+        uses: WebNaresh/bun-setup-action@v1
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install Rust stable with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      # Android 交叉编译产物（根 /target/ 下各 android target 子目录）跨 job 共享
+      - name: Cache cargo (Android targets)
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 先生成 Android gradle 工程：`tauri android build` 会自己 init，但
+      # setup-java 的 `cache: gradle` 需要 gradle 文件已存在才能计算缓存键
+      # 并命中（否则 job 在 setup-java 就 fail "No file matched")。init 需要
+      # SDK（已由上一布安装），且幂等；它让 gradle 缓存从第一次 run 起可用。
+      - name: Initialize Android project (generates gradle files)
+        run: bun run tauri android init
+
+      - name: Install Java 17 (required by Android Gradle Plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          # Gradle 依赖缓存（~/.gradle）——Android 构建大头，跨 job 共享
+          cache: gradle
+
+      # Android 下 beforeBuildCommand 已由 tauri.android.conf.json 覆盖为纯前端 build
+      # `--apk` 是 tauri 自己的选项（生成 APK），不能放 `--` 后面（那会把
+      # --apk 原样转发给 cargo 而报 "unexpected argument '--apk'"）。
+      - name: Build universal APK (all 4 ABIs, one package)
+        run: bun run tauri android build --apk
+
+      - name: Locate APK
+        id: apk
+        run: |
+          # 精确匹配 universal 包（未来 --split-per-abi 产生多个时不会抓错）
+          APK=$(find src-tauri/gen/android -name '*universal*.apk' | head -1)
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "APK: $APK"
+          # 构建成功但找不到 APK 视为失败（防止静默通过）
+          test -n "$APK"
