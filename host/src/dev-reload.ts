@@ -15,6 +15,8 @@
 //    here, and never on every save.
 //  - Single reload timeout is 10s (below the 25s host stop hard cap).
 
+import { realpathSync } from "node:fs"
+import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { createRequire } from "node:module"
 import type { Entry } from "@cordisjs/plugin-loader"
@@ -86,19 +88,57 @@ export function moduleCache(): Record<string, unknown> {
 }
 
 /**
+ * Resolve the longest existing path prefix via realpathSync (never throws).
+ * A cache key may be spelled lexically (`/var/...`) while the binding root is
+ * real (`/private/var/...`) or vice versa; both keys must collapse to the same
+ * comparison space. Non-existent tails stay lexical; total failure returns the
+ * input unchanged.
+ */
+function realPath(input: string): string {
+  const tail: string[] = []
+  let cursor = input
+  for (;;) {
+    try {
+      const real = realpathSync(cursor)
+      return tail.length ? real + "/" + tail.reverse().join("/") : real
+    } catch {
+      const parent = dirname(cursor)
+      if (parent === cursor) return input
+      tail.push(cursor.slice(parent.length + 1))
+      cursor = parent
+    }
+  }
+}
+
+/** Fold a path to a lowercase, `/`-separated comparison key. */
+function fold(input: string): string {
+  return input.replaceAll("\\", "/").toLowerCase()
+}
+
+/**
  * Collect the require.cache keys that belong to the given directory roots.
  * On Bun the keys are absolute filesystem paths (not file: URLs). Only keys
  * under an explicit root are dropped — host/Cordis/node_modules never are.
+ *
+ * Both sides are matched in the realpath key space AND the lexical key space:
+ * a cache key may be spelled `/private/var/...` where the root is `/var/...`
+ * (macOS tmpdir symlink) or `C:\Users\RUNNER~1\...` vs `C:\Users\runneradmin\...`
+ * (Windows 8.3 short name). Matching either spelling keeps the old module
+ * from surviving a reload on those platforms.
  */
 export function collectCacheKeysUnderRoots(
   roots: string[],
   cache: Record<string, unknown> = moduleCache(),
 ): string[] {
-  const normalizedRoots = roots.map((root) => root.replaceAll("\\", "/").toLowerCase())
+  const lexicalRoots = roots.map(fold)
+  const realRoots = roots.map((root) => fold(realPath(root)))
   const keys: string[] = []
   for (const key of Object.keys(cache)) {
-    const normalized = key.replaceAll("\\", "/").toLowerCase()
-    if (normalizedRoots.some((root) => normalized.startsWith(root + "/") || normalized === root)) {
+    const lexical = fold(key)
+    const real = fold(realPath(key))
+    const inSpace = (space: string[], probe: string) =>
+      space.some((root) => probe.startsWith(root + "/") || probe === root)
+    if (inSpace(lexicalRoots, lexical) || inSpace(realRoots, real)) {
       keys.push(key)
     }
   }

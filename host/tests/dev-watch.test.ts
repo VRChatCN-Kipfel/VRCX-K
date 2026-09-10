@@ -11,7 +11,7 @@ import type { Entry } from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
 import Loader from "@cordisjs/plugin-loader"
 import { DevWatch, attachDevWatch, type DevWatchEvent, type IncludeTree } from "../src/dev-watch"
-import { canonicalPath } from "../src/watch-path"
+import { watchKey } from "../src/watch-path"
 
 const roots: string[] = []
 let ctx: Context | undefined
@@ -423,7 +423,7 @@ describe("DevWatch lifecycle guards", () => {
     })
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
-    expect(watch.watchedRoots.map(canonicalPath)).toContain(canonicalPath(extra))
+    expect(watch.watchedRoots.map(watchKey)).toContain(watchKey(extra))
     await watch.close()
   }, 30_000)
 
@@ -544,7 +544,7 @@ describe("DevWatch lifecycle guards", () => {
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
     await sleep(150)
-    expect(watch.watchedRoots.map(canonicalPath)).not.toContain(canonicalPath(extraDir))
+    expect(watch.watchedRoots.map(watchKey)).not.toContain(watchKey(extraDir))
 
     await writeFile(
       configFile,
@@ -555,7 +555,7 @@ describe("DevWatch lifecycle guards", () => {
     if (refreshed.type !== "config-refreshed") return
     const gammaEntryId = refreshed.entries.find((id) => id.endsWith(":gamma"))
     expect(gammaEntryId).toBeDefined()
-    expect(watch.watchedRoots.map(canonicalPath)).toContain(canonicalPath(extraDir))
+    expect(watch.watchedRoots.map(watchKey)).toContain(watchKey(extraDir))
 
     // The new root is only useful if a change under it reloads its entry. The
     // first write can race chokidar's attach, so retry with a bounded poll.

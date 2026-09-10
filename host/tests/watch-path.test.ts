@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
-import { binding, canonicalExistingPath, canonicalFileUrl, canonicalPath, mapPath } from "../src/watch-path"
+import { binding, canonicalExistingPath, canonicalFileUrl, canonicalPath, mapPath, watchKey } from "../src/watch-path"
 
 const root = join(import.meta.dir, "fixtures", "watcher")
 
@@ -40,14 +40,17 @@ describe("watch path normalization", () => {
       } catch {
         // Symlinks may be unavailable (Windows privileges); fall back to a
         // plain-file identity check for the resolved path.
-        expect(await canonicalExistingPath(target)).toBe(canonicalPath(target))
+        expect(await canonicalExistingPath(target)).toBe(watchKey(target))
         return
       }
-      // Symlink resolves to the real target path.
-      expect(await canonicalExistingPath(link)).toBe(canonicalPath(target))
-      // Missing file falls back to the lexical canonical path (no throw).
+      // The symlink resolves to the real target path (realpath key space —
+      // the contract DevWatch relies on, e.g. macOS /var → /private/var).
+      expect(await canonicalExistingPath(link)).toBe(watchKey(target))
+      // A missing file keeps its existing-prefix realpath (the symlinked tmp
+      // root still resolves), so it lines up with what a realpath-keyed
+      // consumer would compute for the same path.
       const missing = join(dir, "missing.ts")
-      expect(await canonicalExistingPath(missing)).toBe(canonicalPath(missing))
+      expect(await canonicalExistingPath(missing)).toBe(watchKey(missing))
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -123,15 +126,18 @@ describe("URL to entry mapping", () => {
       const entry = join(link, "plugin", "index.ts")
       await mkdir(join(link, "plugin"), { recursive: true })
       await writeFile(entry, "x")
+      // The util file must exist before its realpath is probed.
+      const util = join(link, "plugin", "util.ts")
+      await writeFile(util, "util")
       // What a lexically-keyed watcher sees (the same spelling it registered).
-      const lexicalEvent = join(link, "plugin", "util.ts")
+      const lexicalEvent = util
       const bound = binding("p", entry, [join(link, "plugin")])
       // The lexical event maps to the lexical binding — no realpath involved.
       expect(mapPath(lexicalEvent, [bound])).toMatchObject({ kind: "matched", entryIds: ["p"] })
       // And even if something handed us the realpath spelling (the old bug —
       // canonicalExistingPath on a symlinked tmp root), mapPath must treat it
       // as the same prefix via the real path. Prove the lexical contract wins.
-      const realEvent = await realpath(join(link, "plugin", "util.ts"))
+      const realEvent = await realpath(util)
       expect(realEvent).not.toBe(lexicalEvent)
       expect(relative(join(realpath(link), "plugin"), realEvent)).toMatch(/^util\.ts$/)
     } finally {
