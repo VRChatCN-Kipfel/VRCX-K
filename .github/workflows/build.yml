@@ -41,12 +41,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 一步：setup bun + 缓存 node_modules（跨分支共享）+ frozen install
-      #（依赖树小、bun install 快，故主要收益在缓存命中时的 ~0 开销 install）
-      - name: Setup bun + install deps (cached)
-        uses: WebNaresh/bun-setup-action@v1
+      # 官方 setup-bun：只装 bun 可执行文件（setup-bun 只缓存 bun 本体）
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.2"
+
+      # 缓存 bun 的全局包缓存（~/.bun/install/cache），而不是 node_modules。
+      # 原因：bun 默认 isolated linker 用 hardlink/junction 物化 node_modules，
+      # actions/cache 在 Windows 用 bsdtar 恢复会破坏这些链接（悬挂 → bun
+      # build --compile 读它 EPERM）。缓存全局包缓存后，每次 install 从完整
+      # 缓存重新物化出全新 node_modules，链接永远自洽。key 按 bun.lock 精确
+      # 变化；restore-keys 前缀回退让依赖的小改动仍能复用旧缓存。依赖将来
+      # 增多时，缓存体积只随包 tarball 增长，受 GitHub 10GB / 7 天淘汰约束。
+      - name: Cache bun package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies (frozen)
+        run: bun install --frozen-lockfile
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -95,11 +112,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 一步：setup bun + 缓存 node_modules（跨分支共享）+ frozen install
-      - name: Setup bun + install deps (cached)
-        uses: WebNaresh/bun-setup-action@v1
+      # 官方 setup-bun：只装 bun 可执行文件（与 desktop job 相同策略）
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.2"
+
+      # 缓存 bun 全局包缓存而非 node_modules（原因见 desktop job 注释：
+      # isolated hardlink store 经 bsdtar 恢复会损坏 → EPERM）
+      - name: Cache bun package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies (frozen)
+        run: bun install --frozen-lockfile
 
       - name: Install Rust stable with Android targets
         uses: dtolnay/rust-toolchain@stable
