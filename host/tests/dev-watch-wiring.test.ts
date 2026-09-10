@@ -15,7 +15,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { killTree, resolveBun, warmBun } from "./helpers"
-import { canonicalPath } from "../src/watch-path"
+import { watchKey } from "../src/watch-path"
 
 const hostDir = join(import.meta.dir, "..")
 const entryScript = join(hostDir, "src", "index.ts")
@@ -114,6 +114,9 @@ describe("real host entry wiring", () => {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      // Source: host becomes its own process-group leader (setsid), so
+      // killTree's kill(-pid) reaps it in one signal (Rust-shell parity).
+      detached: true,
       env: { ...process.env, VRCXK_DEV_WATCH: "1", VRCXK_SHELL: "0" },
     })
     procs.push(proc)
@@ -129,8 +132,8 @@ describe("real host entry wiring", () => {
     // dirname(configFile). With `.pathname` they were "/e:/..." → canonicalized
     // to "E:\E:\..." instead of the real directory.
     const rootsLine = watching.match(/dev watch watching: (.+)/)![1].trim()
-    const watched = rootsLine.split(",").map((path) => canonicalPath(path.trim()))
-    expect(watched).toContain(canonicalPath(root))
+    const watched = rootsLine.split(",").map((path) => watchKey(path.trim()))
+    expect(watched).toContain(watchKey(root))
 
     // Behavioural half: adding an entry must be observed by the watcher. Retry
     // with distinct content because the host primes its config hash right after

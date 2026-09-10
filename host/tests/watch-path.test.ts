@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { binding, canonicalExistingPath, canonicalFileUrl, canonicalPath, mapPath } from "../src/watch-path"
 
 const root = join(import.meta.dir, "fixtures", "watcher")
@@ -96,5 +96,46 @@ describe("URL to entry mapping", () => {
       kind: "matched",
       entryIds: ["alpha"],
     })
+  })
+
+  test("DevWatch keeps the lexical key space (no realpath divergence)", async () => {
+    // Regression: DevWatch.flushFs used `canonicalExistingPath` (realpath
+    // key) while bindings used `canonicalPath` (lexical). On macOS the tmpdir
+    // is a symlink (/var → /private/var), so chokidar event paths (realpath)
+    // never mapped to lexical binding roots and live reload never fired.
+    // This pins the contract: the watcher path must stay lexical so mapPath
+    // matches the lexical binding.
+    const dir = await mkdtemp(join(tmpdir(), "vrcxk-watchpath-sym-"))
+    try {
+      const realDir = join(dir, "real")
+      const link = join(dir, "link")
+      await mkdir(realDir, { recursive: true })
+      try {
+        await symlink(realDir, link, "dir")
+      } catch {
+        // Windows without symlink privilege: nothing to prove.
+        return
+      }
+      // The chokidar event path is lexical (/var/...-style); the binding is
+      // built from the same lexical root. A naive canonicalExistingPath would
+      // have turned the event into realpath (/private/var/...), which must
+      // NOT be what we compare against.
+      const entry = join(link, "plugin", "index.ts")
+      await mkdir(join(link, "plugin"), { recursive: true })
+      await writeFile(entry, "x")
+      // What a lexically-keyed watcher sees (the same spelling it registered).
+      const lexicalEvent = join(link, "plugin", "util.ts")
+      const bound = binding("p", entry, [join(link, "plugin")])
+      // The lexical event maps to the lexical binding — no realpath involved.
+      expect(mapPath(lexicalEvent, [bound])).toMatchObject({ kind: "matched", entryIds: ["p"] })
+      // And even if something handed us the realpath spelling (the old bug —
+      // canonicalExistingPath on a symlinked tmp root), mapPath must treat it
+      // as the same prefix via the real path. Prove the lexical contract wins.
+      const realEvent = await realpath(join(link, "plugin", "util.ts"))
+      expect(realEvent).not.toBe(lexicalEvent)
+      expect(relative(join(realpath(link), "plugin"), realEvent)).toMatch(/^util\.ts$/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

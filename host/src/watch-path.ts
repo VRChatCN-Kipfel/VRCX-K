@@ -1,5 +1,5 @@
-import { realpath } from "node:fs/promises"
-import { isAbsolute, normalize, relative, resolve } from "node:path"
+import { realpathSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 export type EntryBinding = {
@@ -41,19 +41,50 @@ export function canonicalFileUrl(input: string | URL): string {
   return pathToFileURL(path).href
 }
 
-export async function canonicalExistingPath(input: string | URL): Promise<string> {
-  try {
-    return canonicalPath(await realpath(lexicalPath(input)))
-  } catch {
-    return canonicalPath(input)
+/**
+ * Watch-space comparison key. Unlike `canonicalPath` (pure lexical), this
+ * resolves symlinks in the existing path prefix via realpathSync so two
+ * spellings of one directory — e.g. macOS `/var` and its realpath
+ * `/private/var`, or `process.cwd()` reportings — collapse to one key.
+ * Non-existent tails stay lexical; failures fall back to `canonicalPath`.
+ *
+ * Bindings AND watcher event paths should be normalized with this, so both
+ * sides live in the same key space on every platform.
+ */
+export function watchKey(input: string | URL): string {
+  const path = lexicalPath(input)
+  const tail: string[] = []
+  let cursor = path
+  for (;;) {
+    try {
+      const real = realpathSync(cursor)
+      return canonicalPath(tail.length ? join(real, ...tail.reverse()) : real)
+    } catch {
+      const parent = dirname(cursor)
+      if (parent === cursor) return canonicalPath(path)
+      tail.push(basename(cursor))
+      cursor = parent
+    }
   }
 }
 
-export function binding(entryId: string, entryUrl: string | URL, roots: Array<string | URL>): EntryBinding {
+export async function canonicalExistingPath(input: string | URL): Promise<string> {
+  // Same "resolve symlinks in the existing prefix, fall back lexical" contract
+  // as watchKey; kept async for callers that awaited the old fs-based one.
+  return watchKey(input)
+}
+
+export function binding(
+  entryId: string,
+  entryUrl: string | URL,
+  roots: Array<string | URL>,
+  key: (input: string | URL) => string = canonicalPath,
+): EntryBinding {
+  const entryPath = key(entryUrl)
   return {
     entryId,
-    entryUrl: canonicalFileUrl(entryUrl),
-    roots: roots.map(canonicalPath),
+    entryUrl: pathToFileURL(entryPath).href,
+    roots: roots.map((root) => key(root)),
   }
 }
 
@@ -85,4 +116,3 @@ export function mapPath(input: string | URL, bindings: Iterable<EntryBinding>): 
   if (matches.length > 1) return { kind: "ambiguous", path, entryIds: matches }
   return { kind: "unowned", path }
 }
-

@@ -28,6 +28,9 @@ async function spawnHost() {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    // Source: host becomes its own process-group leader (setsid), so
+    // killTree's kill(-pid) reaps it in one signal (Rust-shell parity).
+    detached: true,
   })
   const ready = await readReady(proc.stderr)
   return { proc, ready }

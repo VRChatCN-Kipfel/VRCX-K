@@ -75,9 +75,11 @@ export async function warmBun(): Promise<void> {
 
 /**
  * Kill a process tree by PID. Windows: taskkill /T /F (tree kill, robust
- * against orphans). Unix: negative PID (process group). Non-blocking — the
- * caller should not wait on it inside hooks (a sync taskkill can stall a
- * test hook past its timeout).
+ * against orphans). Unix: `killProcessGroup(pid)` — the child is spawned with
+ * `detached: true` (Bun calls setsid → new process group leader) and its
+ * descendants inherit that group, so one `kill(-pgid)` SIGKILLs the whole
+ * tree. Non-blocking — the caller should not wait on it inside hooks (a sync
+ * taskkill can stall a test hook past its timeout).
  */
 export function killTree(pid: number | undefined): void {
   if (!pid) return
@@ -88,10 +90,19 @@ export function killTree(pid: number | undefined): void {
         windowsHide: true,
       })
     } else {
-      process.kill(-pid, "SIGKILL")
+      killProcessGroup(pid)
     }
   } catch {
     // Already gone — fine.
+  }
+}
+
+/** SIGKILL the whole process group whose leader is `pid` (no throw). */
+function killProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL")
+  } catch {
+    // Already gone — fine (ESRCH from a vanished group).
   }
 }
 
@@ -105,7 +116,7 @@ export function killTreeSync(pid: number | undefined): void {
         windowsHide: true,
       })
     } else {
-      process.kill(-pid, "SIGKILL")
+      killProcessGroup(pid)
     }
   } catch {
     // Already gone — fine.

@@ -81,6 +81,10 @@ test.skipIf(!available)("sidecar launches to ready and stops gracefully via stdi
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
+    // Source: the sidecar becomes its own process-group leader (setsid), so
+    // killTree's kill(-pid) reaps host + any descendants in one signal — same
+    // semantics as the Rust shell's process_group(0) / Job Object.
+    detached: true,
     // The Rust shell always marks the child as shell-attached so the host
     // connects the kkrpc/stdio bridge (VRCXK_SHELL=1, see host.rs
     // start_host_process / host/src/index.ts).

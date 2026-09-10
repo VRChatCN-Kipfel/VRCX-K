@@ -37,6 +37,9 @@ test("compiled host finds cordis.yml via cwd", async () => {
     cwd: hostDir,
     stdout: "pipe",
     stderr: "pipe",
+    // The compile step is a one-shot; detached keeps it from dragging the
+    // runner's group into a failure (its own host children get own groups).
+    detached: true,
   })
   const compileCode = await compile.exited
   const compileErr = await new Response(compile.stderr).text()
@@ -48,6 +51,10 @@ test("compiled host finds cordis.yml via cwd", async () => {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    // Source: the sidecar becomes its own process-group leader (setsid), so
+    // killTree's kill(-pid) reaps host + any descendants in one signal — same
+    // semantics as the Rust shell's process_group(0) / Job Object.
+    detached: true,
   })
   // Cold start of a compiled sidecar is slow on Windows (see afterEach).
   const ready = await readReady(proc.stderr, 60_000)

@@ -27,9 +27,8 @@ import type { Context } from "cordis"
 import type { Entry, EntryTree } from "@cordisjs/plugin-loader"
 import {
   binding,
-  canonicalExistingPath,
-  canonicalPath,
   mapPath,
+  watchKey,
   type EntryBinding,
 } from "./watch-path"
 import { reloadPluginEntry, type ReloadResult } from "./dev-reload"
@@ -164,7 +163,11 @@ export class DevWatch {
       const own = name.startsWith(".")
         ? fileURLToPath(new URL(name, entry.parent.tree.ctx.baseUrl))
         : name
-      return binding(id, own, explicit)
+      // Realpath key space: bindings live in the same space the watcher will
+      // report. Without this, macOS (process.cwd() → /private/var realpath,
+      // mkdtemp → /var lexical) splits bindings and events into two keys and
+      // live reload never fires.
+      return binding(id, own, explicit, watchKey)
     } catch (error) {
       // A non-file entry name (e.g. a bare module specifier) cannot be
       // watched; skip it instead of poisoning every path mapping.
@@ -192,7 +195,8 @@ export class DevWatch {
 
   /** Absolute canonical path of the config file (for the include watcher). */
   get configPath(): string {
-    return canonicalPath(this.configFile)
+    // Realpath key space, matching the binding/event keys (see watchKey).
+    return watchKey(this.configFile)
   }
 
   get activeEntryIds(): string[] {
@@ -301,7 +305,7 @@ export class DevWatch {
     // fiber teardown (and its close() would not be awaited by anything).
     if (this.closed || this.isStopping()) return
     // Config file changes go to the debounced include-refresh channel.
-    if (canonicalPath(path) === this.configPath) {
+    if (watchKey(path) === this.configPath) {
       this.scheduleConfigRefresh()
       return
     }
@@ -329,7 +333,10 @@ export class DevWatch {
     const bindings = [...this.bindings.values()].map((item) => item.binding)
     for (const raw of pending) {
       try {
-        const canonical = await canonicalExistingPath(raw)
+        // Realpath key space, matching the bindings' watchKey. Mixed lexical
+        // (chokidar event) vs realpath (binding root) keys are exactly the
+        // macOS /var → /private/var divergence that broke live reload.
+        const canonical = watchKey(raw)
         const mapping = mapPath(canonical, bindings)
         if (mapping.kind === "unowned") {
           this.onState?.({ type: "unowned", path: canonical })
