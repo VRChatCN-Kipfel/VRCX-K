@@ -149,7 +149,9 @@ fn ensure_host_sidecar() {
     let mut sidecar_ok = false;
     for attempt in 1..=ATTEMPTS {
         if attempt > 1 {
-            std::thread::sleep(std::time::Duration::from_millis(1500 * u64::from(attempt - 1)));
+            std::thread::sleep(std::time::Duration::from_millis(
+                1500 * u64::from(attempt - 1),
+            ));
             println!(
                 "cargo:warning=host sidecar build attempt {attempt}/{ATTEMPTS} (previous: {last_failure})"
             );
