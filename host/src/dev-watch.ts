@@ -120,6 +120,7 @@ export class DevWatch {
   private fsPending = new Map<string, "add" | "change" | "unlink">()
   private fsFirstPendingAt = 0
   private closed = false
+  private ready = false
   private configContentHash?: string
   private watchRoots = new Set<string>()
   /** entryId -> (entry, canonical binding) */
@@ -254,6 +255,11 @@ export class DevWatch {
       },
     })
     this.chokidar.on("ready", () => {
+      // Gate file routing on the initial scan (same rationale as
+      // HostWatcher.enqueue): chokidar's ignoreInitial covers add events but
+      // on some platforms initial adds replay after `ready` as change events,
+      // which would spuriously reload a pre-existing entry.
+      this.ready = true
       this.onState?.({ type: "started", roots: [...this.watchRoots] })
       // Prime config content hash so we don't react to our own initial read.
       void this.readConfigHash()
@@ -304,6 +310,8 @@ export class DevWatch {
     // No routing once shutdown began: a reload started now would race the
     // fiber teardown (and its close() would not be awaited by anything).
     if (this.closed || this.isStopping()) return
+    // No routing before the initial scan is complete (see the ready callback).
+    if (!this.ready) return
     // Config file changes go to the debounced include-refresh channel.
     if (watchKey(path) === this.configPath) {
       this.scheduleConfigRefresh()

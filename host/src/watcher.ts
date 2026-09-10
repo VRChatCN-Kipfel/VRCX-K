@@ -24,6 +24,7 @@ export class HostWatcher {
   private timer?: ReturnType<typeof setTimeout>
   private pending = new Set<string>()
   private closed = false
+  private ready = false
   private flushing?: Promise<void>
   private closing?: Promise<void>
   private closedEventEmitted = false
@@ -52,7 +53,10 @@ export class HostWatcher {
       }),
     })
     this.watcher = watcher
-    watcher.on("ready", () => onEvent?.({ type: "started" }))
+    watcher.on("ready", () => {
+      this.ready = true
+      onEvent?.({ type: "started" })
+    })
     watcher.on("change", (path) => this.enqueue(path))
     watcher.on("add", (path) => this.enqueue(path))
     watcher.on("unlink", (path) => this.enqueue(path))
@@ -67,6 +71,13 @@ export class HostWatcher {
 
   private enqueue(path: string) {
     if (this.closed) return
+    // Gate on the initial scan: chokidar's `ignoreInitial` covers add events
+    // but on some platforms (macOS symlinked tmpdirs) initial adds can be
+    // replayed after `ready` as ordinary change events. Any event arriving
+    // before `ready` is part of the initial scan, not an edit, so it must not
+    // route (a pre-existing entry's file would otherwise trigger a spurious
+    // reload/onChange).
+    if (!this.ready) return
     this.pending.add(path)
     if (this.timer) clearTimeout(this.timer)
     this.timer = setTimeout(() => void this.flush(), this.debounceMs)

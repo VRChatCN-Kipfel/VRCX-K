@@ -139,7 +139,7 @@ describe("URL to entry mapping", () => {
       // as the same prefix via the real path. Prove the lexical contract wins.
       const realEvent = await realpath(util)
       expect(realEvent).not.toBe(lexicalEvent)
-      expect(relative(join(realpath(link), "plugin"), realEvent)).toMatch(/^util\.ts$/)
+      expect(relative(await realpath(join(link, "plugin")), realEvent)).toMatch(/^util\.ts$/)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

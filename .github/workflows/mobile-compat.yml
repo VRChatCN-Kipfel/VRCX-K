@@ -46,6 +46,16 @@ jobs:
       - name: Cache cargo (Android targets)
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 先生成 Android gradle 工程：`tauri android build` 会自己 init，但
+      # setup-java 的 `cache: gradle` 需要 gradle 文件已存在才能计算缓存键
+      # 并命中（否则 job 在 setup-java 就 fail "No file matched")。init 需要
+      # SDK（已由上一布安装），且幂等；它让 gradle 缓存从第一次 run 起可用。
+      - name: Initialize Android project (generates gradle files)
+        run: bun run tauri android init
+
       - name: Install Java 17 (required by Android Gradle Plugin)
         uses: actions/setup-java@v4
         with:
@@ -53,9 +63,6 @@ jobs:
           java-version: "17"
           # Gradle 依赖缓存（~/.gradle）——Android 构建大头，跨 job 共享
           cache: gradle
-
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
 
       # Android 下 beforeBuildCommand 已由 tauri.android.conf.json 覆盖为纯前端 build
       - name: Build universal APK (all 4 ABIs, one package)
