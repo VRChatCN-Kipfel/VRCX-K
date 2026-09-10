@@ -1,4 +1,5 @@
 import { watch, type FSWatcher, type ChokidarOptions } from "chokidar"
+import { statSync } from "node:fs"
 import { isAbsolute, resolve, sep } from "node:path"
 import type { EntryBinding, MappingResult } from "./watch-path"
 import { canonicalPath, mapPath } from "./watch-path"
@@ -25,6 +26,7 @@ export class HostWatcher {
   private pending = new Set<string>()
   private closed = false
   private ready = false
+  private readyAtMs = 0
   private flushing?: Promise<void>
   private closing?: Promise<void>
   private closedEventEmitted = false
@@ -55,11 +57,12 @@ export class HostWatcher {
     this.watcher = watcher
     watcher.on("ready", () => {
       this.ready = true
+      this.readyAtMs = Date.now()
       onEvent?.({ type: "started" })
     })
-    watcher.on("change", (path) => this.enqueue(path))
-    watcher.on("add", (path) => this.enqueue(path))
-    watcher.on("unlink", (path) => this.enqueue(path))
+    watcher.on("change", (path) => this.enqueue(path, "change"))
+    watcher.on("add", (path) => this.enqueue(path, "add"))
+    watcher.on("unlink", (path) => this.enqueue(path, "unlink"))
     watcher.on("error", (error) => onEvent?.({ type: "error", error }))
     return watcher
   }
@@ -69,7 +72,7 @@ export class HostWatcher {
     for (const item of bindings) this.bindings.set(item.entryId, item)
   }
 
-  private enqueue(path: string) {
+  private enqueue(path: string, kind: "add" | "change" | "unlink" = "change") {
     if (this.closed) return
     // Gate on the initial scan: chokidar's `ignoreInitial` covers add events
     // but on some platforms (macOS symlinked tmpdirs) initial adds can be
@@ -78,9 +81,24 @@ export class HostWatcher {
     // route (a pre-existing entry's file would otherwise trigger a spurious
     // reload/onChange).
     if (!this.ready) return
+    // Baseline filter: a `change` for a file whose mtime predates `ready`
+    // cannot be a real edit (edits bump mtime). On macOS FSEvents the initial
+    // scan can replay an already-present file as a change after ready; the
+    // mtime tells the two apart without a time window or swallowing a genuine
+    // first edit (which updates mtime past readyAtMs).
+    if (kind === "change" && this.isInitialReplay(path)) return
     this.pending.add(path)
     if (this.timer) clearTimeout(this.timer)
     this.timer = setTimeout(() => void this.flush(), this.debounceMs)
+  }
+
+  /** True when the file existed before the initial scan finished. */
+  private isInitialReplay(path: string): boolean {
+    try {
+      return statSync(path).mtimeMs < this.readyAtMs
+    } catch {
+      return false // missing file = real add/unlink signal, not a replay
+    }
   }
 
   private async flush() {

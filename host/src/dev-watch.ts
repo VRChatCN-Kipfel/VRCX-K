@@ -21,6 +21,7 @@
 //     (`attachDevWatch` does exactly that).
 
 import { watch } from "chokidar"
+import { statSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Context } from "cordis"
@@ -121,6 +122,7 @@ export class DevWatch {
   private fsFirstPendingAt = 0
   private closed = false
   private ready = false
+  private readyAtMs = 0
   private configContentHash?: string
   private watchRoots = new Set<string>()
   /** entryId -> (entry, canonical binding) */
@@ -260,6 +262,7 @@ export class DevWatch {
       // on some platforms initial adds replay after `ready` as change events,
       // which would spuriously reload a pre-existing entry.
       this.ready = true
+      this.readyAtMs = Date.now()
       this.onState?.({ type: "started", roots: [...this.watchRoots] })
       // Prime config content hash so we don't react to our own initial read.
       void this.readConfigHash()
@@ -312,6 +315,9 @@ export class DevWatch {
     if (this.closed || this.isStopping()) return
     // No routing before the initial scan is complete (see the ready callback).
     if (!this.ready) return
+    // Baseline filter (same rationale as HostWatcher.enqueue): a `change` for
+    // a file whose mtime predates `ready` is a scan replay, not an edit.
+    if (kind === "change" && this.isInitialReplay(path)) return
     // Config file changes go to the debounced include-refresh channel.
     if (watchKey(path) === this.configPath) {
       this.scheduleConfigRefresh()
@@ -362,6 +368,15 @@ export class DevWatch {
         // routing for the remaining paths (flushFs runs detached).
         this.onState?.({ type: "watcher-error", error })
       }
+    }
+  }
+
+  /** True when the file existed before the initial scan finished. */
+  private isInitialReplay(path: string): boolean {
+    try {
+      return statSync(path).mtimeMs < this.readyAtMs
+    } catch {
+      return false // missing file = real add/unlink signal, not a replay
     }
   }
 

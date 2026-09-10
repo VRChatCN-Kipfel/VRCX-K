@@ -444,7 +444,13 @@ describe("DevWatch lifecycle guards", () => {
 
     const internals = watch as unknown as { handleFsEvent(kind: "change", path: string): void }
     const started = Date.now()
-    const timer = setInterval(() => internals.handleFsEvent("change", entryFile), 60)
+    // Production `change` events accompany a real file modification (mtime
+    // bump); DevWatch's initial-replay filter keys on that, so the injected
+    // event must reflect a real write or it would be dropped as a scan replay.
+    const timer = setInterval(async () => {
+      await writeFile(entryFile, (await Bun.file(entryFile).text()) + "// burst\n")
+      internals.handleFsEvent("change", entryFile)
+    }, 60)
     try {
       await waitEvent(events, (e) => e.type === "change", 5_000)
       expect(Date.now() - started).toBeLessThan(3_000)
