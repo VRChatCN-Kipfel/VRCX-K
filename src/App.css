@@ -367,3 +367,120 @@ button:disabled {
     max-height: 40vh;
   }
 }
+
+/* Capability smoke entry point (see src/capabilitySmokePanel.tsx).
+   In flow below the main content instead of a third fixed overlay: it is a
+   checklist with several rows, and the two existing overlays (host-life
+   bottom-left, dev-watch bottom-right) already own the corners. */
+.smoke {
+  margin: 24px auto 48px;
+  width: min(760px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #d8d8d8;
+  font-size: 13px;
+  line-height: 19px;
+  text-align: left;
+}
+
+@media (prefers-color-scheme: dark) {
+  .smoke {
+    background: #1f1f1f;
+    border-color: #444;
+  }
+
+  .smoke-row {
+    border-top-color: #3a3a3a;
+  }
+
+  .smoke-value,
+  .smoke-manual,
+  .smoke-hint,
+  .smoke-presses,
+  .smoke-expect {
+    color: #b8b8b8;
+  }
+
+  .smoke-expect strong {
+    color: #e8e8e8;
+  }
+}
+
+.smoke-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.smoke-head h2 {
+  margin: 0;
+  font-size: 15px;
+  flex: 1;
+}
+
+.smoke-head button {
+  padding: 0.2em 0.7em;
+  font-size: 12px;
+}
+
+.smoke-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid #ececec;
+}
+
+.smoke-row h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.smoke-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.smoke-actions button {
+  padding: 0.3em 0.7em;
+  font-size: 12px;
+}
+
+.smoke-status {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.smoke-value {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.smoke-manual,
+.smoke-hint {
+  margin: 0;
+  color: #666;
+}
+
+/* Per-button expected outcome: the manual half of the smoke checklist. */
+.smoke-expect {
+  margin: 0;
+  padding-left: 18px;
+  color: #666;
+}
+
+.smoke-expect strong {
+  color: #444;
+}
+
+.smoke-presses {
+  margin: 0;
+  padding-left: 18px;
+  color: #666;
+}

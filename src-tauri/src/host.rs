@@ -1024,6 +1024,22 @@ struct StartingHost {
 fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
     let launch = resolve_host_launch(app)?;
 
+    // Log the resolved launch once per spawn. From the UI, "the host is dead"
+    // and "the shell launched the wrong thing" look identical, and this line is
+    // what turns the 2026-09 dev-launch bug (a target-dir sidecar copy with cwd
+    // = target dir, so the host died on a missing cordis.yml) into a one-look
+    // diagnosis instead of a multi-step inference.
+    eprintln!(
+        "[shell] host launch: {} {}(cwd {})",
+        launch.program.display(),
+        if launch.args.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", launch.args.join(" "))
+        },
+        launch.cwd.display()
+    );
+
     let mut cmd = Command::new(&launch.program);
     cmd.args(&launch.args)
         .current_dir(&launch.cwd)
@@ -1275,30 +1291,48 @@ fn find_packaged_host(resource_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The runtime file the host needs in its working directory.
+///
+/// The compiled sidecar resolves its include tree from `./cordis.yml` relative
+/// to cwd, so a sidecar without this file beside it starts and dies within
+/// milliseconds.
+const HOST_RUNTIME_ENTRY: &str = "cordis.yml";
+
 /// Resolve how to launch the host.
 ///
 /// Priority (highest first):
 /// 1. `VRCXK_HOST_BIN`: explicit compiled binary override; fails fast when
 ///    the file does not exist (no silent fallback — debugging/tests).
-/// 2. Packaged: when an `AppHandle` is available and `resource_dir()` holds
-///    the bundled sidecar (`host[.exe]`, triple suffix stripped by Tauri),
-///    run it with the resource dir as cwd so the host finds its runtime
-///    files (`cordis.yml`, `plugins/`) beside itself. If the resource dir
-///    only holds a dev-placed `host-<triple>[.exe]`, use that too.
-/// 3. Dev source: current default for `cargo tauri dev`/tests — `bun` +
-///    `src/index.ts` in the checked-out `host/` dir (VRCXK_BUN /
-///    VRCXK_HOST_DIR overrides kept).
+/// 2. Bundled sidecar: `resource_dir()` holds both the packaged sidecar
+///    (`host[.exe]`, triple suffix stripped by Tauri) and
+///    [`HOST_RUNTIME_ENTRY`], and it is run with the resource dir as cwd so the
+///    host finds `cordis.yml` / `plugins/` beside itself. **Packaged builds
+///    only** — see `dev_build` on the pure core.
+/// 3. Dev source: default for `cargo tauri dev`/tests — `bun` + `src/index.ts`
+///    in the checked-out `host/` dir (VRCXK_BUN / VRCXK_HOST_DIR kept).
 fn resolve_host_launch(app: Option<&AppHandle>) -> Result<HostLaunch, String> {
     let explicit = std::env::var("VRCXK_HOST_BIN").ok().map(PathBuf::from);
     let cwd_override = std::env::var_os("VRCXK_HOST_DIR").map(PathBuf::from);
-    resolve_host_launch_with(app, explicit, cwd_override)
+    let resource_dir = app.and_then(|app| app.path().resource_dir().ok());
+    resolve_host_launch_with(resource_dir, explicit, cwd_override, tauri::is_dev())
 }
 
-/// Pure core of `resolve_host_launch` (env values passed in for testability).
+/// Pure core of `resolve_host_launch` (inputs passed in for testability).
+///
+/// `dev_build` is `tauri::is_dev()`. In a dev build `resource_dir()` is the
+/// cargo target directory, where `tauri dev` drops a copy of the external
+/// binary (triple suffix stripped) but **not** the host's runtime files:
+/// launching that copy runs the brain with cwd = target dir, so it dies on the
+/// missing `cordis.yml`, the supervisor retries it forever, and every shell →
+/// host notification (tray actions, shortcut presses) reports "not delivered" —
+/// the UI then blames the host while the real fault is the launch source. A dev
+/// build must therefore run from source. (2026-09 regression: a `tauri dev`
+/// acceptance run hit exactly this.)
 fn resolve_host_launch_with(
-    app: Option<&AppHandle>,
+    resource_dir: Option<PathBuf>,
     explicit: Option<PathBuf>,
     cwd_override: Option<PathBuf>,
+    dev_build: bool,
 ) -> Result<HostLaunch, String> {
     // 1. Explicit compiled override (fail fast).
     if let Some(program) = explicit {
@@ -1321,13 +1355,22 @@ fn resolve_host_launch_with(
         return Ok(HostLaunch::compiled(program, cwd));
     }
 
-    // 2. Packaged sidecar next to the app resources.
-    if let Some(app) = app {
-        let Ok(resource_dir) = app.path().resource_dir() else {
-            return Err("cannot resolve Tauri resource dir".into());
-        };
-        if let Some(program) = find_packaged_host(&resource_dir) {
-            return Ok(HostLaunch::compiled(program, resource_dir));
+    // 2. Bundled sidecar next to the app resources (packaged builds only).
+    if !dev_build {
+        if let Some(resource_dir) = resource_dir {
+            if let Some(program) = find_packaged_host(&resource_dir) {
+                if !resource_dir.join(HOST_RUNTIME_ENTRY).is_file() {
+                    // Fail loudly instead of spawning a host that cannot load
+                    // its include tree: a silent restart loop is
+                    // indistinguishable from a shell/host bug.
+                    return Err(format!(
+                        "bundled host sidecar at {} has no {HOST_RUNTIME_ENTRY} beside it; \
+                         the bundle is missing the host runtime files",
+                        resource_dir.display()
+                    ));
+                }
+                return Ok(HostLaunch::compiled(program, resource_dir));
+            }
         }
     }
 
@@ -1972,14 +2015,14 @@ mod tests {
     fn resolve_host_launch_uses_explicit_bin_with_fail_fast() {
         // Present override -> compiled launch rooted at its parent dir.
         let dir = fake_resource_dir(&["custom-host.exe"]);
-        let launch = resolve_host_launch_with(None, Some(dir.join("custom-host.exe")), None)
+        let launch = resolve_host_launch_with(None, Some(dir.join("custom-host.exe")), None, false)
             .expect("explicit bin resolves");
         assert_eq!(launch.program, dir.join("custom-host.exe"));
         assert_eq!(launch.cwd, dir);
         assert!(launch.args.is_empty());
 
         // Missing override -> fast error, no silent fallback.
-        let err = resolve_host_launch_with(None, Some(dir.join("nope.exe")), None)
+        let err = resolve_host_launch_with(None, Some(dir.join("nope.exe")), None, false)
             .expect_err("missing bin must fail");
         assert!(err.contains("VRCXK_HOST_BIN"), "{err}");
         let _ = dir;
@@ -1992,28 +2035,86 @@ mod tests {
         let program = bin_dir.join("custom-host.exe");
 
         // Existing runtime dir override wins over the binary's directory.
-        let launch =
-            resolve_host_launch_with(None, Some(program.clone()), Some(runtime_dir.clone()))
-                .expect("resolves");
+        let launch = resolve_host_launch_with(
+            None,
+            Some(program.clone()),
+            Some(runtime_dir.clone()),
+            false,
+        )
+        .expect("resolves");
         assert_eq!(launch.cwd, runtime_dir);
 
         // A non-existent override is ignored (falls back to bin dir).
         let missing = runtime_dir.join("does-not-exist");
-        let launch =
-            resolve_host_launch_with(None, Some(program.clone()), Some(missing)).expect("resolves");
+        let launch = resolve_host_launch_with(None, Some(program.clone()), Some(missing), false)
+            .expect("resolves");
         assert_eq!(launch.cwd, bin_dir);
         let _ = (bin_dir, runtime_dir);
     }
 
     #[test]
     fn resolve_host_launch_defaults_to_dev_source_without_app() {
-        // No override and no AppHandle -> dev source launch (bun).
+        // No override and no resource dir -> dev source launch (bun).
         // Requires the checked-out host/ tree (same precondition as the
         // existing spawn tests).
-        let launch = resolve_host_launch_with(None, None, None).expect("dev source resolves");
+        let launch =
+            resolve_host_launch_with(None, None, None, false).expect("dev source resolves");
         assert!(!launch.args.is_empty(), "source launch runs src/index.ts");
         assert_eq!(launch.args[0], "src/index.ts");
         assert!(launch.cwd.join("src/index.ts").is_file());
+    }
+
+    /// Regression: a `tauri dev` acceptance run had NO host at all because the
+    /// dev build picked up the copy of the sidecar that `tauri dev` drops into
+    /// the cargo target directory. That copy has no `cordis.yml` beside it, so
+    /// the host died instantly and every shell → host notification reported
+    /// "not delivered".
+    #[test]
+    fn dev_build_never_launches_the_target_dir_sidecar_copy() {
+        let target_dir = fake_resource_dir(&[packaged_host_name()]);
+        // A dev build must ignore it even though the binary is right there.
+        let launch = resolve_host_launch_with(Some(target_dir.clone()), None, None, true)
+            .expect("dev source resolves");
+        assert_eq!(
+            launch.args[0],
+            "src/index.ts",
+            "dev must run the source tree, not {}",
+            target_dir.display()
+        );
+        assert_ne!(launch.cwd, target_dir);
+        assert!(launch.cwd.join("src/index.ts").is_file());
+        let _ = target_dir;
+    }
+
+    #[test]
+    fn bundled_sidecar_is_used_only_with_its_runtime_entry() {
+        // Both the sidecar and cordis.yml -> run the bundled sidecar in place.
+        let bundle = fake_resource_dir(&[packaged_host_name(), HOST_RUNTIME_ENTRY]);
+        let launch = resolve_host_launch_with(Some(bundle.clone()), None, None, false)
+            .expect("bundle resolves");
+        assert_eq!(launch.program, bundle.join(packaged_host_name()));
+        assert_eq!(launch.cwd, bundle);
+        assert!(launch.args.is_empty());
+
+        // Sidecar without the runtime entry -> loud error, never a doomed spawn
+        // loop that the UI would report as a host bug.
+        let broken = fake_resource_dir(&[packaged_host_name()]);
+        let err = resolve_host_launch_with(Some(broken.clone()), None, None, false)
+            .expect_err("incomplete bundle must fail loudly");
+        assert!(err.contains(HOST_RUNTIME_ENTRY), "{err}");
+        assert!(err.contains("runtime files"), "{err}");
+        let _ = (bundle, broken);
+    }
+
+    #[test]
+    fn packaged_build_without_a_sidecar_falls_back_to_dev_source() {
+        // Nothing bundled (e.g. `cargo run` of a release profile from the repo):
+        // resolution still has to produce a launchable spec.
+        let empty = fake_resource_dir(&[]);
+        let launch = resolve_host_launch_with(Some(empty.clone()), None, None, false)
+            .expect("falls back to source");
+        assert_eq!(launch.args[0], "src/index.ts");
+        let _ = empty;
     }
 
     // --- remaining supervisor branch coverage ------------------------------

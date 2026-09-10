@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { Toaster, toast } from "sonner"
 import "./App.css"
 import { connectHostWs, type HostReady, type HostWsAPI } from "./host"
+import { CapabilitySmokePanel } from "./capabilitySmokePanel"
 import { DevWatchPanel } from "./devWatchPanel"
 import { HostLifecyclePanel } from "./hostLifecyclePanel"
 
@@ -13,6 +14,11 @@ type Status = "connecting" | "connected" | "reconnecting"
 // (`tauri dev`), and additionally requires the Tauri runtime — a bare Vite
 // browser session cannot receive Tauri events.
 const devWatchVisible = import.meta.env.DEV && isTauri()
+
+// Capability smoke entry point (issue #6): same dev-only gate as dev-watch. It
+// triggers REAL system effects (a system notification, native dialogs, a second
+// process), so it must never be mounted in a release build.
+const capabilitySmokeVisible = import.meta.env.DEV && isTauri()
 
 // Host lifecycle readout: needs the Tauri runtime (it calls the
 // `get_host_lifecycle` command and listens to the `host-lifecycle` event).
@@ -153,6 +159,7 @@ function App() {
         {pingMsg ? <p className="ping">{pingMsg}</p> : null}
       </main>
       {devWatchVisible ? <DevWatchPanel /> : null}
+      {capabilitySmokeVisible ? <CapabilitySmokePanel /> : null}
       {hostLifecycleVisible ? <HostLifecyclePanel /> : null}
       <Toaster richColors position="top-right" />
     </>

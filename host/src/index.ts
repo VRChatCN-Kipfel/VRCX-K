@@ -14,6 +14,7 @@ import { listenHostWs } from "./ws"
 import { attachDevWatch, DevWatch, type DevWatchEvent } from "./dev-watch"
 import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "./fiber"
 import { TrayService } from "./tray"
+import { ShortcutService } from "./shortcut"
 
 export { HOST_RESTART_EXIT as EXIT_RESTART } from "./api"
 
@@ -165,6 +166,13 @@ async function bootstrap() {
   // Stop publishing and drop action handlers on shutdown (no async work).
   ctx.effect(() => () => tray.close())
 
+  // Global shortcut service (issue #6 callback): the shell owns OS
+  // registration, this owns which chord runs which handler. Always present so
+  // plugins can inject `ctx.shortcut`; with no shell it reports `no-shell`.
+  const shortcuts = new ShortcutService({ log: (line) => log(line) })
+  ctx.provide("shortcut", shortcuts)
+  ctx.effect(() => () => shortcuts.close())
+
   await ctx.plugin(Loader)
 
   // Mount Include as a loader-tree builtin entry. This is the Cordis-standard
@@ -241,6 +249,9 @@ async function bootstrap() {
     ctx.effect(() => () => {
       offTrayAction()
     })
+    // Shortcut callback (issue #6): the shell reports presses of the chords it
+    // registered; the service routes them to the bound handler.
+    shortcuts.attachShell(shell.shortcut)
     // Bind the dev-watch relay now that the shell API proxy exists. Events
     // emitted before this point were logged only; the relay is fire-and-forget
     // so a shell without the handler (or a dropped pipe) never breaks dev.

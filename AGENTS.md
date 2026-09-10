@@ -105,3 +105,18 @@ VRCX-K/
   - 脑/脸：`declaresHeartbeat` 改为**精确匹配**（`heartbeat` id 或 `heartbeat.<ext>` 文件名，避免 `my-heartbeat-monitor` 误伤导致启动失败）；FIBER 状态常量移入无副作用的 `host/src/fiber.ts` 并由 `host/tests/host-wiring.test.ts` 用真实 fiber 钉住；`reduceHostLifecycle` 的 response 分支补 `live` 守卫；dev-watch 去重窗 1500ms → 400ms（不再吞掉人手的第二次保存）；窄屏两个浮层改为上下堆叠
   - 流程：`tsconfig.test.json` 独立测试 program（bun 类型不再泄漏进生产代码面），`typecheck` 覆盖 app/test/host 三套
   - 实证：`cargo fmt/clippy/test`（82 passed）、`bun run verify`（前端 46 + host 112 passed）、sidecar 缺失/过期两条路径均触发自动重建
+- 🔧 **M1-1 收口轮（2026-09，未提交）：快捷键回调 + 五能力统一 smoke 入口 + 单实例 smoke**
+  - **快捷键回调（此前完全缺失）**：`shell.shortcut.*` 只注册不回调，按快捷键没有任何反应（#6 验收"快捷键触发"当时无法满足）。新增 `src-tauri/src/shortcut.rs`：`ShortcutRegistry` 纯逻辑（只转发**本壳注册过**的组合键、只转发 key-down 沿；键用 `HashSet<Shortcut>` 结构化匹配——插件解析大小写不敏感，故同一物理组合键只有一把键），`lib.rs` 用 `Builder::with_handler` 接插件全局 handler → 经 kkrpc/stdio `shortcut.pressed` 通知 host，并 emit `shortcut-pressed` 供 smoke 面板观察（含"是否已投递 host"）
+  - **canonical 拼写只有一份**：`shell.shortcut.register/unregister` 回复由 `bool` 改为 `{ok, accelerator?, error?}`，`accelerator` 是插件 `into_string()` 的规范拼写（如 `shift+control+KeyK`）。host/前端一律按该字符串匹配、**不自行解析**——否则 TS 侧复制一份解析规则会静默漂移成"注册了却永不触发"
+  - **host 侧**：`stdio.ts` 新增 `shortcut.pressed`（shell→host）扇出（与 `tray.action` 共用 `fanout()`）；新增 `host/src/shortcut.ts` 的 `ShortcutService`（`ctx.shortcut`，按 shell 回传的规范拼写绑定 handler；无 shell 返回 `no-shell` 而非抛错），`index.ts` 装配
+  - **五能力统一 smoke 入口（#6 末项）**：`src-tauri/src/smoke.rs` + `capability_smoke` 命令 + `src/capabilitySmokePanel.tsx`（仅 dev 挂载）+ `src/capabilitySmokeCore.ts`（纯逻辑）。托盘派发走**真实路由** `dispatch_menu_action`（与菜单点击同一条路），白名单只放 `core.window.show|close`、`core.webview.reload`，quit/host.stop 等破坏性项一律拒绝
+  - **单实例 smoke**：按钮真的再启动本进程（`current_exe()`，不模拟），由插件通知首实例聚焦主窗口后第二实例自退
+  - **可测性切分（OS 回调抽成纯函数）**：`tray_click_intent`（仅左键 Up → 显示主窗口，Down 不重复触发）、`focus_plan`（show → [unminimize] → focus，顺序即契约）、`dialog_opts`（字符串→枚举映射与 pick 优先级，`shell.dialog.*` 与 smoke 共用一份，原先两处会漂移）
+  - 实证：`cargo clippy -D warnings`/`check`/`test`（103 passed）、`bun run verify`（前端 64 + host 128 passed）、sidecar 因 host 源码变更被 `build.rs` 新鲜度检查自动重建
+- ✅ **M1-1 收口验收轮（2026-09）：实机验收 + 修出 dev-launch 真 bug**。`cargo tauri dev` 实机跑通：托盘右键全功能、快捷键回调、单实例聚焦、通知、对话框均正常；#6 五条已勾。本轮还修出一个 **dev 构建长跑失败的真根因**：
+  - **[严重] dev 态宿主永远起不来**：`tauri dev` 会把 externalBin 复制到 `target/debug/host.exe`（去 triple 后缀），`resolve_host_launch` 第 2 步先命中该副本 → 以 **cwd=`target/debug`** 启动宿主 → 那里没有 `cordis.yml` → 宿主立刻死 → 所有 shell→host 通知（托盘动作/快捷键）都报"未投递 host"。修法（`host.rs`）：**dev 构建彻底跳过打包分支**（`tauri::is_dev()`，判定下沉为纯函数参数可测）；打包态 sidecar 旁缺 `cordis.yml` → **响亮报错**不再静默重启循环
+  - **新增 `[shell] host launch: <程序> <args> (cwd <cwd>)` 日志**——这次排查花多步推理，以后一行定位
+  - **单实例可观测**：原回调 `let _ = show_main_window(app)` 吞掉聚焦失败；插件仅在 `FindWindowW` 找到窗口时才通知（找不到就继续当第二 app 跑）。改为日志 + `single-instance-redirect` 事件，smoke 面板显示"第二个实例已到达并聚焦"/"聚焦失败：原因"，并明示"第二进程自行退出、任务管理器看不到属正常"（实测 861ms 后 exit 0）
+  - **投递失败细分**：`shortcut-pressed` 由 `delivered: bool` 改为 `delivery: delivered|no-host|write-failed` + `host{phase,pid,lastError}`；注册时即提示"宿主当前不可用（phase）"而非等按键后才知道
+  - **通知归因 PowerShell 澄清**：`winrt-notification` 对未注册 AUMID 的既定回退（源码注释原话），dev 态必现；验收"AUMID+图标"须安装态（`cargo tauri build`+装）复验，面板提示已写明
+  - 实证：`cargo fmt --check` 0 / `clippy -D warnings` 0 / `cargo test` **110 passed**（+7：dev 不取 target 副本、打包缺运行文件响亮失败、Delivery 细分等回归）/ `bun run verify` 前端 **72** + host **128**；`build.rs:149` 既有 rustfmt 漂移已**单独提交** `7b3a454b`（与功能 diff 分离）

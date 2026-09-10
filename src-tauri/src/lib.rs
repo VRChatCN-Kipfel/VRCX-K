@@ -1,10 +1,13 @@
 mod app_lifecycle;
+mod dialog_opts;
 mod host;
 mod host_lifecycle;
 mod kkrpc_stdio;
 mod notify;
 mod process_tree;
 mod shell_sys;
+mod shortcut;
+mod smoke;
 mod tray;
 pub mod tray_model;
 mod tray_renderer;
@@ -16,6 +19,7 @@ use app_lifecycle::{
 use host::{supervise_loop, HostReady, HostState};
 use host_lifecycle::{HostCommand, HostCommandResult, HostSnapshot};
 use serde::Serialize;
+use serde_json::json;
 use std::time::Duration;
 use tauri::{Emitter, Manager, RunEvent};
 
@@ -117,23 +121,56 @@ pub fn run() {
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            let _ = tray::show_main_window(app);
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            // A second launch must surface the running window. The previous
+            // `let _ =` swallowed a failed focus, so "the redirect arrived but
+            // could not focus" was indistinguishable from "the second instance
+            // never reached us" (both look like nothing happened). The outcome
+            // is logged and mirrored to the dev smoke panel.
+            //
+            // Note (plugin behaviour, windows.rs): the second process sends
+            // WM_COPYDATA only when it FINDS this instance's hidden window; if
+            // it does not, it silently keeps running as a second app. So a
+            // missing event here means the redirect never arrived — it does not
+            // by itself mean this callback failed.
+            let outcome = match tray::show_main_window(app) {
+                Ok(()) => {
+                    eprintln!("[shell] second instance redirect: main window focused");
+                    json!({ "focused": true, "args": args, "cwd": cwd })
+                }
+                Err(err) => {
+                    eprintln!("[shell] second instance redirect failed: {err}");
+                    json!({ "focused": false, "error": err, "args": args, "cwd": cwd })
+                }
+            };
+            if let Err(err) = app.emit("single-instance-redirect", outcome) {
+                eprintln!("[shell] emit single-instance-redirect: {err}");
+            }
         }));
     }
 
     builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // The builder-level handler is what makes a registered chord DO
+        // something: it fires for every shortcut the shell registered and
+        // (issue #6) forwards the key-down edge to the host over kkrpc/stdio.
+        // Without it a registered chord was silently inert.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(shortcut::on_event)
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .manage(HostState::default())
         .manage(AppLifecycle::default())
+        .manage(shortcut::ManagedShortcuts::default())
         .invoke_handler(tauri::generate_handler![
             get_host_ready,
             get_host_lifecycle,
             dispatch_host_command,
-            dispatch_app_command
+            dispatch_app_command,
+            smoke::capability_smoke
         ])
         // Tray-resident window: closing the window hides it instead of
         // destroying it, so `show_main_window` (tray Show item, tray left

@@ -17,7 +17,7 @@ use crate::tray_model::{
 };
 use crate::tray_renderer::TrayRenderer;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Mutex;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -133,14 +133,18 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| route_menu_action(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
-            if matches!(
-                event,
+            // The decision is a pure function (`tray_click_intent`) so the
+            // click behaviour is unit-tested; this closure is only the adapter
+            // that runs the resulting intent.
+            let intent = match &event {
                 TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
+                    button,
+                    button_state,
                     ..
-                }
-            ) {
+                } => tray_click_intent(*button, *button_state),
+                _ => None,
+            };
+            if let Some(TrayClickIntent::ShowMainWindow) = intent {
                 let _ = show_main_window(tray.app_handle());
             }
         })
@@ -284,15 +288,161 @@ fn merged_snapshot(
     project_host_items(snapshot, host).normalize()
 }
 
+/// What a tray icon mouse event means to the shell.
+///
+/// The plugin reports every button and both edges; only one combination is the
+/// "show the window" gesture. Extracted from the event closure because a
+/// callback handed straight to a GUI toolkit cannot be unit-tested, while this
+/// table can.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrayClickIntent {
+    /// Left button released on the icon: surface the main window.
+    ShowMainWindow,
+}
+
+/// Decide what a tray icon click means. `None` = the shell ignores it.
+///
+/// Left + `Up` only: acting on `Down` would fire on press and again on release,
+/// and the context menu is bound to the right button.
+pub fn tray_click_intent(button: MouseButton, state: MouseButtonState) -> Option<TrayClickIntent> {
+    match (button, state) {
+        (MouseButton::Left, MouseButtonState::Up) => Some(TrayClickIntent::ShowMainWindow),
+        _ => None,
+    }
+}
+
+/// One window operation used to surface the main window, in execution order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowOp {
+    /// Make the window visible.
+    Show,
+    /// Restore from minimized.
+    Unminimize,
+    /// Bring to the foreground.
+    Focus,
+}
+
+/// The operations needed to surface the main window (pure, unit-tested).
+///
+/// ORDER IS THE CONTRACT: focusing while still minimized leaves the window
+/// behind another one, so `Focus` is always last and `Unminimize` (only when
+/// the window is actually minimized) sits between show and focus.
+pub fn focus_plan(minimized: bool) -> Vec<WindowOp> {
+    let mut plan = vec![WindowOp::Show];
+    if minimized {
+        plan.push(WindowOp::Unminimize);
+    }
+    plan.push(WindowOp::Focus);
+    plan
+}
+
+/// Show, restore and focus the main window.
+///
+/// The single entry point for every "bring the app to the front" path: the tray
+/// `core.window.show` item, the tray left click, and the single-instance
+/// callback for a second launch.
 pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main webview window not found".to_string())?;
-    window.show().map_err(|error| error.to_string())?;
-    if window.is_minimized().map_err(|error| error.to_string())? {
-        window.unminimize().map_err(|error| error.to_string())?;
+    let minimized = window.is_minimized().map_err(|error| error.to_string())?;
+    for op in focus_plan(minimized) {
+        match op {
+            WindowOp::Show => window.show().map_err(|error| error.to_string())?,
+            WindowOp::Unminimize => window.unminimize().map_err(|error| error.to_string())?,
+            WindowOp::Focus => window.set_focus().map_err(|error| error.to_string())?,
+        }
     }
-    window.set_focus().map_err(|error| error.to_string())
+    Ok(())
+}
+
+/// Resolve a tray item id to its rendered label + action.
+///
+/// The renderer is the only source of truth for which ids exist (host/plugin
+/// items included), so every dispatch path — real menu clicks and the dev
+/// capability-smoke entry point — resolves through here instead of keeping a
+/// second allowlist that would drift from the rendered menu.
+fn lookup_action(app: &AppHandle, id: &str) -> Option<(String, TrayAction)> {
+    let state = app.try_state::<TrayState>()?;
+    let entry = match state.0.lock() {
+        Ok(inner) => inner.renderer.action_entry(id),
+        Err(err) => {
+            // Never swallow this: a poisoned lock would otherwise disable
+            // every tray action with no trace.
+            eprintln!("[shell] tray action {id}: tray state lock poisoned: {err}");
+            None
+        }
+    };
+    entry
+}
+
+/// Tray item ids the dev capability-smoke entry point may dispatch.
+///
+/// Deliberately tiny and non-destructive: a smoke button must never be able to
+/// quit the app or stop/restart the host (`core.app.quit.force`,
+/// `core.host.*`, `core.app.restart.graceful`). Pinned by test.
+pub fn is_smoke_safe_tray_id(id: &str) -> bool {
+    matches!(
+        id,
+        "core.window.show" | "core.window.close" | "core.webview.reload"
+    )
+}
+
+/// Dispatch one core tray item through the REAL router (issue #6 smoke entry).
+///
+/// This runs the same [`dispatch_menu_action`] a menu click reaches, so the
+/// smoke button exercises the production routing path rather than imitating it.
+/// Host/plugin items are unreachable by construction (the allowlist above holds
+/// only core window/webview ids).
+pub fn dispatch_smoke_item(app: &AppHandle, id: &str) -> Result<(), String> {
+    if !is_smoke_safe_tray_id(id) {
+        return Err(format!("tray item {id} is not in the smoke allowlist"));
+    }
+    let Some((_label, action)) = lookup_action(app, id) else {
+        return Err(format!("tray item {id} is not currently rendered"));
+    };
+    dispatch_menu_action(app, id, &action)
+}
+
+/// Dev-only readout of the rendered tray (issue #6 smoke panel).
+///
+/// Reports what the Rust side actually applied, not what a caller hoped: a tray
+/// that never got a snapshot renders as zero groups.
+pub fn smoke_state(app: &AppHandle) -> Result<Value, String> {
+    let Some(state) = app.try_state::<TrayState>() else {
+        return Err("tray state is not managed".into());
+    };
+    let inner = state.0.lock().map_err(|err| err.to_string())?;
+    let (groups, items) = match inner.applied.as_ref() {
+        Some(applied) => count_snapshot(applied),
+        None => (0, 0),
+    };
+    Ok(json!({ "groups": groups, "items": items }))
+}
+
+/// Count the groups and (recursively) the items of a serialized tray snapshot.
+///
+/// A submenu carries its children under `items`, so counting only the top level
+/// would understate the menu the user actually sees.
+pub fn count_snapshot(snapshot: &Value) -> (usize, usize) {
+    let Some(groups) = snapshot.get("groups").and_then(Value::as_array) else {
+        return (0, 0);
+    };
+    let items = groups
+        .iter()
+        .map(|group| count_items(group.get("items")))
+        .sum();
+    (groups.len(), items)
+}
+
+fn count_items(items: Option<&Value>) -> usize {
+    let Some(items) = items.and_then(Value::as_array) else {
+        return 0;
+    };
+    items
+        .iter()
+        .map(|item| 1 + count_items(item.get("items")))
+        .sum()
 }
 
 /// Dispatch one tray menu click to its Rust-owned owner.
@@ -306,19 +456,7 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
 /// user first; the dispatch happens in the dialog callback, so the menu event
 /// thread is never blocked.
 fn route_menu_action(app: &AppHandle, id: &str) {
-    let entry = match app.try_state::<TrayState>() {
-        Some(state) => match state.0.lock() {
-            Ok(inner) => inner.renderer.action_entry(id),
-            Err(err) => {
-                // Never swallow this: a poisoned lock would otherwise disable
-                // every tray action with no trace.
-                eprintln!("[shell] tray action {id}: tray state lock poisoned: {err}");
-                None
-            }
-        },
-        None => None,
-    };
-    let Some((label, action)) = entry else {
+    let Some((label, action)) = lookup_action(app, id) else {
         return;
     };
 
@@ -340,17 +478,29 @@ fn route_menu_action(app: &AppHandle, id: &str) {
             ))
             .show(move |confirmed| {
                 if confirmed {
-                    dispatch_menu_action(&app_for_dialog, &id, &action);
+                    if let Err(error) = dispatch_menu_action(&app_for_dialog, &id, &action) {
+                        eprintln!("[shell] tray action {id}: {error}");
+                    }
                 }
             });
         return;
     }
 
-    dispatch_menu_action(app, id, &action);
+    if let Err(error) = dispatch_menu_action(app, id, &action) {
+        eprintln!("[shell] tray action {id}: {error}");
+    }
 }
 
-fn dispatch_menu_action(app: &AppHandle, id: &str, action: &TrayAction) {
-    let result = match (action.target.clone(), action.command.as_str()) {
+/// Returns the dispatch outcome instead of logging it, so callers decide how to
+/// report: the menu path logs it, and the smoke entry point surfaces it in its
+/// report (a smoke button that reports success on a failed dispatch would be
+/// worse than no smoke at all).
+pub(crate) fn dispatch_menu_action(
+    app: &AppHandle,
+    id: &str,
+    action: &TrayAction,
+) -> Result<(), String> {
+    match (action.target.clone(), action.command.as_str()) {
         // Host/plugin-owned business action: never routed in-process.
         (TrayActionTarget::Host, _) => relay_tray_action(app, id, action),
         (TrayActionTarget::Core, "window.show") => show_main_window(app),
@@ -380,9 +530,6 @@ fn dispatch_menu_action(app: &AppHandle, id: &str, action: &TrayAction) {
         (TrayActionTarget::App, "app.quit.graceful") => dispatch_app(app, AppCommand::QuitGraceful),
         (TrayActionTarget::App, "app.quit.force") => dispatch_app(app, AppCommand::QuitForce),
         _ => Err("tray action is not allowlisted".into()),
-    };
-    if let Err(error) = result {
-        eprintln!("[shell] tray action {id}: {error}");
     }
 }
 
@@ -1079,5 +1226,101 @@ mod tests {
         assert_eq!(force.action.danger, TrayDanger::Destructive);
         let graceful = find_item(&snapshot.groups[0].items, "core.app.quit.graceful").unwrap();
         assert!(!graceful.action.confirm);
+    }
+
+    #[test]
+    fn tray_click_intent_is_left_release_only() {
+        // The one gesture that surfaces the window.
+        assert_eq!(
+            tray_click_intent(MouseButton::Left, MouseButtonState::Up),
+            Some(TrayClickIntent::ShowMainWindow)
+        );
+        // Press-down must not act, or a single click would fire twice.
+        assert_eq!(
+            tray_click_intent(MouseButton::Left, MouseButtonState::Down),
+            None
+        );
+        // Right button belongs to the context menu.
+        assert_eq!(
+            tray_click_intent(MouseButton::Right, MouseButtonState::Up),
+            None
+        );
+        assert_eq!(
+            tray_click_intent(MouseButton::Middle, MouseButtonState::Up),
+            None
+        );
+    }
+
+    #[test]
+    fn focus_plan_orders_show_then_unminimize_then_focus() {
+        // A visible window needs no unminimize step.
+        assert_eq!(focus_plan(false), vec![WindowOp::Show, WindowOp::Focus]);
+        // A minimized one does — and it must come BEFORE the focus, otherwise
+        // the window stays behind whatever is in front.
+        assert_eq!(
+            focus_plan(true),
+            vec![WindowOp::Show, WindowOp::Unminimize, WindowOp::Focus]
+        );
+    }
+
+    #[test]
+    fn smoke_allowlist_excludes_every_destructive_core_item() {
+        // Allowed: non-destructive window/webview items.
+        for id in [
+            "core.window.show",
+            "core.window.close",
+            "core.webview.reload",
+        ] {
+            assert!(is_smoke_safe_tray_id(id), "{id} must be smoke-safe");
+        }
+        // Rejected: anything that stops the host or quits the app, and every
+        // host/plugin-owned id (those are business RPC, not smoke).
+        for id in [
+            "core.app.quit.force",
+            "core.app.quit.graceful",
+            "core.app.restart.graceful",
+            "core.host.stop.graceful",
+            "core.host.restart",
+            "core.host.start",
+            "core.host.reload",
+            "core.devtools.open",
+            "plugin.some.action",
+            "",
+        ] {
+            assert!(!is_smoke_safe_tray_id(id), "{id} must NOT be smoke-safe");
+        }
+        // Every allowlisted id is a real core item, so the allowlist cannot
+        // point at something the menu never renders.
+        let snapshot = core_snapshot().normalize().unwrap();
+        for id in [
+            "core.window.show",
+            "core.window.close",
+            "core.webview.reload",
+        ] {
+            assert!(find_item(&snapshot.groups[0].items, id).is_some(), "{id}");
+        }
+    }
+
+    #[test]
+    fn count_snapshot_counts_groups_and_nested_items() {
+        // No snapshot applied yet: an empty tray, not an error.
+        assert_eq!(count_snapshot(&Value::Null), (0, 0));
+        assert_eq!(count_snapshot(&json!({})), (0, 0));
+
+        let snapshot = json!({
+            "groups": [
+                { "items": [{ "id": "a" }, { "id": "b" }] },
+                { "items": [{ "id": "c" }] }
+            ]
+        });
+        assert_eq!(count_snapshot(&snapshot), (2, 3));
+
+        // A submenu's children are real rows the user sees: they count.
+        let nested = json!({
+            "groups": [
+                { "items": [ { "id": "parent", "items": [{ "id": "child" }] } ] }
+            ]
+        });
+        assert_eq!(count_snapshot(&nested), (1, 2));
     }
 }

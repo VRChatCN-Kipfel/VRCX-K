@@ -24,6 +24,29 @@ export type TrayActionEvent = {
   args: unknown[]
 }
 
+/**
+ * Result of `shell.shortcut.register` / `unregister` (mirrors
+ * `src-tauri/src/shortcut.rs#ShortcutRegistration`).
+ *
+ * `accelerator` is the CANONICAL spelling the shell produced
+ * (`shift+control+KeyK`). Callers must match `shortcut.pressed` events against
+ * this string rather than re-parsing their own input: chord identity has one
+ * implementation (the plugin's parser, in Rust).
+ */
+export type ShortcutRegistration = {
+  ok: boolean
+  accelerator?: string
+  error?: string
+}
+
+/** Payload of the shell → host `shortcut.pressed` notification. */
+export type ShortcutPressEvent = {
+  /** Canonical spelling of the chord that was pressed. */
+  accelerator: string
+  /** Plugin hotkey id: `(modifiers.bits() << 16) | key`. */
+  id: number
+}
+
 /** Host API exposed to the Rust shell (LocalAPI). */
 export type HostStdioAPI = {
   ping(): Promise<string>
@@ -33,6 +56,11 @@ export type HostStdioAPI = {
   tray: {
     /** A host/plugin-owned tray item was clicked. */
     action(action: TrayActionEvent): boolean
+  }
+  /** Shell → host global shortcut notifications (issue #6 callback). */
+  shortcut: {
+    /** A chord the host registered was pressed (key-down edge only). */
+    pressed(event: ShortcutPressEvent): boolean
   }
 }
 
@@ -95,8 +123,8 @@ export type ShellSysAPI = {
     openPath(path: string): Promise<boolean>
     reveal(path: string): Promise<boolean>
     shortcut: {
-      register(accelerator: string): Promise<boolean>
-      unregister(accelerator: string): Promise<boolean>
+      register(accelerator: string): Promise<ShortcutRegistration>
+      unregister(accelerator: string): Promise<ShortcutRegistration>
       isRegistered(accelerator: string): Promise<boolean>
     }
     window: {
@@ -143,7 +171,52 @@ export type ShellTrayBridge = {
   onAction(handler: (action: TrayActionEvent) => void): () => void
 }
 
-export type ShellStdioBridge = ShellSysAPI & { tray: ShellTrayBridge }
+/**
+ * Host-facing view of the shortcut side of the shell bridge.
+ *
+ * `register`/`unregister` are the same remote `shell.shortcut.*` calls (so a
+ * caller can drive them without holding the whole proxy); `onPress` is a purely
+ * local registration — the shell → host `shortcut.pressed` notification arrives
+ * on the exposed API, not through the remote proxy.
+ */
+export type ShellShortcutBridge = {
+  register(accelerator: string): Promise<ShortcutRegistration>
+  unregister(accelerator: string): Promise<ShortcutRegistration>
+  onPress(handler: (event: ShortcutPressEvent) => void): () => void
+}
+
+export type ShellStdioBridge = ShellSysAPI & {
+  tray: ShellTrayBridge
+  shortcut: ShellShortcutBridge
+}
+
+/**
+ * A local handler set for a shell → host notification.
+ *
+ * `tray.action` and `shortcut.pressed` both arrive on the exposed API and must
+ * fan out to every local subscriber without one throwing handler breaking the
+ * RPC channel. One implementation, so the two cannot drift apart.
+ */
+function fanout<T>(label: string) {
+  const handlers = new Set<(value: T) => void>()
+  return {
+    on(handler: (value: T) => void): () => void {
+      handlers.add(handler)
+      return () => {
+        handlers.delete(handler)
+      }
+    },
+    emit(value: T): void {
+      for (const handler of [...handlers]) {
+        try {
+          handler(value)
+        } catch (error) {
+          console.error(`[host] ${label} handler error`, error)
+        }
+      }
+    },
+  }
+}
 
 class ReadableStreamLike implements ReadableLike {
   private listeners = new Set<(chunk: Uint8Array | string) => void>()
@@ -199,8 +272,9 @@ function bunStdioTransport() {
  * Connect the host to the Rust shell over kkrpc/stdio.
  *
  * `expose` is the host API the shell can call (ping/stop/restart + the
- * `tray.action` notification); the returned bridge is the shell's API the host
- * can call (ready + shell.*, plus the local `tray.onAction` registration).
+ * `tray.action` and `shortcut.pressed` notifications); the returned bridge is
+ * the shell's API the host can call (ready + shell.*, plus the local
+ * `tray.onAction` / `shortcut.onPress` registrations).
  *
  * stop/restart run a real graceful fiber teardown before exiting — M1-3
  * issue #8: dispose fibers in reverse order, then exit 0 (stop) or 51
@@ -210,7 +284,8 @@ function bunStdioTransport() {
  * default is the real bun stdio transport.
  */
 export function connectShellStdio(ctx: Context, options: { transport?: Transport<RPCMessage> } = {}): ShellStdioBridge {
-  const trayHandlers = new Set<(action: TrayActionEvent) => void>()
+  const trayActions = fanout<TrayActionEvent>("tray.action")
+  const shortcutPresses = fanout<ShortcutPressEvent>("shortcut.pressed")
   const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(), {
     expose: {
       ping: () => hostWsAPI.ping(),
@@ -240,13 +315,15 @@ export function connectShellStdio(ctx: Context, options: { transport?: Transport
         // `tray.action` (shell → host): fan out to every registered handler.
         // A handler throwing must never break the RPC channel.
         action: (action: TrayActionEvent) => {
-          for (const handler of [...trayHandlers]) {
-            try {
-              handler(action)
-            } catch (error) {
-              console.error("[host] tray.action handler error", error)
-            }
-          }
+          trayActions.emit(action)
+          return true
+        },
+      },
+      shortcut: {
+        // `shortcut.pressed` (shell → host, issue #6 callback): the shell
+        // already filtered to registered chords and key-down edges.
+        pressed: (event: ShortcutPressEvent) => {
+          shortcutPresses.emit(event)
           return true
         },
       },
@@ -262,12 +339,12 @@ export function connectShellStdio(ctx: Context, options: { transport?: Transport
     shell: remote.shell,
     tray: {
       setSnapshot: (snapshot) => remote.shell.tray.setSnapshot(snapshot),
-      onAction: (handler) => {
-        trayHandlers.add(handler)
-        return () => {
-          trayHandlers.delete(handler)
-        }
-      },
+      onAction: (handler) => trayActions.on(handler),
+    },
+    shortcut: {
+      register: (accelerator) => remote.shell.shortcut.register(accelerator),
+      unregister: (accelerator) => remote.shell.shortcut.unregister(accelerator),
+      onPress: (handler) => shortcutPresses.on(handler),
     },
   }
 }

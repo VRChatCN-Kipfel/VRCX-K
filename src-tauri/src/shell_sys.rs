@@ -14,11 +14,12 @@
 //     cheaper to ship than to retrofit. Unused handlers are still exercised
 //     by the host-side type definitions, and each is a thin wrapper.
 
+use crate::dialog_opts;
 use crate::kkrpc_stdio::Peer;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
@@ -63,18 +64,9 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
         handler(app.clone(), |app, args| {
             let text = str_arg(args, 0);
             let opts = args.get(1).cloned().unwrap_or_else(|| json!({}));
-            let title = opts.get("title").and_then(Value::as_str).unwrap_or("");
-            let kind = match opts.get("kind").and_then(Value::as_str) {
-                Some("warning") => MessageDialogKind::Warning,
-                Some("error") => MessageDialogKind::Error,
-                _ => MessageDialogKind::Info,
-            };
-            let buttons = match opts.get("buttons").and_then(Value::as_str) {
-                Some("okCancel") => MessageDialogButtons::OkCancel,
-                Some("yesNo") => MessageDialogButtons::YesNo,
-                Some("yesNoCancel") => MessageDialogButtons::YesNoCancel,
-                _ => MessageDialogButtons::Ok,
-            };
+            let title = dialog_opts::opt_str(&opts, "title").unwrap_or("");
+            let kind = dialog_opts::message_kind(dialog_opts::opt_str(&opts, "kind"));
+            let buttons = dialog_opts::message_buttons(dialog_opts::opt_str(&opts, "buttons"));
             let mut builder = app.dialog().message(text).kind(kind).buttons(buttons);
             if !title.is_empty() {
                 builder = builder.title(title);
@@ -90,13 +82,8 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
         handler(app.clone(), |app, args| {
             let text = str_arg(args, 0);
             let opts = args.get(1).cloned().unwrap_or_else(|| json!({}));
-            let title = opts.get("title").and_then(Value::as_str).unwrap_or("");
-            let buttons = match opts.get("buttons").and_then(Value::as_str) {
-                Some("okCancel") => MessageDialogButtons::OkCancel,
-                Some("yesNo") => MessageDialogButtons::YesNo,
-                Some("yesNoCancel") => MessageDialogButtons::YesNoCancel,
-                _ => MessageDialogButtons::Ok,
-            };
+            let title = dialog_opts::opt_str(&opts, "title").unwrap_or("");
+            let buttons = dialog_opts::message_buttons(dialog_opts::opt_str(&opts, "buttons"));
             let mut builder = app.dialog().message(text).buttons(buttons);
             if !title.is_empty() {
                 builder = builder.title(title);
@@ -119,30 +106,22 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
         "shell.dialog.pickFile",
         handler(app.clone(), |app, args| {
             let opts = args.first().cloned().unwrap_or_else(|| json!({}));
-            let multiple = opts
-                .get("multiple")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let directory = opts
-                .get("directory")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let save = opts.get("save").and_then(Value::as_bool).unwrap_or(false);
+            let save = dialog_opts::opt_bool(&opts, "save");
+            let directory = dialog_opts::opt_bool(&opts, "directory");
+            let multiple = dialog_opts::opt_bool(&opts, "multiple");
             let builder = app.dialog().file();
-            let picked: Option<Value> = if save {
-                builder.blocking_save_file().map(path_to_json)
-            } else if directory && multiple {
-                builder
+            // The flag precedence lives in `dialog_opts::pick_mode` (one tested
+            // implementation shared with the smoke entry point).
+            let picked: Option<Value> = match dialog_opts::pick_mode(save, directory, multiple) {
+                dialog_opts::PickMode::Save => builder.blocking_save_file().map(path_to_json),
+                dialog_opts::PickMode::Folders => builder
                     .blocking_pick_folders()
-                    .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect()))
-            } else if directory {
-                builder.blocking_pick_folder().map(path_to_json)
-            } else if multiple {
-                builder
+                    .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect())),
+                dialog_opts::PickMode::Folder => builder.blocking_pick_folder().map(path_to_json),
+                dialog_opts::PickMode::Files => builder
                     .blocking_pick_files()
-                    .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect()))
-            } else {
-                builder.blocking_pick_file().map(path_to_json)
+                    .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect())),
+                dialog_opts::PickMode::File => builder.blocking_pick_file().map(path_to_json),
             };
             match picked {
                 Some(v) => v,
@@ -180,28 +159,37 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
     );
 
     // --- global shortcuts --------------------------------------------------
-    // shell.shortcut.register(accelerator) -> bool
-    // Accelerator strings follow Tauri syntax e.g. "CommandOrControl+Shift+N".
+    // shell.shortcut.register(accelerator) -> ShortcutRegistration
+    // Accelerator strings follow the plugin syntax, e.g. "CommandOrControl+Shift+N".
+    //
+    // The reply carries the CANONICAL spelling (`shift+control+KeyN`) so the
+    // caller can match the `shortcut.pressed` events it will receive without
+    // re-implementing accelerator parsing: chord identity has exactly one
+    // implementation (the plugin's parser, via crate::shortcut).
     peer.on(
         "shell.shortcut.register",
         handler(app.clone(), |app, args| {
             let accel = str_arg(args, 0);
-            match accel.parse::<tauri_plugin_global_shortcut::Shortcut>() {
-                Ok(shortcut) => json!(app.global_shortcut().register(shortcut).is_ok()),
-                Err(_) => json!(false),
-            }
+            let registration = match crate::shortcut::parse_accelerator(&accel) {
+                Ok(shortcut) => crate::shortcut::register_with_os(app, shortcut),
+                Err(err) => crate::shortcut::ShortcutRegistration::rejected(err),
+            };
+            serde_json::to_value(registration)
+                .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))
         }),
     );
 
-    // shell.shortcut.unregister(accelerator) -> bool
+    // shell.shortcut.unregister(accelerator) -> ShortcutRegistration
     peer.on(
         "shell.shortcut.unregister",
         handler(app.clone(), |app, args| {
             let accel = str_arg(args, 0);
-            match accel.parse::<tauri_plugin_global_shortcut::Shortcut>() {
-                Ok(shortcut) => json!(app.global_shortcut().unregister(shortcut).is_ok()),
-                Err(_) => json!(false),
-            }
+            let registration = match crate::shortcut::parse_accelerator(&accel) {
+                Ok(shortcut) => crate::shortcut::unregister_with_os(app, shortcut),
+                Err(err) => crate::shortcut::ShortcutRegistration::rejected(err),
+            };
+            serde_json::to_value(registration)
+                .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))
         }),
     );
 
