@@ -25,18 +25,20 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri` and the cargo workspace
-      //    `target/` dir. The latter is required: `tauri dev` compiles Rust into
-      //    ./target while this dev server runs, and watching transient build
-      //    artifacts throws EBUSY (-4082) and kills the beforeDevCommand.
-      //    `*.bun-build` is the same failure for the sidecar: build.rs rebuilds
-      //    host/ via bun while Vite runs, and bun's temp build files lock.
+      // 3. Do not watch build artifacts. `tauri dev` compiles Rust into
+      //    ./target (repo root, outside src-tauri/) and build.rs rebuilds the
+      //    host sidecar via bun while this dev server runs. Watching a file
+      //    that is mid-write throws EBUSY (-4082) from fs.watch; chokidar
+      //    surfaces that as an FSWatcher 'error' and Vite exits, killing the
+      //    beforeDevCommand. bun names its transient files
+      //    `.<16hex>-<8hex>.bun-build` (`.tmp` for cross-target builds), so a
+      //    RegExp covers both where a `*.bun-build` glob would miss `.tmp`.
       ignored: [
         "**/src-tauri/**",
         "**/target/**",
         "**/node_modules/**",
         "**/.git/**",
-        "**/*.bun-build",
+        /\.[0-9a-f]{16}-[0-9a-f]{8}\.(?:bun-build|tmp)$/i,
       ],
     },
   },
