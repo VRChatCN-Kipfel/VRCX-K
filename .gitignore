@@ -26,6 +26,10 @@ dist-ssr
 /src-tauri/binaries/.host-*.tmp-*
 host/dist/
 
+# bun cross-target compile cache (e.g. `bun build --compile --target
+# bun-linux-*`); large and never committed.
+host/.bun-cache/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
