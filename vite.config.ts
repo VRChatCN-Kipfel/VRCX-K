@@ -29,11 +29,14 @@ export default defineConfig(() => ({
       //    `target/` dir. The latter is required: `tauri dev` compiles Rust into
       //    ./target while this dev server runs, and watching transient build
       //    artifacts throws EBUSY (-4082) and kills the beforeDevCommand.
+      //    `*.bun-build` is the same failure for the sidecar: build.rs rebuilds
+      //    host/ via bun while Vite runs, and bun's temp build files lock.
       ignored: [
         "**/src-tauri/**",
         "**/target/**",
         "**/node_modules/**",
         "**/.git/**",
+        "**/*.bun-build",
       ],
     },
   },
