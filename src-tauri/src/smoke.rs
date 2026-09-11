@@ -94,12 +94,16 @@ pub enum SmokeAction {
     },
     /// Re-render the tray from the current lifecycle snapshot and report what
     /// the Rust side actually applied.
+    #[cfg(desktop)]
     TrayRender,
     /// Dispatch one allowlisted core tray item through the real router.
+    #[cfg(desktop)]
     TrayDispatch { id: String },
     /// Register a chord and report its canonical spelling to press.
+    #[cfg(desktop)]
     ShortcutRegister { accelerator: String },
     /// Release a chord.
+    #[cfg(desktop)]
     ShortcutUnregister { accelerator: String },
     /// Launch the app a second time (the real single-instance path).
     SecondInstance,
@@ -114,7 +118,9 @@ impl SmokeAction {
             SmokeAction::DialogMessage { .. }
             | SmokeAction::DialogAsk { .. }
             | SmokeAction::DialogPickFile { .. } => "dialog",
+            #[cfg(desktop)]
             SmokeAction::TrayRender | SmokeAction::TrayDispatch { .. } => "tray",
+            #[cfg(desktop)]
             SmokeAction::ShortcutRegister { .. } | SmokeAction::ShortcutUnregister { .. } => {
                 "shortcut"
             }
@@ -272,12 +278,18 @@ async fn dialog_pick_file(
             dialog_opts::PickMode::Save => builder
                 .blocking_save_file()
                 .map(|path| json!(path.to_string())),
+            // Desktop-only, matching `shell.dialog.pickFile`: the mobile dialog
+            // plugin has no folder API, so the request reports "nothing picked".
+            #[cfg(desktop)]
             dialog_opts::PickMode::Folders => builder
                 .blocking_pick_folders()
                 .map(|paths| json!(paths.iter().map(|p| p.to_string()).collect::<Vec<_>>())),
+            #[cfg(desktop)]
             dialog_opts::PickMode::Folder => builder
                 .blocking_pick_folder()
                 .map(|path| json!(path.to_string())),
+            #[cfg(not(desktop))]
+            dialog_opts::PickMode::Folders | dialog_opts::PickMode::Folder => None,
             dialog_opts::PickMode::Files => builder
                 .blocking_pick_files()
                 .map(|paths| json!(paths.iter().map(|p| p.to_string()).collect::<Vec<_>>())),
@@ -303,6 +315,10 @@ async fn dialog_pick_file(
 /// A chord that fires but cannot be delivered looks exactly like a broken
 /// callback when pressed; saying it up front is the difference between "the
 /// feature is broken" and "the brain is not running".
+///
+/// Desktop-only: the only caller is the shortcut smoke, which exists only where
+/// global shortcuts do.
+#[cfg(desktop)]
 pub fn host_unavailable_warning(host_available: bool, host: Option<&Value>) -> String {
     if host_available {
         return String::new();
@@ -350,6 +366,7 @@ pub async fn run(app: AppHandle, action: SmokeAction) -> SmokeReport {
             )
             .await
         }
+        #[cfg(desktop)]
         SmokeAction::TrayRender => match crate::tray::refresh(&app) {
             Err(err) => SmokeReport::failed(capability, format!("托盘重渲染失败：{err}")),
             Ok(()) => match crate::tray::smoke_state(&app) {
@@ -365,6 +382,7 @@ pub async fn run(app: AppHandle, action: SmokeAction) -> SmokeReport {
                 Err(err) => SmokeReport::failed(capability, err),
             },
         },
+        #[cfg(desktop)]
         SmokeAction::TrayDispatch { id } => match crate::tray::dispatch_smoke_item(&app, &id) {
             Ok(()) => SmokeReport::ok_with(
                 capability,
@@ -373,6 +391,7 @@ pub async fn run(app: AppHandle, action: SmokeAction) -> SmokeReport {
             ),
             Err(err) => SmokeReport::failed(capability, err),
         },
+        #[cfg(desktop)]
         SmokeAction::ShortcutRegister { accelerator } => {
             match crate::shortcut::parse_accelerator(&accelerator) {
                 Err(err) => {
@@ -415,6 +434,7 @@ pub async fn run(app: AppHandle, action: SmokeAction) -> SmokeReport {
                 }
             }
         }
+        #[cfg(desktop)]
         SmokeAction::ShortcutUnregister { accelerator } => {
             match crate::shortcut::parse_accelerator(&accelerator) {
                 Err(err) => {
@@ -523,30 +543,40 @@ mod tests {
                 multiple: None
             }
         );
-        assert_eq!(
-            parse_action(&json!({ "action": "trayRender" })).unwrap(),
-            SmokeAction::TrayRender
-        );
-        assert_eq!(
-            parse_action(&json!({ "action": "trayDispatch", "id": "core.window.show" })).unwrap(),
-            SmokeAction::TrayDispatch {
-                id: "core.window.show".into()
-            }
-        );
-        assert_eq!(
-            parse_action(&json!({ "action": "shortcutRegister", "accelerator": "Ctrl+Shift+K" }))
+        // Desktop-only actions: their variants do not exist on mobile, so the
+        // wire round-trip is asserted only where they do.
+        #[cfg(desktop)]
+        {
+            assert_eq!(
+                parse_action(&json!({ "action": "trayRender" })).unwrap(),
+                SmokeAction::TrayRender
+            );
+            assert_eq!(
+                parse_action(&json!({ "action": "trayDispatch", "id": "core.window.show" }))
+                    .unwrap(),
+                SmokeAction::TrayDispatch {
+                    id: "core.window.show".into()
+                }
+            );
+            assert_eq!(
+                parse_action(
+                    &json!({ "action": "shortcutRegister", "accelerator": "Ctrl+Shift+K" })
+                )
                 .unwrap(),
-            SmokeAction::ShortcutRegister {
-                accelerator: "Ctrl+Shift+K".into()
-            }
-        );
-        assert_eq!(
-            parse_action(&json!({ "action": "shortcutUnregister", "accelerator": "Ctrl+Shift+K" }))
+                SmokeAction::ShortcutRegister {
+                    accelerator: "Ctrl+Shift+K".into()
+                }
+            );
+            assert_eq!(
+                parse_action(
+                    &json!({ "action": "shortcutUnregister", "accelerator": "Ctrl+Shift+K" })
+                )
                 .unwrap(),
-            SmokeAction::ShortcutUnregister {
-                accelerator: "Ctrl+Shift+K".into()
-            }
-        );
+                SmokeAction::ShortcutUnregister {
+                    accelerator: "Ctrl+Shift+K".into()
+                }
+            );
+        }
         assert_eq!(
             parse_action(&json!({ "action": "secondInstance" })).unwrap(),
             SmokeAction::SecondInstance
@@ -562,13 +592,17 @@ mod tests {
         assert!(parse_action(&json!("notify")).is_err());
         // A missing required field must not silently default: dispatching
         // nothing is worse than an error the panel can show.
-        assert!(parse_action(&json!({ "action": "trayDispatch" })).is_err());
-        assert!(parse_action(&json!({ "action": "shortcutRegister" })).is_err());
+        // (Desktop-only actions, which are the ones with required fields.)
+        #[cfg(desktop)]
+        {
+            assert!(parse_action(&json!({ "action": "trayDispatch" })).is_err());
+            assert!(parse_action(&json!({ "action": "shortcutRegister" })).is_err());
+        }
     }
 
     #[test]
     fn capability_labels_cover_all_five_capabilities() {
-        let labels = [
+        let mut labels = vec![
             SmokeAction::Notify {
                 title: None,
                 body: None,
@@ -591,6 +625,12 @@ mod tests {
                 multiple: None,
             }
             .capability(),
+            SmokeAction::SecondInstance.capability(),
+        ];
+        // Tray and shortcut are desktop-only capabilities, so both the variants
+        // and their expected labels are desktop-only.
+        #[cfg(desktop)]
+        labels.extend([
             SmokeAction::TrayRender.capability(),
             SmokeAction::TrayDispatch { id: "x".into() }.capability(),
             SmokeAction::ShortcutRegister {
@@ -601,15 +641,13 @@ mod tests {
                 accelerator: "x".into(),
             }
             .capability(),
-            SmokeAction::SecondInstance.capability(),
-        ];
-        for capability in [
-            "notification",
-            "dialog",
-            "tray",
-            "shortcut",
-            "single-instance",
-        ] {
+        ]);
+
+        let mut expected = vec!["notification", "dialog", "single-instance"];
+        #[cfg(desktop)]
+        expected.extend(["tray", "shortcut"]);
+
+        for capability in expected {
             assert!(labels.contains(&capability), "{capability} is unlabelled");
         }
     }
@@ -631,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(desktop)]
     fn host_warning_says_nothing_when_a_host_can_receive_the_press() {
         assert_eq!(host_unavailable_warning(true, None), "");
         assert_eq!(
@@ -640,6 +679,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(desktop)]
     fn host_warning_names_the_host_state_when_there_is_one() {
         // The phase travels with the warning so the panel answers "why" too.
         let warning = host_unavailable_warning(

@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
+#[cfg(desktop)]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
@@ -114,10 +115,19 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
             // implementation shared with the smoke entry point).
             let picked: Option<Value> = match dialog_opts::pick_mode(save, directory, multiple) {
                 dialog_opts::PickMode::Save => builder.blocking_save_file().map(path_to_json),
+                // Folder picking is desktop-only: the mobile dialog plugin
+                // exposes file picking but has no folder API. A folder request
+                // there reports "nothing picked" rather than silently
+                // degrading into a file picker (which would look like the user
+                // cancelled a dialog they were never shown).
+                #[cfg(desktop)]
                 dialog_opts::PickMode::Folders => builder
                     .blocking_pick_folders()
                     .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect())),
+                #[cfg(desktop)]
                 dialog_opts::PickMode::Folder => builder.blocking_pick_folder().map(path_to_json),
+                #[cfg(not(desktop))]
+                dialog_opts::PickMode::Folders | dialog_opts::PickMode::Folder => None,
                 dialog_opts::PickMode::Files => builder
                     .blocking_pick_files()
                     .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect())),
@@ -159,56 +169,69 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
     );
 
     // --- global shortcuts --------------------------------------------------
-    // shell.shortcut.register(accelerator) -> ShortcutRegistration
-    // Accelerator strings follow the plugin syntax, e.g. "CommandOrControl+Shift+N".
-    //
-    // The reply carries the CANONICAL spelling (`shift+control+KeyN`) so the
-    // caller can match the `shortcut.pressed` events it will receive without
-    // re-implementing accelerator parsing: chord identity has exactly one
-    // implementation (the plugin's parser, via crate::shortcut).
-    peer.on(
-        "shell.shortcut.register",
-        handler(app.clone(), |app, args| {
-            let accel = str_arg(args, 0);
-            let registration = match crate::shortcut::parse_accelerator(&accel) {
-                Ok(shortcut) => crate::shortcut::register_with_os(app, shortcut),
-                Err(err) => crate::shortcut::ShortcutRegistration::rejected(err),
-            };
-            serde_json::to_value(registration)
-                .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))
-        }),
-    );
+    // Desktop-only: there is no OS-wide hotkey facility on mobile, and the
+    // plugin does not expose its types there. The routes are not registered at
+    // all, so a call gets the peer's standard "no such method" reply instead of
+    // a `{ok:false}` that implies the chord was parsed and merely refused.
+    #[cfg(desktop)]
+    {
+        // shell.shortcut.register(accelerator) -> ShortcutRegistration
+        // Accelerator strings follow the plugin syntax, e.g. "CommandOrControl+Shift+N".
+        //
+        // The reply carries the CANONICAL spelling (`shift+control+KeyN`) so the
+        // caller can match the `shortcut.pressed` events it will receive without
+        // re-implementing accelerator parsing: chord identity has exactly one
+        // implementation (the plugin's parser, via crate::shortcut).
+        peer.on(
+            "shell.shortcut.register",
+            handler(app.clone(), |app, args| {
+                let accel = str_arg(args, 0);
+                let registration = match crate::shortcut::parse_accelerator(&accel) {
+                    Ok(shortcut) => crate::shortcut::register_with_os(app, shortcut),
+                    Err(err) => crate::shortcut::ShortcutRegistration::rejected(err),
+                };
+                serde_json::to_value(registration)
+                    .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))
+            }),
+        );
 
-    // shell.shortcut.unregister(accelerator) -> ShortcutRegistration
-    peer.on(
-        "shell.shortcut.unregister",
-        handler(app.clone(), |app, args| {
-            let accel = str_arg(args, 0);
-            let registration = match crate::shortcut::parse_accelerator(&accel) {
-                Ok(shortcut) => crate::shortcut::unregister_with_os(app, shortcut),
-                Err(err) => crate::shortcut::ShortcutRegistration::rejected(err),
-            };
-            serde_json::to_value(registration)
-                .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))
-        }),
-    );
+        // shell.shortcut.unregister(accelerator) -> ShortcutRegistration
+        peer.on(
+            "shell.shortcut.unregister",
+            handler(app.clone(), |app, args| {
+                let accel = str_arg(args, 0);
+                let registration = match crate::shortcut::parse_accelerator(&accel) {
+                    Ok(shortcut) => crate::shortcut::unregister_with_os(app, shortcut),
+                    Err(err) => crate::shortcut::ShortcutRegistration::rejected(err),
+                };
+                serde_json::to_value(registration)
+                    .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))
+            }),
+        );
 
-    // shell.shortcut.isRegistered(accelerator) -> bool
-    peer.on(
-        "shell.shortcut.isRegistered",
-        handler(app.clone(), |app, args| {
-            let accel = str_arg(args, 0);
-            match accel.parse::<tauri_plugin_global_shortcut::Shortcut>() {
-                Ok(shortcut) => json!(app.global_shortcut().is_registered(shortcut)),
-                Err(_) => json!(false),
-            }
-        }),
-    );
+        // shell.shortcut.isRegistered(accelerator) -> bool
+        peer.on(
+            "shell.shortcut.isRegistered",
+            handler(app.clone(), |app, args| {
+                let accel = str_arg(args, 0);
+                match accel.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                    Ok(shortcut) => json!(app.global_shortcut().is_registered(shortcut)),
+                    Err(_) => json!(false),
+                }
+            }),
+        );
+    }
 
     // --- window control (main webview window) ------------------------------
     // shell.window.show() / hide() / minimize() / maximize() / unmaximize()
     // / focus() / close() -> bool
-    for action in [
+    //
+    // `minimize`/`maximize`/`unmaximize` are desktop-only: the mobile webview
+    // window API has no such operations. They are left out of the route list
+    // there rather than matched to a no-op, so the peer reports an unknown
+    // method instead of returning `true` for a window nothing happened to.
+    #[cfg(desktop)]
+    const WINDOW_ACTIONS: &[&str] = &[
         "show",
         "hide",
         "minimize",
@@ -216,7 +239,11 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
         "unmaximize",
         "focus",
         "close",
-    ] {
+    ];
+    #[cfg(not(desktop))]
+    const WINDOW_ACTIONS: &[&str] = &["show", "hide", "focus", "close"];
+
+    for action in WINDOW_ACTIONS {
         let method = format!("shell.window.{action}");
         let app = app.clone();
         peer.on(
@@ -225,11 +252,14 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
                 let Some(win) = app.get_webview_window("main") else {
                     return json!(false);
                 };
-                let result = match action {
+                let result = match *action {
                     "show" => win.show(),
                     "hide" => win.hide(),
+                    #[cfg(desktop)]
                     "minimize" => win.minimize(),
+                    #[cfg(desktop)]
                     "maximize" => win.maximize(),
+                    #[cfg(desktop)]
                     "unmaximize" => win.unmaximize(),
                     "focus" => win.set_focus(),
                     "close" => win.close(),
@@ -333,6 +363,10 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
     // snapshot is validated against the JSON Schema and the domain model before
     // it is cached; core groups are rejected (Rust-owned). The reply is
     // synchronous so the host knows whether its menu was accepted.
+    //
+    // Desktop-only: a declarative tray snapshot has no meaning where there is
+    // no tray, so the route is absent rather than accepting and discarding it.
+    #[cfg(desktop)]
     peer.on(
         "shell.tray.setSnapshot",
         handler(app.clone(), |app, args| {

@@ -6,11 +6,23 @@ mod kkrpc_stdio;
 mod notify;
 mod process_tree;
 mod shell_sys;
-mod shortcut;
 mod smoke;
+// Desktop-only capabilities. These modules are built on APIs that exist only
+// off-mobile: `tauri::tray`/`tauri::menu` (no tray or native menu on Android),
+// the global-shortcut plugin (no OS-wide hotkeys), and the dialog plugin's
+// `blocking_pick_folder*` (mobile exposes file picking only). Gating the
+// modules — rather than stubbing their bodies — keeps a missing capability a
+// compile-time fact instead of a runtime `false`.
+#[cfg(desktop)]
+mod shortcut;
+#[cfg(desktop)]
 mod tray;
+// The declarative tray model itself is plain data (serde + collections, no
+// Tauri API), so it stays compiled everywhere.
 pub mod tray_model;
+#[cfg(desktop)]
 mod tray_renderer;
+#[cfg(desktop)]
 mod tray_schema;
 
 use app_lifecycle::{
@@ -19,6 +31,8 @@ use app_lifecycle::{
 use host::{supervise_loop, HostReady, HostState};
 use host_lifecycle::{HostCommand, HostCommandResult, HostSnapshot};
 use serde::Serialize;
+// `json!` is only used by the desktop single-instance callback below.
+#[cfg(desktop)]
 use serde_json::json;
 use std::time::Duration;
 use tauri::{Emitter, Manager, RunEvent};
@@ -152,19 +166,29 @@ pub fn run() {
     builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        // The builder-level handler is what makes a registered chord DO
-        // something: it fires for every shortcut the shell registered and
-        // (issue #6) forwards the key-down edge to the host over kkrpc/stdio.
-        // Without it a registered chord was silently inert.
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(shortcut::on_event)
-                .build(),
-        )
         .plugin(tauri_plugin_notification::init())
         .manage(HostState::default())
-        .manage(AppLifecycle::default())
-        .manage(shortcut::ManagedShortcuts::default())
+        .manage(AppLifecycle::default());
+
+    // Global shortcuts are a desktop-only capability: the plugin's types and the
+    // `AppHandle::global_shortcut()` extension do not exist on mobile. The
+    // plugin and its managed registry are gated together on purpose — the
+    // builder-level handler is what makes a registered chord DO something (it
+    // fires for every shortcut the shell registered and, issue #6, forwards the
+    // key-down edge to the host over kkrpc/stdio), so registering one without
+    // the other would give `on_event` no state to read.
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(shortcut::on_event)
+                    .build(),
+            )
+            .manage(shortcut::ManagedShortcuts::default());
+    }
+
+    builder = builder
         .invoke_handler(tauri::generate_handler![
             get_host_ready,
             get_host_lifecycle,
@@ -192,6 +216,9 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // The tray icon is a desktop surface: `tauri::tray` does not exist
+            // on mobile, so there is nothing to set up there.
+            #[cfg(desktop)]
             tray::setup(app.handle())?;
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -216,6 +243,9 @@ pub fn run() {
                             return;
                         }
                         last_fingerprint = Some(fingerprint);
+                        // Tray projection is desktop-only; the lifecycle event
+                        // below is emitted on every platform.
+                        #[cfg(desktop)]
                         if let Err(err) = tray::refresh(&snapshot_handle) {
                             eprintln!("[shell] tray refresh: {err}");
                         }
