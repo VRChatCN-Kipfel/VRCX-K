@@ -3,6 +3,7 @@
 > 状态：**需求记录，未排期、未立项**。本文只回答"缺什么、为什么缺、将来集成在哪"，**不含实现设计**。
 > 日期：2026-09-11。所有"现状"均标注代码位置，可复核。
 > 追踪 issue：**[#13](https://github.com/VRChatCN-Kipfel/VRCX-K/issues/13)**（同一状态声明）。
+> 实现设计稿（v0，供评审）：**[`host-sessions-design.md`](host-sessions-design.md)** —— 回答本文 §5 的五个待决问题。
 
 ## 0. 一句话
 
