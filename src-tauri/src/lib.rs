@@ -317,3 +317,103 @@ pub fn run() {
             _ => {}
         });
 }
+
+/// Guards for packaging configuration, which has no compiler behind it.
+#[cfg(test)]
+mod packaging_tests {
+    use serde_json::Value;
+
+    fn conf(name: &str) -> Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("{} is not valid JSON: {err}", path.display()))
+    }
+
+    fn at(conf: &Value, path: &[&str]) -> Option<Value> {
+        let mut current = conf;
+        for key in path {
+            current = current.get(key)?;
+        }
+        Some(current.clone())
+    }
+
+    /// Resolve a config key the way Tauri does: the platform config is
+    /// **deep-merged over** the base one, so a key the override omits does not
+    /// mean "unset" — it means "inherit the base value".
+    ///
+    /// This distinction is the whole point of these guards. Reading the
+    /// override file in isolation would happily pass when the override has
+    /// been deleted, which is precisely the failure they exist to catch.
+    fn effective(base: &Value, android: &Value, path: &[&str]) -> Option<Value> {
+        at(android, path).or_else(|| at(base, path))
+    }
+
+    /// The desktop bundle ships the host sidecar; the effective Android config
+    /// must keep it disabled.
+    ///
+    /// This is load-bearing and reads as redundant, so it needs saying why:
+    /// the sidecar artifact is named per Rust target triple
+    /// (`binaries/host-<triple>[.exe]`), and `tauri-build` copies whatever
+    /// `externalBin` lists **for every target with no desktop/mobile gate**.
+    /// Verified against tauri-build 2.6.3: `copy_binaries` is called
+    /// unconditionally from `try_build`, and that crate contains no
+    /// `cfg(desktop)` at all. A non-empty `externalBin` on Android therefore
+    /// makes the build reach for `binaries/host-aarch64-linux-android`, which
+    /// nothing produces — surfacing upstream as a bare `os error 2`
+    /// (tauri-apps/tauri#9774, still open).
+    ///
+    /// So deleting the Android override does not remove redundancy; it breaks
+    /// the Android build. See docs/mobile-feasibility.md.
+    #[test]
+    fn android_effectively_keeps_the_sidecar_disabled() {
+        let base = conf("tauri.conf.json");
+        let android = conf("tauri.android.conf.json");
+
+        // The base config really does declare one, so the override is not
+        // overriding nothing.
+        let shipped = at(&base, &["bundle", "externalBin"])
+            .and_then(|value| value.as_array().map(Vec::len))
+            .unwrap_or(0);
+        assert!(
+            shipped > 0,
+            "the desktop bundle must declare bundle.externalBin (the host sidecar)"
+        );
+
+        // Effective value after the merge: absent in the override means the
+        // desktop list applies, which is the trap.
+        let effective = effective(&base, &android, &["bundle", "externalBin"]);
+        let listed = effective
+            .as_ref()
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        assert_eq!(
+            listed, 0,
+            "the EFFECTIVE Android bundle.externalBin must be empty: no Android host \
+             artifact exists yet, and tauri-build copies externalBin for every target, so \
+             a non-empty value fails the Android build with a bare ENOENT (tauri#9774). \
+             Omitting the key inherits the desktop list — the override must state the \
+             empty list explicitly. Read docs/mobile-feasibility.md before changing this; \
+             got {effective:?}"
+        );
+    }
+
+    /// The other half of the same override: Android must not run `build:host`.
+    /// Resolved through the merge as well, since a deleted `build` block would
+    /// otherwise silently inherit the desktop hook.
+    #[test]
+    fn android_does_not_build_an_unbundled_sidecar() {
+        let base = conf("tauri.conf.json");
+        let android = conf("tauri.android.conf.json");
+        let hook = effective(&base, &android, &["build", "beforeBuildCommand"])
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default();
+        assert!(
+            !hook.contains("build:host"),
+            "the effective Android beforeBuildCommand must not run build:host: its product \
+             is not bundled there (externalBin is empty), so the work is wasted. Got {hook:?}"
+        );
+    }
+}

@@ -73,6 +73,15 @@
 
 > 基建里程碑任务级 WBS 不进本文件，见对应 GitHub M 总览 issue（开发阶段细化）。
 
+### 4.1 移动端（Android/iOS）：**不是"把桌面 sidecar 移植过去"**
+
+2026-09-11 调研结论见 [`mobile-feasibility.md`](mobile-feasibility.md)。三条要点，避免按错误前提估工：
+
+- **桌面"壳 spawn 常驻 host 进程"不能照搬**。Android 侧 `execve` 受 SELinux `neverallow` 限制（targetSdk ≥ 29），Tauri 自身也**不打包、不启动**移动端 sidecar（`tauri-plugin-shell` Android 仅 `level="partial"`）。
+- **但并非不可能**，且三道墙中只有一道是硬的：Play 政策墙因**我们只在 GitHub 分发**而不适用；"常驻"墙因**按需唤醒**而软化；`targetSdk ≤ 28` 可落进被显式豁免的 SELinux 域（Termux 同款机制，**有长期风险**）；真正硬的只有 **bun 自身 Android 产物的稳定性**。
+- **移动端与桌面是"同契约、另一套实现"**，不是移植；且**"保 kkrpc 契约"≠"保 Cordis/JS 插件生态"** —— 后者决定移动端要不要内嵌 JS 引擎。**未立项**。
+
+
 ## 5. 协作约定
 
 - **概览 ↔ 细化的分工**：本文件只回答「现在到哪个 M/F、base 包往哪个方向」；「这个阶段具体做哪几个任务、验收什么」在 GitHub M/F 总览 issue，开工即细化并派生 subissue。
