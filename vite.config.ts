@@ -25,8 +25,16 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching `src-tauri` and the cargo workspace
+      //    `target/` dir. The latter is required: `tauri dev` compiles Rust into
+      //    ./target while this dev server runs, and watching transient build
+      //    artifacts throws EBUSY (-4082) and kills the beforeDevCommand.
+      ignored: [
+        "**/src-tauri/**",
+        "**/target/**",
+        "**/node_modules/**",
+        "**/.git/**",
+      ],
     },
   },
 }));
