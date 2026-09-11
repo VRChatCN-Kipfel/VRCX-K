@@ -17,6 +17,7 @@
 // `register` returns `no-shell` instead of throwing, and presses are simply
 // never delivered.
 
+import { Service, type Context } from "cordis"
 import type {
   ShellShortcutBridge,
   ShortcutPressEvent,
@@ -69,7 +70,7 @@ export function normalizePress(value: unknown): ShortcutPressEvent | undefined {
   return { accelerator: candidate.accelerator, id: candidate.id }
 }
 
-export class ShortcutService {
+export class ShortcutService extends Service {
   private bridge?: ShellShortcutBridge
   private detach?: () => void
   private closed = false
@@ -77,7 +78,8 @@ export class ShortcutService {
   /** Bindings keyed by the shell's canonical accelerator. */
   private readonly bindings = new Map<string, ShortcutHandler>()
 
-  constructor(options: ShortcutServiceOptions = {}) {
+  constructor(ctx: Context, options: ShortcutServiceOptions = {}) {
+    super(ctx, "shortcut")
     this.bridge = options.bridge
     this.logLine = options.log ?? (() => {})
   }

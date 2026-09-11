@@ -15,6 +15,7 @@ import { attachDevWatch, DevWatch, type DevWatchEvent } from "./dev-watch"
 import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "./fiber"
 import { TrayService } from "./tray"
 import { ShortcutService } from "./shortcut"
+import { createShellCapabilities, ShellHandle } from "./capability"
 
 export { HOST_RESTART_EXIT as EXIT_RESTART } from "./api"
 
@@ -160,18 +161,24 @@ async function bootstrap() {
 
   // Tray service (issue: host → shell tray ingress). Always present so plugins
   // can inject `ctx.tray`; it reports "no shell" until the shell bridge
-  // attaches, and resyncs whatever was requested in the meantime.
-  const tray = new TrayService({ log: (line) => log(line) })
-  ctx.provide("tray", tray)
+  // attaches, and resyncs whatever was requested in the meantime. It is a
+  // cordis `Service` subclass so calls are attributable to the calling plugin
+  // (M2-1); a plain `ctx.provide` object would lose that.
+  const tray = new TrayService(ctx, { log: (line) => log(line) })
   // Stop publishing and drop action handlers on shutdown (no async work).
   ctx.effect(() => () => tray.close())
 
   // Global shortcut service (issue #6 callback): the shell owns OS
   // registration, this owns which chord runs which handler. Always present so
   // plugins can inject `ctx.shortcut`; with no shell it reports `no-shell`.
-  const shortcuts = new ShortcutService({ log: (line) => log(line) })
-  ctx.provide("shortcut", shortcuts)
+  const shortcuts = new ShortcutService(ctx, { log: (line) => log(line) })
   ctx.effect(() => () => shortcuts.close())
+
+  // Capability surface (M2-1): the raw `ctx.shell` mirror plus the curated
+  // `ctx.notify`/`ctx.dialog`/`ctx.window`/`ctx.os` services. Registered before
+  // the loader so plugins can inject them; the shell bridge attaches later.
+  const capabilities = new ShellHandle((line) => log(line))
+  createShellCapabilities(ctx, capabilities)
 
   await ctx.plugin(Loader)
 
@@ -252,6 +259,8 @@ async function bootstrap() {
     // Shortcut callback (issue #6): the shell reports presses of the chords it
     // registered; the service routes them to the bound handler.
     shortcuts.attachShell(shell.shortcut)
+    // Capability surface (M2-1): hand the shell API to the capability services.
+    capabilities.attach(shell)
     // Bind the dev-watch relay now that the shell API proxy exists. Events
     // emitted before this point were logged only; the relay is fire-and-forget
     // so a shell without the handler (or a dropped pipe) never breaks dev.

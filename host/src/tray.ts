@@ -19,6 +19,7 @@
 //     `setGroups` returns a `no-shell` verdict and the pending content is pushed
 //     once a shell attaches (`attachShell`).
 
+import { Service, type Context } from "cordis"
 import { validateTrayMenuSnapshot, TRAY_SCHEMA_VERSION } from "./tray_contract"
 import type { TrayGroup, TrayMenuSnapshot } from "./tray-contract.generated"
 import type { TrayActionEvent, TraySetSnapshotResult } from "./stdio"
@@ -106,7 +107,7 @@ function normalizeAction(value: unknown): TrayActionEvent | undefined {
   return { id, command, args: (args as unknown[] | undefined) ?? [] }
 }
 
-export class TrayService {
+export class TrayService extends Service {
   private readonly generation: number
   private readonly coalesceMs: number
   private readonly logLine: (line: string) => void
@@ -132,7 +133,8 @@ export class TrayService {
   /** Serializes pushes so revisions cannot be delivered out of order. */
   private chain: Promise<void> = Promise.resolve()
 
-  constructor(options: TrayServiceOptions = {}) {
+  constructor(ctx: Context, options: TrayServiceOptions = {}) {
+    super(ctx, "tray")
     this.push = options.push
     this.generation = options.generation ?? 0
     this.coalesceMs = options.coalesceMs ?? 0
