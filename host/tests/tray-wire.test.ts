@@ -7,7 +7,7 @@
 // NOTE: the hand-built frames below assert the COMPACT protocol shape
 // (`{t:"q", op:"call", p:[...], a:[{__kkrpc_next_arg__:"value", v:...}]}`) of
 // the pinned dependency `kkrpc 2.1.0` (see host/package.json and
-// src-tauri/src/kkrpc_stdio.rs, which speaks the same shape). Upgrading kkrpc
+// src-tauri/src/kkrpc_peer.rs, which speaks the same shape). Upgrading kkrpc
 // requires re-verifying this file against the new frame format.
 import { describe, expect, test } from "bun:test"
 import type { RPCMessage, Transport } from "kkrpc"

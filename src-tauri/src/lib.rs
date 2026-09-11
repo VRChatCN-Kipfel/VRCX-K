@@ -2,7 +2,7 @@ mod app_lifecycle;
 mod dialog_opts;
 mod host;
 mod host_lifecycle;
-mod kkrpc_stdio;
+mod kkrpc_peer;
 mod notify;
 mod process_tree;
 mod shell_sys;

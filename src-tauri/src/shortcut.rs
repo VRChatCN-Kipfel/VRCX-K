@@ -25,7 +25,7 @@
 // resolved platform modifiers, and `Code`'s `Display` keeps the variant
 // spelling, so `into_string()` is deterministic per platform.)
 
-use crate::kkrpc_stdio::Peer;
+use crate::kkrpc_peer::Peer;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;

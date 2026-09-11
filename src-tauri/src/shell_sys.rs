@@ -15,7 +15,7 @@
 //     by the host-side type definitions, and each is a thin wrapper.
 
 use crate::dialog_opts;
-use crate::kkrpc_stdio::Peer;
+use crate::kkrpc_peer::Peer;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
@@ -388,7 +388,7 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
 }
 
 /// Helper to build a handler closure that clones the app handle.
-fn handler<F>(app: AppHandle, f: F) -> crate::kkrpc_stdio::Handler
+fn handler<F>(app: AppHandle, f: F) -> crate::kkrpc_peer::Handler
 where
     F: Fn(&AppHandle, &[Value]) -> Value + Send + Sync + 'static,
 {

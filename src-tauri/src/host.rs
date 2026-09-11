@@ -2,7 +2,7 @@ use crate::host_lifecycle::{
     reduce_command, HostCommand, HostCommandResult, HostDesiredState, HostLifecycleFacade,
     HostLifecycleState, HostSnapshot,
 };
-use crate::kkrpc_stdio::Peer;
+use crate::kkrpc_peer::Peer;
 use crate::process_tree::ProcessTree;
 use crate::shell_sys::register_shell_handlers;
 use serde::{Deserialize, Serialize};
