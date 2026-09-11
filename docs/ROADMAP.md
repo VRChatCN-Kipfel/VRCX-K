@@ -46,6 +46,8 @@
 | 能力 | 决定 | 触发/形态 |
 |---|---|---|
 | VR Overlay | **观望**（官方暂不下场） | 有用户基础+反馈后单独立项；届时 T2 dll 插件（架构 §1.4 C 类 runner 已预留） |
+| OSC（VRChat OSC 收发） | **插件职责**（不进 `shell.*` 能力面） | 官方底层不实现；插件在脑内自行收发（#13 评论记录） |
+| 跨机 VRO / 跨机 OSC 推送 | **预期不可实现**（VRO 底层无计划；OSC 仅保留轻度异机路径，发版后评估） | 脑与受控游戏不在同一台机器时二者均无落点——VRO/OSC 归插件、无法在 Rust 层呈现；OSC 可持"host 直发 UDP 到指定已连接节点的指定端口"，属发版后观察项 |
 | 截图数据嵌入 | **独立插件**（非 base 日常核心） | 官方可单独立项 or 社区；不进 F 主序列 |
 | 内嵌浏览器(Cef) | **双手开窗替代** | 直接 call Tauri 开外部网页/窗口，宿主/Cordis 不涉及 |
 | Discord Rich Presence 等平台桥 | **交社区** | 官方明确不做；第三方垂直功能样板 |
@@ -66,7 +68,7 @@
 |---|---|---|
 | M0 PoC | bun 主线实证 | 报告 poc-m0.md（✅） |
 | M1 壳与生命周期 | Tauri 系统代理（托盘/单实例/快捷键/通知/对话框）+ sidecar spawn/supervise + 51 重启 + 优雅停机 + 动态端口 + kkrpc/stdio 双向桥 | 三端全链路；杀宿主自动拉起；重启现场恢复 |
-| M2 插件机制 + 配置热 | EntryTree 完整；启停/配置即时；SDK v0（effect 纪律/防泄漏）；access 白名单 | 市场 mock；t11 100 装卸内存回基线 |
+| M2 插件机制 + 配置热 | EntryTree 完整；启停/配置即时；SDK v0（effect 纪律/防泄漏）；access **声明 + warn 观测**（执行层挂 #13） | 市场 mock；t11 100 装卸内存回基线 |
 | M3 前端扩展契约 | React entry/slot/data 广播；版本化资源；prod 刷新 | UI 插件示例（注册面板+数据推送+刷新生效） |
 | M4 重能力插件 + 市场 | C 类子进程 runner（dll/Overlay/滚动替换）；市场（索引/签名/原子替换） | dll 示例跨重启存活；防投毒演练 |
 | M5 分发与更新 | compile 全平台矩阵 + updater + 镜像回退 | 三平台升级演练 |
@@ -96,6 +98,11 @@
 
 - 架构方案：[`architecture-proposal.md`](architecture-proposal.md)（v4.2）
 - M0 PoC 报告：[`poc-m0.md`](poc-m0.md)
+- 目录布局 ADR：[`adr-plugin-layout.md`](adr-plugin-layout.md)（M1 packaged 收口 × M2-7）
+- Cordis 运行时实测：[`cordis-runtime-findings.md`](cordis-runtime-findings.md)（能力接口/session/manifest 的实证约束）
+- 移动端方向：[`mobile-feasibility.md`](mobile-feasibility.md)（第三端；脑不搬过去）
+- 会话与设备管理需求：[`host-sessions.md`](host-sessions.md)（#13，未排期）
+- 复跑探针：[`probes/`](probes/)（本轮实测证据，可直接 `bun run`）
 - 开发约定（工具链/git/.temp）：根 [`AGENTS.md`](../AGENTS.md)
 
 ## 参照与许可证卫生（红线）
