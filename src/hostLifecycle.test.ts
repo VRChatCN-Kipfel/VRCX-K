@@ -156,6 +156,23 @@ describe("reduceHostLifecycle", () => {
     expect(degraded.snapshot).toBeNull()
   })
 
+  test("a mount-time response must not clobber a newer live event of the same generation", () => {
+    // The invoke is read while the host is still spawning (phase `starting`),
+    // but the `ready` event for the SAME generation can be delivered first.
+    // The response must not roll the view back to the spawn-time snapshot.
+    const live = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "event",
+      raw: snapshot({ generation: 1, phase: "ready", port: 43121 }),
+    })
+    const afterResponse = reduceHostLifecycle(live, {
+      kind: "response",
+      raw: { snapshot: snapshot({ generation: 1, phase: "starting", pid: 9504, port: null }) },
+    })
+    expect(afterResponse).toBe(live)
+    expect(afterResponse.snapshot?.phase).toBe("ready")
+    expect(afterResponse.snapshot?.port).toBe(43121)
+  })
+
   test("listen error keeps the last snapshot and surfaces the message", () => {
     const live = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: snapshot() })
     const failed = reduceHostLifecycle(live, { kind: "error", message: "listen boom" })

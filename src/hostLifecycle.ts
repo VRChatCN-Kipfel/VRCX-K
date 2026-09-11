@@ -110,12 +110,15 @@ export function reduceHostLifecycle(
 ): HostLifecycleView {
   switch (action.kind) {
     case "response": {
+      // The one-shot invoke is a mount-time seed, read while the host may still
+      // be spawning. The event stream is authoritative and complete, so once it
+      // has made the view live a response must never overwrite it: across the
+      // mount race both carry the same generation, so `isStaleSnapshot` cannot
+      // catch a response that is older *by value* (e.g. `starting` arriving
+      // after the `ready` event for the same spawn).
+      if (view.status === "live") return view
       const snapshot = parseHostLifecyclePayload(action.raw)
       if (!snapshot) {
-        // Symmetric with the `unsupported` branch: the one-shot invoke and the
-        // event stream arrive concurrently, so a response we cannot parse must
-        // never clobber a snapshot the stream already delivered.
-        if (view.status === "live") return view
         return {
           status: "unsupported",
           snapshot: null,
