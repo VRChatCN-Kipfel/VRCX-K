@@ -43,11 +43,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    // Android: no host brain. The sidecar is a bun-compiled Cordis host and bun
-    // has no Android target (see scripts/build-host.ts RUST_TO_BUN_TARGET), so
-    // there is nothing to build — and `tauri android build` would otherwise
-    // fail-fast in ensure_host_sidecar for a TARGET like aarch64-linux-android.
-    // Android CI only validates the shell + face; the sidecar is desktop-only.
+    // Android: the host sidecar is skipped, but NOT because bun lacks an Android
+    // target — it does not. Verified 2026-09-11: bun 1.4.2 cross-compiles
+    // `--target=bun-linux-arm64-android` and `bun-linux-x64-android` successfully,
+    // producing valid ELF binaries (AArch64 e_machine 0xb7 / x86-64 0x3e). Note
+    // the spelling: android only exists combined with linux, never as plain
+    // `bun-android-*`.
+    //
+    // The real reason is that this repo has not wired that target up:
+    // `scripts/build-host.ts` RUST_TO_BUN_TARGET has no android row, so
+    // `bunTargetForTriple` would fail-fast for a TARGET like
+    // aarch64-linux-android and `tauri android build` would die inside
+    // ensure_host_sidecar. Two further unknowns gate turning it on: whether a
+    // bun-compiled host can actually EXECUTE on Android (W^X / data-directory
+    // exec restrictions — unverified), and whether the host's runtime deps
+    // (chokidar fs-watch, a `ws` localhost listener) behave there.
+    //
+    // Until that is settled the sidecar stays desktop-only and Android CI
+    // validates the shell + face, as its job comment says.
     if !is_android_target() {
         ensure_host_sidecar();
     }

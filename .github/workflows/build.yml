@@ -6,8 +6,12 @@
 # 在缺失/过期时自动构建（自愈），无需手工先行 build:host。
 #
 # mobile（matrix，当前仅 android）：验证壳（Rust）+ 脸（React）在移动端
-# 能编译打包。三端架构里 host 脑（bun+cordis）目前没有任何移动端目标
-# （scripts/build-host.ts RUST_TO_BUN_TARGET 仅桌面），故移动端只验证壳+脸：
+# 能编译打包。宿主（bun+cordis）目前不参与移动端构建——原因**不是** bun 缺
+# Android 目标：bun 能交叉编译 `bun-linux-{arm64,x64}-android`（2026-09-11 实测，
+# 产物经 ELF 头校验为 AArch64/x86-64；注意拼写必须带 linux，不能写 bun-android-*）。
+# 真正的原因是本仓库尚未接线（scripts/build-host.ts RUST_TO_BUN_TARGET 无 android
+# 行），且"编出来的宿主能否在 Android 上执行"未验证（W^X/数据目录 exec 限制）。
+# 故移动端只验证壳+脸：
 #   - build.rs 对 Android TARGET 跳过 sidecar 自愈（is_android_target）
 #   - tauri.android.conf.json 覆盖 externalBin=[] 且 beforeBuildCommand 只 build 前端
 # 2026-09-11 起不再 continue-on-error：壳的桌面专属能力已按平台门控，
