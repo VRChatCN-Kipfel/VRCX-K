@@ -32,14 +32,6 @@ fn str_arg(args: &[Value], i: usize) -> String {
         .to_string()
 }
 
-/// Convert a dialog `FilePath` (filesystem path or URI) to a JSON string.
-fn path_to_json(path: tauri_plugin_dialog::FilePath) -> Value {
-    match path.into_path() {
-        Ok(path) => json!(path.to_string_lossy().to_string()),
-        Err(_) => json!(""),
-    }
-}
-
 /// Register every `shell.*` capability handler on the peer.
 ///
 /// `app` is cloned into each closure so the reader thread can reach Tauri
@@ -114,24 +106,40 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
             // The flag precedence lives in `dialog_opts::pick_mode` (one tested
             // implementation shared with the smoke entry point).
             let picked: Option<Value> = match dialog_opts::pick_mode(save, directory, multiple) {
-                dialog_opts::PickMode::Save => builder.blocking_save_file().map(path_to_json),
+                dialog_opts::PickMode::Save => builder
+                    .blocking_save_file()
+                    .map(dialog_opts::file_path_to_json),
                 // Folder picking is desktop-only: the mobile dialog plugin
                 // exposes file picking but has no folder API. A folder request
                 // there reports "nothing picked" rather than silently
                 // degrading into a file picker (which would look like the user
                 // cancelled a dialog they were never shown).
                 #[cfg(desktop)]
-                dialog_opts::PickMode::Folders => builder
-                    .blocking_pick_folders()
-                    .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect())),
+                dialog_opts::PickMode::Folders => builder.blocking_pick_folders().map(|paths| {
+                    Value::Array(
+                        paths
+                            .into_iter()
+                            .map(dialog_opts::file_path_to_json)
+                            .collect(),
+                    )
+                }),
                 #[cfg(desktop)]
-                dialog_opts::PickMode::Folder => builder.blocking_pick_folder().map(path_to_json),
+                dialog_opts::PickMode::Folder => builder
+                    .blocking_pick_folder()
+                    .map(dialog_opts::file_path_to_json),
                 #[cfg(not(desktop))]
                 dialog_opts::PickMode::Folders | dialog_opts::PickMode::Folder => None,
-                dialog_opts::PickMode::Files => builder
-                    .blocking_pick_files()
-                    .map(|paths| Value::Array(paths.into_iter().map(path_to_json).collect())),
-                dialog_opts::PickMode::File => builder.blocking_pick_file().map(path_to_json),
+                dialog_opts::PickMode::Files => builder.blocking_pick_files().map(|paths| {
+                    Value::Array(
+                        paths
+                            .into_iter()
+                            .map(dialog_opts::file_path_to_json)
+                            .collect(),
+                    )
+                }),
+                dialog_opts::PickMode::File => builder
+                    .blocking_pick_file()
+                    .map(dialog_opts::file_path_to_json),
             };
             match picked {
                 Some(v) => v,

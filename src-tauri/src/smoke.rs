@@ -277,25 +277,35 @@ async fn dialog_pick_file(
         match mode {
             dialog_opts::PickMode::Save => builder
                 .blocking_save_file()
-                .map(|path| json!(path.to_string())),
+                .map(dialog_opts::file_path_to_json),
             // Desktop-only, matching `shell.dialog.pickFile`: the mobile dialog
             // plugin has no folder API, so the request reports "nothing picked".
             #[cfg(desktop)]
-            dialog_opts::PickMode::Folders => builder
-                .blocking_pick_folders()
-                .map(|paths| json!(paths.iter().map(|p| p.to_string()).collect::<Vec<_>>())),
+            dialog_opts::PickMode::Folders => builder.blocking_pick_folders().map(|paths| {
+                Value::Array(
+                    paths
+                        .into_iter()
+                        .map(dialog_opts::file_path_to_json)
+                        .collect(),
+                )
+            }),
             #[cfg(desktop)]
             dialog_opts::PickMode::Folder => builder
                 .blocking_pick_folder()
-                .map(|path| json!(path.to_string())),
+                .map(dialog_opts::file_path_to_json),
             #[cfg(not(desktop))]
             dialog_opts::PickMode::Folders | dialog_opts::PickMode::Folder => None,
-            dialog_opts::PickMode::Files => builder
-                .blocking_pick_files()
-                .map(|paths| json!(paths.iter().map(|p| p.to_string()).collect::<Vec<_>>())),
+            dialog_opts::PickMode::Files => builder.blocking_pick_files().map(|paths| {
+                Value::Array(
+                    paths
+                        .into_iter()
+                        .map(dialog_opts::file_path_to_json)
+                        .collect(),
+                )
+            }),
             dialog_opts::PickMode::File => builder
                 .blocking_pick_file()
-                .map(|path| json!(path.to_string())),
+                .map(dialog_opts::file_path_to_json),
         }
     })
     .await;

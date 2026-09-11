@@ -7,8 +7,8 @@
 //
 // Everything in this module is pure: no `AppHandle`, no plugin state.
 
-use serde_json::Value;
-use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+use serde_json::{json, Value};
+use tauri_plugin_dialog::{FilePath, MessageDialogButtons, MessageDialogKind};
 
 /// Wire `kind` → dialog kind. Missing or unknown falls back to `Info`.
 ///
@@ -75,10 +75,33 @@ pub fn opt_bool(opts: &Value, key: &str) -> bool {
     opts.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Wire value for one picked [`FilePath`].
+///
+/// A picker result is either a filesystem path or an opaque **URI**, and the
+/// two must not be conflated. [`FilePath::into_path`] converts only `file://`
+/// URLs: Android's Storage Access Framework hands back `content://`, for which
+/// it fails *by design*. The previous implementation turned that failure into
+/// `""`, which is the same value a cancelled dialog produces — so on Android a
+/// successful pick was indistinguishable from "the user chose nothing", and the
+/// callee could not tell a broken bridge from an empty response.
+///
+/// So: prefer the filesystem reading when one exists (this also keeps `file://`
+/// normalised to a real path, which desktop callers rely on), otherwise hand
+/// back the URI itself. Interpreting a URI is the caller's job — it may need to
+/// read through it rather than open a path, which is exactly the difference the
+/// old code erased.
+pub fn file_path_to_json(path: FilePath) -> Value {
+    match path.clone().into_path() {
+        Ok(path) => json!(path.to_string_lossy().to_string()),
+        Err(_) => json!(path.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     /// `MessageDialogButtons` deliberately does not implement `PartialEq`
     /// (it carries `String` variants), so compare its serialized form: that is
@@ -139,5 +162,44 @@ mod tests {
         // A non-bool never silently becomes true.
         assert!(!opt_bool(&opts, "count"));
         assert!(!opt_bool(&opts, "missing"));
+    }
+
+    #[test]
+    fn a_content_uri_survives_instead_of_collapsing_to_empty() {
+        // The Android picker case. `into_path()` cannot convert a `content://`
+        // URI, and the old code turned that failure into `""` — the same value
+        // a cancelled dialog yields. Regression guard for exactly that.
+        let uri = "content://media/external/images/media/42";
+        let picked: FilePath = uri.parse().expect("FilePath::from_str is infallible");
+        let wire = file_path_to_json(picked);
+        assert_ne!(wire, json!(""), "a picked URI must never look cancelled");
+        assert_eq!(wire, json!(uri));
+    }
+
+    #[test]
+    fn a_filesystem_path_stays_a_path() {
+        let picked = FilePath::Path(PathBuf::from(r"C:\Users\me\pic.png"));
+        assert_eq!(file_path_to_json(picked), json!(r"C:\Users\me\pic.png"));
+    }
+
+    #[test]
+    fn a_file_url_never_collapses_to_empty() {
+        // Whether a `file://` URL converts is genuinely platform-dependent:
+        // `to_file_path()` rejects a URL with no drive letter on Windows, while
+        // on unix the drive-less form is the normal one. Either outcome is
+        // legitimate, so this pins the invariant that actually matters — the
+        // wire value is never `""`, the value a cancelled dialog produces.
+        for input in ["file:///tmp/probe.png", "file:///C:/tmp/probe.png"] {
+            let picked: FilePath = input.parse().expect("FilePath::from_str is infallible");
+            let wire = file_path_to_json(picked);
+            assert_ne!(wire, json!(""), "{input} must not collapse to empty");
+            let wire = wire.as_str().expect("a string on the wire");
+            assert!(!wire.is_empty());
+            // Never mangled: it is either the converted path or the URL itself.
+            assert!(
+                !wire.starts_with("file://") || wire == input,
+                "{input} produced something that is neither a path nor the input: {wire}"
+            );
+        }
     }
 }
