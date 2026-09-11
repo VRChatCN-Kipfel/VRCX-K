@@ -8,6 +8,16 @@
 //         * Windows-deep toast (buttons/hero/progress) -> tauri-winrt-notification
 //           (provisioned dependency; actually used from F3 when real depth lands)
 //
+// IMPORTANT — the two are STACKED, not alternatives (verified 2026-09-11):
+//   tauri-plugin-notification -> notify-rust -> tauri-winrt-notification
+//   i.e. the winrt crate is the official plugin's WINDOWS BACKEND. The plain
+//   `notify-rust` crate is what the plugin calls on desktop, and notify-rust
+//   itself delegates to tauri-winrt-notification on Windows. Direct use below
+//   is therefore a DESCENT INTO the layer the plugin already sits on, for the
+//   depth the plugin drops: `desktop.rs::show()` forwards only
+//   title/body/icon/sound and discards the NotificationHandle inside a spawned
+//   task, so buttons/hero/progress/click-callbacks are unreachable through it.
+//
 // Shell stays a thin proxy: it does NOT parse plugin/business protocols. Host
 // (brain) requests a notify via kkrpc/stdio; UI (face) may via Tauri IPC.
 
