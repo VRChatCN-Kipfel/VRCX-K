@@ -10,8 +10,9 @@
 # （scripts/build-host.ts RUST_TO_BUN_TARGET 仅桌面），故移动端只验证壳+脸：
 #   - build.rs 对 Android TARGET 跳过 sidecar 自愈（is_android_target）
 #   - tauri.android.conf.json 覆盖 externalBin=[] 且 beforeBuildCommand 只 build 前端
-# 当前为调通期：android job continue-on-error，失败不阻塞整体；将来 iOS
-# 只需在 mobile matrix 加一个 runs-on: macos-latest 条目。
+# 2026-09-11 起不再 continue-on-error：壳的桌面专属能力已按平台门控，
+# android job 已能真实通过（run 34561905131），失败现在会正常阻塞。
+# 将来 iOS 只需在 mobile matrix 加一个 runs-on: macos-latest 条目。
 name: build
 
 on:
@@ -100,9 +101,11 @@ jobs:
     name: mobile (${{ matrix.platform.name }})
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 60
-    # 调通期：android 还在高频修错中，失败不应阻塞 desktop 信号。
-    # 移动端验证的是"壳+脸能编译"，与桌面流程独立成熟后去掉此行。
-    continue-on-error: true
+    # 曾经是 continue-on-error（调通期：android 高频修错，失败不阻塞 desktop）。
+    # 2026-09-11 去掉：桌面专属 API 已按平台门控（run 34561905131，android job
+    # 13m4s 全绿并产出 APK），移动端验证的"壳+脸能编译"已成为真实信号，不再
+    # 需要豁免。若将来 iOS 加入 matrix 且处于调通期，可对单个 matrix 条目
+    # 单独豁免（matrix 级 continue-on-error），而不是整 job 豁免。
     strategy:
       fail-fast: false
       matrix:
