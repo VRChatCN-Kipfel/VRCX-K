@@ -173,6 +173,33 @@ describe("reduceHostLifecycle", () => {
     expect(afterResponse.snapshot?.port).toBe(43121)
   })
 
+  test("once live, a response is seed-only — it never advances the live view", () => {
+    // Explicit contract, not an accident of the same-generation check: a
+    // response is only a mount-time seed. It is dropped once the view is live
+    // even when it would be newer by value (here a ready/gen-1 response after a
+    // backoff/gen-1 event), and even when it carries a newer generation. The
+    // event stream is the live source and every real transition emits an event,
+    // so the view still self-heals; pinning this keeps the two paths from
+    // re-entangling.
+    const live = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "event",
+      raw: snapshot({ generation: 1, phase: "backoff", nextRetryMs: 1500 }),
+    })
+    expect(live.snapshot?.phase).toBe("backoff")
+    expect(
+      reduceHostLifecycle(live, {
+        kind: "response",
+        raw: { snapshot: snapshot({ generation: 1, phase: "ready", port: 43121 }) },
+      }),
+    ).toBe(live)
+    expect(
+      reduceHostLifecycle(live, {
+        kind: "response",
+        raw: { snapshot: snapshot({ generation: 2, phase: "ready", port: 43122 }) },
+      }),
+    ).toBe(live)
+  })
+
   test("listen error keeps the last snapshot and surfaces the message", () => {
     const live = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: snapshot() })
     const failed = reduceHostLifecycle(live, { kind: "error", message: "listen boom" })

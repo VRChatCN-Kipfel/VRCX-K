@@ -47,17 +47,27 @@ export function HostLifecyclePanel() {
       if (!cancelled) apply(action)
     }
 
-    void invoke<unknown>("get_host_lifecycle")
-      .then((raw) => applyIfLive({ kind: "response", raw }))
-      .catch((err: unknown) => {
-        // Missing command on an older shell → unsupported, never a crash.
-        applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` })
-      })
-
+    // Register the listener BEFORE reading a seed. Tauri neither buffers nor
+    // replays events, so anything emitted before this registration is gone for
+    // good. Reading the seed only after `listen` resolves makes it reflect the
+    // current state instead of a spawn-time snapshot that may never be
+    // corrected (the fingerprint feed re-emits only on change) — the case where
+    // the `ready` event is dropped while the mount response still says
+    // `starting`. `reduceHostLifecycle` ignores a response once an event has
+    // made the view live, so an event that lands in between still wins.
     void listen<unknown>("host-lifecycle", (event) => applyIfLive({ kind: "event", raw: event.payload }))
       .then((fn) => {
-        if (cancelled) fn()
-        else unlisten = fn
+        if (cancelled) {
+          fn()
+          return
+        }
+        unlisten = fn
+        return invoke<unknown>("get_host_lifecycle")
+          .then((raw) => applyIfLive({ kind: "response", raw }))
+          .catch((err: unknown) => {
+            // Missing command on an older shell → unsupported, never a crash.
+            applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` })
+          })
       })
       .catch((err: unknown) => {
         console.error("[host-lifecycle] listen failed", err)

@@ -111,11 +111,15 @@ export function reduceHostLifecycle(
   switch (action.kind) {
     case "response": {
       // The one-shot invoke is a mount-time seed, read while the host may still
-      // be spawning. The event stream is authoritative and complete, so once it
-      // has made the view live a response must never overwrite it: across the
-      // mount race both carry the same generation, so `isStaleSnapshot` cannot
-      // catch a response that is older *by value* (e.g. `starting` arriving
-      // after the `ready` event for the same spawn).
+      // be spawning. The event stream is the authoritative *change source*, but
+      // it is NOT a complete state mirror: the snapshot fingerprint excludes
+      // `nextRetryMs` (it ticks during backoff but is never re-emitted),
+      // `stopping` is never published, and events emitted before the listener
+      // registers are dropped (Tauri neither buffers nor replays). So once an
+      // event has made the view live a response must never overwrite it: across
+      // the mount race both carry the same generation, so `isStaleSnapshot`
+      // cannot catch a response that is older *by value* (e.g. `starting`
+      // arriving after the `ready` event for the same spawn).
       if (view.status === "live") return view
       const snapshot = parseHostLifecyclePayload(action.raw)
       if (!snapshot) {
@@ -140,6 +144,10 @@ export function reduceHostLifecycle(
       if (view.status === "live") return view
       return { status: "unsupported", snapshot: null, notice: action.reason }
     case "error":
+      // Deliberately unconditional, even when a snapshot is already live: a
+      // listener failure is a real transport fault, not a mount-time race, so
+      // it must stay visible (the dot turns red) rather than hide behind stale
+      // data. This is the one exception to the "live is sticky" rule above.
       return { status: "error", snapshot: view.snapshot, notice: action.message }
   }
 }
