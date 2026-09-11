@@ -55,6 +55,14 @@ export function HostLifecyclePanel() {
     // the `ready` event is dropped while the mount response still says
     // `starting`. `reduceHostLifecycle` ignores a response once an event has
     // made the view live, so an event that lands in between still wins.
+    const readSeed = () =>
+      invoke<unknown>("get_host_lifecycle")
+        .then((raw) => applyIfLive({ kind: "response", raw }))
+        .catch((err: unknown) => {
+          // Missing command on an older shell → unsupported, never a crash.
+          applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` })
+        })
+
     void listen<unknown>("host-lifecycle", (event) => applyIfLive({ kind: "event", raw: event.payload }))
       .then((fn) => {
         if (cancelled) {
@@ -62,16 +70,16 @@ export function HostLifecyclePanel() {
           return
         }
         unlisten = fn
-        return invoke<unknown>("get_host_lifecycle")
-          .then((raw) => applyIfLive({ kind: "response", raw }))
-          .catch((err: unknown) => {
-            // Missing command on an older shell → unsupported, never a crash.
-            applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` })
-          })
+        return readSeed()
       })
       .catch((err: unknown) => {
         console.error("[host-lifecycle] listen failed", err)
-        applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` })
+        // The listener failed, but the command may still work: read the seed
+        // first so the `error` state keeps the last known snapshot (its reducer
+        // branch preserves `view.snapshot`) instead of showing nothing.
+        return readSeed().then(() =>
+          applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
+        )
       })
 
     return () => {
