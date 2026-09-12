@@ -26,9 +26,15 @@ beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "vrcxk-cap-attr-"))
   await mkdir(join(root, "plugins"), { recursive: true })
   // Apply-only plugins (no `export const name`), matching the production shape.
+  // `alpha` also starts a nested bare `ctx.plugin()` to pin the loader behavior
+  // that such a fiber inherits the enclosing entry (plugin-loader rc.6:577-581).
   await writeFile(
     join(root, "plugins", "alpha.ts"),
-    `export function apply(ctx: any) { void ctx.notify.send("alpha", "x") }\n`,
+    `export function apply(ctx: any) {
+  void ctx.notify.send("alpha", "x")
+  void ctx.plugin(function nestedBare(inner: any) { void inner.notify.send("nested", "y") })
+}
+`,
   )
   await writeFile(
     join(root, "plugins", "beta.ts"),
@@ -62,10 +68,11 @@ describe("capability attribution through the real loader", () => {
     })
     expect(ctx.loader.resolve(includeId)).toBeDefined()
 
-    // Include + plugin fibers settle asynchronously; poll for both calls.
+    // Include + plugin fibers settle asynchronously; poll for all three calls
+    // (alpha, its nested bare plugin, and beta).
     const deadline = Date.now() + 10_000
     while (Date.now() < deadline) {
-      if (audit.filter((line) => line.includes("-> notify.send")).length >= 2) break
+      if (audit.filter((line) => line.includes("-> notify.send")).length >= 3) break
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
 
@@ -73,11 +80,12 @@ describe("capability attribution through the real loader", () => {
       .filter((line) => line.includes("-> notify.send"))
       .map((line) => line.replace(/^\[cap\] /, "").split(" -> ")[0])
 
-    expect(senders).toHaveLength(2)
+    // Two distinct identities (alpha, beta); the nested bare plugin shares
+    // alpha's entry id, so alpha appears twice.
     expect(new Set(senders).size).toBe(2)
-    expect(senders.some((sender) => sender.includes("alpha"))).toBe(true)
+    expect(senders.filter((sender) => sender.includes("alpha"))).toHaveLength(2)
     expect(senders.some((sender) => sender.includes("beta"))).toBe(true)
-    // The bug: both would have been the enclosing Include.
+    // The bug: all of them would have been the enclosing Include.
     expect(senders).not.toContain("Include")
   }, 20_000)
 })

@@ -35,9 +35,12 @@ export type CapabilityAudit = (line: string) => void
  * two-plugins-look-identical failure this surface exists to prevent. The loader
  * sets `entry` per `cordis.yml` entry (id like `2eccc820:alpha`).
  *
- * A bare `ctx.plugin()` has no loader Entry (docs/cordis-runtime-findings.md
- * §1.12), so fall back to `fiber.name` — lower fidelity, but those are ad-hoc
- * in-process fibers, not the production plugin path.
+ * Under a loader, `entry` is not only set per entry but INHERITED by plugins an
+ * entry starts (`internal/plugin` sets `fiber.entry = fiber.parent[Entry.key]`,
+ * plugin-loader rc.6:577-581), so even a nested bare `ctx.plugin()` audits as
+ * the enclosing entry. `fiber.name` is reached only when there is no entry
+ * anywhere in the chain — a Context with no loader at all
+ * (docs/cordis-runtime-findings.md §1.12); those are ad-hoc in-process fibers.
  *
  * `self` is undefined when a caller destructures the method
  * (`const { notify } = ctx.shell`): there is no `this` to read the caller from,
