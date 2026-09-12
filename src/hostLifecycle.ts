@@ -5,8 +5,9 @@
 // 1:1 by the Rust shell (`src-tauri/src/host_lifecycle.rs`). This module is the
 // single import site for the face: it re-exports the canonical types,
 // constants *and validator* — never a hand-forked copy — and adds the
-// IPC-specific pieces (the `{ snapshot }` response envelope plus the pure
-// reducer/formatting used by `hostLifecyclePanel.tsx`).
+// IPC-specific pieces (the `{ snapshot }` response envelope, the pure
+// reducer/formatting, and the injectable mount orchestration
+// `subscribeHostLifecycle` used by `hostLifecyclePanel.tsx`).
 //
 // Guard rule: `isHostSnapshot` must stay exactly as strict as the host
 // validator, so it *is* the host validator. `{ lastExit: [] }` fails it (an
@@ -149,6 +150,73 @@ export function reduceHostLifecycle(
       // it must stay visible (the dot turns red) rather than hide behind stale
       // data. This is the one exception to the "live is sticky" rule above.
       return { status: "error", snapshot: view.snapshot, notice: action.message }
+  }
+}
+
+// ── mount orchestration (pure, injectable — unit-tested) ───────────────────
+
+export type HostLifecycleSubscribeDeps = {
+  /** Attach the `host-lifecycle` listener; resolves to an unsubscribe fn. */
+  listen: (onEvent: (raw: unknown) => void) => Promise<() => void>
+  /** One-shot read of the current snapshot (`get_host_lifecycle`). */
+  readSeed: () => Promise<unknown>
+  /** Deliver a reducer action to the view. */
+  apply: (action: HostLifecycleAction) => void
+  /** Called when `listen` rejects (log it here; the seed is still read). */
+  onListenError?: (err: unknown) => void
+}
+
+/**
+ * Wire the panel's mount sequence. Split out of `hostLifecyclePanel.tsx` so the
+ * ordering rules — which are the subtle part — are testable without React.
+ *
+ * The listener is registered BEFORE the seed is read: Tauri neither buffers nor
+ * replays events, so anything emitted before registration is gone for good.
+ * Reading the seed only after `listen` resolves makes it reflect current state
+ * instead of a spawn-time snapshot that the fingerprint feed (re-emits only on
+ * change) will never correct. `reduceHostLifecycle` ignores a response once an
+ * event has made the view live, so an event landing in between still wins.
+ *
+ * On a listen failure the seed is read anyway — the command may still work, and
+ * the `error` reducer branch keeps `view.snapshot` (last known state). `readSeed`
+ * is a single `invoke`, so the two-argument `.then(onFulfilled, onRejected)` on
+ * it routes exactly one rejection source to `unsupported`: a throw from `apply`
+ * is not mis-labelled as a missing command, and the seed is not read twice.
+ */
+export function subscribeHostLifecycle(deps: HostLifecycleSubscribeDeps): () => void {
+  let cancelled = false
+  let unlisten: (() => void) | undefined
+  const applyIfLive = (action: HostLifecycleAction) => {
+    if (!cancelled) deps.apply(action)
+  }
+  const seed = () =>
+    deps.readSeed().then(
+      (raw) => applyIfLive({ kind: "response", raw }),
+      // Missing command on an older shell → unsupported, never a crash.
+      (err: unknown) =>
+        applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` }),
+    )
+
+  void deps.listen((raw) => applyIfLive({ kind: "event", raw })).then(
+    (fn) => {
+      if (cancelled) {
+        fn()
+        return
+      }
+      unlisten = fn
+      return seed()
+    },
+    (err: unknown) => {
+      deps.onListenError?.(err)
+      return seed().then(() =>
+        applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
+      )
+    },
+  )
+
+  return () => {
+    cancelled = true
+    unlisten?.()
   }
 }
 

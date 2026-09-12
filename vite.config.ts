@@ -1,12 +1,36 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
 
+// Safety net for the case the `ignored` list below does not cover: chokidar's
+// FSWatcher emits 'error' with no listener when a watch throws, and Node turns
+// that into an uncaught exception that kills the dev server (and with it the
+// `beforeDevCommand`). Log and keep going instead of dying.
+function watcherErrorGuard(): Plugin {
+  return {
+    name: "vrcxk:watcher-error-guard",
+    // Dev-only: `configureServer` never runs for `vite build`/`vite preview`.
+    apply: "serve",
+    configureServer(server) {
+      server.watcher.on("error", (error) => {
+        // Keep the dev server alive, but do NOT imply the error is harmless:
+        // chokidar does not re-arm a failed `fs.watch` handle, so the path may
+        // silently stop being watched (HMR goes quiet) until the cause is fixed
+        // and Vite restarts.
+        console.error(
+          "[vite] watcher error (dev server kept alive; the path may no longer be watched — fix the cause and restart):",
+          error,
+        );
+      });
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [react()],
+  plugins: [react(), watcherErrorGuard()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -33,11 +57,14 @@ export default defineConfig(() => ({
       //    beforeDevCommand. bun names its transient files
       //    `.<16hex>-<8hex>.bun-build` (`.tmp` for cross-target builds), so a
       //    RegExp covers both where a `*.bun-build` glob would miss `.tmp`.
+      //    `.bun-cache/` is bun's compile cache (only produced by cross-target
+      //    builds on Windows, but ignored here all the same).
       ignored: [
         "**/src-tauri/**",
         "**/target/**",
         "**/node_modules/**",
         "**/.git/**",
+        "**/.bun-cache/**",
         /\.[0-9a-f]{16}-[0-9a-f]{8}\.(?:bun-build|tmp)$/i,
       ],
     },
