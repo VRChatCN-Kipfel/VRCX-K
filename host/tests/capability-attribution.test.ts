@@ -7,8 +7,10 @@
 // the failure this capability surface exists to prevent.
 //
 // This drives the REAL loader + Include + cordis.yml path (the production path,
-// unlike the bare `ctx.plugin()` used by capability.test.ts) and asserts the
-// two apply-only plugins are distinguishable. `fiber.entry.id` is the identity.
+// unlike the bare `ctx.plugin()` used by capability.test.ts). Identities are
+// asserted as PROPERTIES, not counts: the point is that distinct callers stay
+// distinct, so a future change that distinguishes the nested plugins further
+// must not turn this test red. See docs/probes/probe8.ts for the measurement.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -26,13 +28,15 @@ beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "vrcxk-cap-attr-"))
   await mkdir(join(root, "plugins"), { recursive: true })
   // Apply-only plugins (no `export const name`), matching the production shape.
-  // `alpha` also starts a nested bare `ctx.plugin()` to pin the loader behavior
-  // that such a fiber inherits the enclosing entry (plugin-loader rc.6:577-581).
+  // `alpha` also starts two DIFFERENT nested bare `ctx.plugin()`s to pin the
+  // loader behavior that such a fiber inherits the enclosing entry
+  // (plugin-loader rc.6:577-581) while remaining distinguishable from it.
   await writeFile(
     join(root, "plugins", "alpha.ts"),
     `export function apply(ctx: any) {
   void ctx.notify.send("alpha", "x")
-  void ctx.plugin(function nestedBare(inner: any) { void inner.notify.send("nested", "y") })
+  void ctx.plugin(function nestedOne(inner: any) { void inner.notify.send("nestedOne", "y") })
+  void ctx.plugin(function nestedTwo(inner: any) { void inner.notify.send("nestedTwo", "z") })
 }
 `,
   )
@@ -51,7 +55,7 @@ afterAll(async () => {
 })
 
 describe("capability attribution through the real loader", () => {
-  test("two apply-only plugins loaded via Include audit as distinct identities", async () => {
+  test("callers audit as distinct identities, not the enclosing Include", async () => {
     const audit: string[] = []
     const ctx = new Context()
     ctx.baseUrl = pathToFileURL(root).href + "/"
@@ -68,11 +72,11 @@ describe("capability attribution through the real loader", () => {
     })
     expect(ctx.loader.resolve(includeId)).toBeDefined()
 
-    // Include + plugin fibers settle asynchronously; poll for all three calls
-    // (alpha, its nested bare plugin, and beta).
+    // Include + plugin fibers settle asynchronously; poll for all four calls
+    // (alpha, two nested bare plugins, and beta).
     const deadline = Date.now() + 10_000
     while (Date.now() < deadline) {
-      if (audit.filter((line) => line.includes("-> notify.send")).length >= 3) break
+      if (audit.filter((line) => line.includes("-> notify.send")).length >= 4) break
       await new Promise((resolve) => setTimeout(resolve, 25))
     }
 
@@ -80,12 +84,23 @@ describe("capability attribution through the real loader", () => {
       .filter((line) => line.includes("-> notify.send"))
       .map((line) => line.replace(/^\[cap\] /, "").split(" -> ")[0])
 
-    // Two distinct identities (alpha, beta); the nested bare plugin shares
-    // alpha's entry id, so alpha appears twice.
-    expect(new Set(senders).size).toBe(2)
-    expect(senders.filter((sender) => sender.includes("alpha"))).toHaveLength(2)
-    expect(senders.some((sender) => sender.includes("beta"))).toBe(true)
-    // The bug: all of them would have been the enclosing Include.
+    // The bug: every caller would have audited as the enclosing Include.
     expect(senders).not.toContain("Include")
+
+    // Two entries are distinct identities (M2-8 keys on entry.id). An apply-only
+    // entry has no `#runtime.name` suffix, so its own call carries the bare id.
+    const alphaCalls = senders.filter((sender) => sender.includes("alpha"))
+    const betaCalls = senders.filter((sender) => sender.includes("beta"))
+    const alphaEntry = alphaCalls.find((sender) => !sender.includes("#"))
+    const betaEntry = betaCalls.find((sender) => !sender.includes("#"))
+    if (!alphaEntry || !betaEntry) throw new Error(`missing entry identity: ${senders.join(", ")}`)
+    expect(alphaEntry).not.toBe(betaEntry)
+
+    // Nested bare plugins inherit the enclosing entry id (the prefix) yet stay
+    // distinguishable from it and from each other.
+    const nested = alphaCalls.filter((sender) => sender.includes("#"))
+    expect(nested.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(nested).size).toBe(nested.length)
+    for (const identity of nested) expect(identity.startsWith(`${alphaEntry}#`)).toBe(true)
   }, 20_000)
 })

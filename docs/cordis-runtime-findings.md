@@ -3,7 +3,7 @@
 > 目的：#13 评论提出的"早期接口方案"必须先答的问题——**能力服务能否知道"是哪个插件在调"、并读到它声明的能力**。
 > 结论决定：护栏（透明审计）能否实现、`ctx.shell.*` 该用什么形状、以及 manifest 与运行时如何挂钩。
 > 环境：`cordis 4.0.0-rc.9` + `@cordisjs/plugin-loader 1.0.0-rc.6`（锁定版本），bun 1.4.2。
-> 探针：`docs/probes/probe{,2,3,4,5,6,7}.ts` + `docs/probes/fixtures/`（可直接 `bun run` 复跑；probe7 自建自清测试目录）。**全部结论均为实测**，非读源码推断。
+> 探针：`docs/probes/probe{,2,3,4,5,6,7,8}.ts` + `docs/probes/fixtures/`（可直接 `bun run` 复跑；probe7/probe8 自建自清测试目录）。**全部结论均为实测**，非读源码推断。
 
 ---
 
@@ -22,6 +22,7 @@
 | 9 | `Service[symbols.filter]` **不是访问门**，不能用来做允许/拒绝 | §1.9 |
 | 10 | 服务必须**先 provide、后 attach**（否则注入它的插件卡在 PENDING） | §1.5 |
 | 11 | 现有 `TrayService` / `ShortcutService` **是普通 class，今天零归因** | §1.13 |
+| 12 | **调用者身份用 `entry.id`**；`fiber.name` 对 apply-only 插件塌缩为 `Include`；嵌套裸插件继承外层 entry，需补 `runtime.name` 才互不塌缩；`entry.id` 前缀每次运行随机 | §1.14 |
 
 ---
 
@@ -178,7 +179,7 @@ interceptEntrySvc:   null
 1. ✅ 服务**可以**沿 `this[symbols.caller] → .fiber.entry → .options` 读到调用插件的身份与声明——**这是 M2-8 的落点**。
 2. ⚠ **Entry options 没有放自定义 manifest 的位置**：实测 own keys 只有 `["id","name","inject","config"]`（另有 `group`/`disabled`）。
    ⇒ manifest **不能**挂在 `EntryOptions` 上；应由宿主**按 `entry.id` 建注册表**（或在 `config` 里约定一个保留键）。前者更干净，且与 M2-5 的市场清单天然同源。
-3. ⚠ **裸 `ctx.plugin()` 没有 Entry**（`hasEntry:false`）——服务必须处理"无 entry 的调用者"（宿主内部插件）。
+3. ⚠ **顶层裸 `ctx.plugin()` 没有 Entry**（`hasEntry:false`）——服务必须处理"无 entry 的调用者"。但**在 loader 下，嵌套裸插件会继承外层 entry**（见 §1.14）：`hasEntry:false` 只对**完全没有 loader** 的 Context 成立。
 
 ### 1.13 现有服务零归因（直接后果）
 
@@ -189,6 +190,25 @@ host/src/shortcut.ts:72   export class ShortcutService {      // 普通 class
 
 两者都由 `ctx.provide("tray"/"shortcut", ...)` 提供（`host/src/index.ts:165/173`）⇒ **今天任何插件通过 `ctx.tray` / `ctx.shortcut` 的调用都无法归因**。
 要获得归因，必须迁移为 `Service` 子类（并审计 §1.3 的 `this.ctx` 语义变化）。
+
+### 1.14 ✅ **调用者身份：`entry.id` 是主键，嵌套插件需补 `runtime.name`**
+
+`probe8.ts`（真实 Loader + Include + `cordis.yml`：两个 apply-only entry，其中一个再起两个**不同**的嵌套裸插件）对比三种命名策略：
+
+```
+call                R1 fiber.name       R2 entry.id        C entry.id#own runtime.name
+alpha (apply-only)  Include             cb2181d4:alpha     cb2181d4:alpha
+nestedOne           nestedOne           cb2181d4:alpha     cb2181d4:alpha#nestedOne
+nestedTwo           nestedTwo           cb2181d4:alpha     cb2181d4:alpha#nestedTwo
+beta  (apply-only)  Include             cb2181d4:beta      cb2181d4:beta
+
+distinct:  R1 = 3/4     R2 = 2/4     C = 4/4
+```
+
+- **R1**：两个 apply-only entry 都塌缩成 `Include`（`apply` 名被 loader 丢弃）——即 §1.12 结论在嵌套路径上的表现。
+- **R2**：`entry.id` 能区分两个 entry，但**嵌套裸插件继承外层 entry**（`hasEntry` 为真、id 相同），于是两个嵌套插件互相塌缩。
+- **C**：以 `entry.id` 为主键（与 M2-8 的注册表对齐），再补 `fiber.runtime.name` 作后缀，4/4 互不塌缩。**M2-1 的 `callerName()` 采用此式**（`host/src/capability.ts`）。
+- ⚠ **`entry.id` 前缀每次运行随机**（`plugin-loader/lib/index.js:176` 的 `Math.random().toString(16).slice(2,10)`；实测同一次 include 内所有 entry 同前缀 `cb2181d4:`，重启后变）⇒ 任何日志/审计消费方必须**按后缀匹配、把前缀当不透明**。
 
 ---
 
