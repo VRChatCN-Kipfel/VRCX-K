@@ -17,12 +17,13 @@
 
 import { useEffect, useState } from "react"
 import { invoke, isTauri } from "@tauri-apps/api/core"
-import { listen, type UnlistenFn } from "@tauri-apps/api/event"
+import { listen } from "@tauri-apps/api/event"
 import {
   formatHostSnapshot,
   hostLifecycleSummary,
   initialHostLifecycleView,
   reduceHostLifecycle,
+  subscribeHostLifecycle,
   type HostLifecycleAction,
   type HostLifecycleView,
 } from "./hostLifecycle"
@@ -41,51 +42,13 @@ export function HostLifecyclePanel() {
       return
     }
 
-    let cancelled = false
-    let unlisten: UnlistenFn | undefined
-    const applyIfLive = (action: HostLifecycleAction) => {
-      if (!cancelled) apply(action)
-    }
-
-    // Register the listener BEFORE reading a seed. Tauri neither buffers nor
-    // replays events, so anything emitted before this registration is gone for
-    // good. Reading the seed only after `listen` resolves makes it reflect the
-    // current state instead of a spawn-time snapshot that may never be
-    // corrected (the fingerprint feed re-emits only on change) — the case where
-    // the `ready` event is dropped while the mount response still says
-    // `starting`. `reduceHostLifecycle` ignores a response once an event has
-    // made the view live, so an event that lands in between still wins.
-    const readSeed = () =>
-      invoke<unknown>("get_host_lifecycle")
-        .then((raw) => applyIfLive({ kind: "response", raw }))
-        .catch((err: unknown) => {
-          // Missing command on an older shell → unsupported, never a crash.
-          applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` })
-        })
-
-    void listen<unknown>("host-lifecycle", (event) => applyIfLive({ kind: "event", raw: event.payload }))
-      .then((fn) => {
-        if (cancelled) {
-          fn()
-          return
-        }
-        unlisten = fn
-        return readSeed()
-      })
-      .catch((err: unknown) => {
-        console.error("[host-lifecycle] listen failed", err)
-        // The listener failed, but the command may still work: read the seed
-        // first so the `error` state keeps the last known snapshot (its reducer
-        // branch preserves `view.snapshot`) instead of showing nothing.
-        return readSeed().then(() =>
-          applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
-        )
-      })
-
-    return () => {
-      cancelled = true
-      unlisten?.()
-    }
+    // The ordering rules live in `subscribeHostLifecycle` (unit-tested).
+    return subscribeHostLifecycle({
+      listen: (onEvent) => listen<unknown>("host-lifecycle", (event) => onEvent(event.payload)),
+      readSeed: () => invoke<unknown>("get_host_lifecycle"),
+      apply,
+      onListenError: (err) => console.error("[host-lifecycle] listen failed", err),
+    })
   }, [])
 
   const summary = hostLifecycleSummary(view)
@@ -102,7 +65,9 @@ export function HostLifecyclePanel() {
       <header className="hostlife-head">
         <span className="hostlife-title">宿主</span>
         <span className={dotClass} role="img" aria-label={summary} title={summary} />
-        <span className="hostlife-state">{summary}</span>
+        <span className="hostlife-state" title={summary}>
+          {summary}
+        </span>
       </header>
       {fields.length > 0 ? (
         <div className="hostlife-grid">

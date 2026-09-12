@@ -152,6 +152,73 @@ export function reduceHostLifecycle(
   }
 }
 
+// ── mount orchestration (pure, injectable — unit-tested) ───────────────────
+
+export type HostLifecycleSubscribeDeps = {
+  /** Attach the `host-lifecycle` listener; resolves to an unsubscribe fn. */
+  listen: (onEvent: (raw: unknown) => void) => Promise<() => void>
+  /** One-shot read of the current snapshot (`get_host_lifecycle`). */
+  readSeed: () => Promise<unknown>
+  /** Deliver a reducer action to the view. */
+  apply: (action: HostLifecycleAction) => void
+  /** Called when `listen` rejects (log it here; the seed is still read). */
+  onListenError?: (err: unknown) => void
+}
+
+/**
+ * Wire the panel's mount sequence. Split out of `hostLifecyclePanel.tsx` so the
+ * ordering rules — which are the subtle part — are testable without React.
+ *
+ * The listener is registered BEFORE the seed is read: Tauri neither buffers nor
+ * replays events, so anything emitted before registration is gone for good.
+ * Reading the seed only after `listen` resolves makes it reflect current state
+ * instead of a spawn-time snapshot that the fingerprint feed (re-emits only on
+ * change) will never correct. `reduceHostLifecycle` ignores a response once an
+ * event has made the view live, so an event landing in between still wins.
+ *
+ * On a listen failure the seed is read anyway — the command may still work, and
+ * the `error` reducer branch keeps `view.snapshot` (last known state). The
+ * `readSeed` helper swallows its own failure, so the `.catch` below only ever
+ * sees listen failures.
+ */
+export function subscribeHostLifecycle(deps: HostLifecycleSubscribeDeps): () => void {
+  let cancelled = false
+  let unlisten: (() => void) | undefined
+  const applyIfLive = (action: HostLifecycleAction) => {
+    if (!cancelled) deps.apply(action)
+  }
+  const seed = () =>
+    deps
+      .readSeed()
+      .then((raw) => applyIfLive({ kind: "response", raw }))
+      .catch((err: unknown) => {
+        // Missing command on an older shell → unsupported, never a crash.
+        applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` })
+      })
+
+  void deps
+    .listen((raw) => applyIfLive({ kind: "event", raw }))
+    .then((fn) => {
+      if (cancelled) {
+        fn()
+        return
+      }
+      unlisten = fn
+      return seed()
+    })
+    .catch((err: unknown) => {
+      deps.onListenError?.(err)
+      return seed().then(() =>
+        applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
+      )
+    })
+
+  return () => {
+    cancelled = true
+    unlisten?.()
+  }
+}
+
 // ── pure formatting (unit-tested in hostLifecycle.test.ts) ─────────────────
 
 export type HostLifecycleField = { key: string; label: string; value: string }

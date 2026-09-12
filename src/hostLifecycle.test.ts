@@ -10,6 +10,8 @@ import {
   isStaleSnapshot,
   parseHostLifecyclePayload,
   reduceHostLifecycle,
+  subscribeHostLifecycle,
+  type HostLifecycleAction,
   type HostLifecycleView,
   type HostSnapshot,
 } from "./hostLifecycle"
@@ -277,5 +279,77 @@ describe("hostLifecycleSummary", () => {
 
   test("live without a snapshot stays in the pending wording (no crash)", () => {
     expect(hostLifecycleSummary(view({ status: "live", snapshot: null }))).toBe("正在读取宿主生命周期…")
+  })
+})
+
+describe("subscribeHostLifecycle (mount ordering)", () => {
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+  const collect = () => {
+    const actions: HostLifecycleAction[] = []
+    return { actions, apply: (action: HostLifecycleAction) => actions.push(action) }
+  }
+
+  test("listen success: registers the listener, then reads the seed", async () => {
+    const { actions, apply } = collect()
+    const order: string[] = []
+    const dispose = subscribeHostLifecycle({
+      listen: async (onEvent) => {
+        order.push("listen")
+        // A ready event lands while the listener is being registered.
+        onEvent({ snapshot: snapshot({ generation: 1, phase: "ready" }) })
+        return () => order.push("unlisten")
+      },
+      readSeed: async () => {
+        order.push("seed")
+        // The seed was taken during spawn: stale by value, same generation.
+        return { snapshot: snapshot({ generation: 1, phase: "starting", port: null }) }
+      },
+      apply,
+    })
+    await flush()
+
+    expect(order).toEqual(["listen", "seed"])
+    expect(actions.map((action) => action.kind)).toEqual(["event", "response"])
+    const final = actions.reduce(reduceHostLifecycle, initialHostLifecycleView)
+    // The late response must not clobber the live event.
+    expect(final.status).toBe("live")
+    expect(final.snapshot?.phase).toBe("ready")
+    dispose()
+  })
+
+  test("listen failure still reads the seed, then reports the error", async () => {
+    const { actions, apply } = collect()
+    const dispose = subscribeHostLifecycle({
+      listen: async () => {
+        throw new Error("listen boom")
+      },
+      readSeed: async () => ({ snapshot: snapshot({ generation: 5, port: 9999 }) }),
+      apply,
+    })
+    await flush()
+
+    expect(actions.map((action) => action.kind)).toEqual(["response", "error"])
+    const final = actions.reduce(reduceHostLifecycle, initialHostLifecycleView)
+    expect(final.status).toBe("error")
+    // The error branch preserves the snapshot the seed just produced.
+    expect(final.snapshot?.port).toBe(9999)
+    dispose()
+  })
+
+  test("both fail: unsupported seed result, then error, no throw", async () => {
+    const { actions, apply } = collect()
+    const dispose = subscribeHostLifecycle({
+      listen: async () => {
+        throw new Error("listen boom")
+      },
+      readSeed: async () => {
+        throw new Error("cmd gone")
+      },
+      apply,
+    })
+    await flush()
+
+    expect(actions.map((action) => action.kind)).toEqual(["unsupported", "error"])
+    dispose()
   })
 })
