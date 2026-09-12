@@ -11,9 +11,18 @@ const host = process.env.TAURI_DEV_HOST;
 function watcherErrorGuard(): Plugin {
   return {
     name: "vrcxk:watcher-error-guard",
+    // Dev-only: `configureServer` never runs for `vite build`/`vite preview`.
+    apply: "serve",
     configureServer(server) {
       server.watcher.on("error", (error) => {
-        console.error("[vite] watcher error (ignored, dev server kept alive):", error);
+        // Keep the dev server alive, but do NOT imply the error is harmless:
+        // chokidar does not re-arm a failed `fs.watch` handle, so the path may
+        // silently stop being watched (HMR goes quiet) until the cause is fixed
+        // and Vite restarts.
+        console.error(
+          "[vite] watcher error (dev server kept alive; the path may no longer be watched — fix the cause and restart):",
+          error,
+        );
       });
     },
   };
