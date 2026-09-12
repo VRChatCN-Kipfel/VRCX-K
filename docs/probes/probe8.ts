@@ -32,8 +32,12 @@ type Row = {
   scope: string
   label: string
   r1_fiberName: string | null
-  r2_entryId: string | null
+  /** Raw `fiber.entry?.id` — null when the fiber has no entry (root-level). */
+  entryId: string | null
+  /** R2 strategy: `entryId ?? fiber.name`. */
+  r2: string | null
   ownRuntimeName: string | null
+  /** Composite strategy: `entryId[#runtime.name]`, else `fiber.name`. */
   composite: string | null
 }
 
@@ -60,7 +64,8 @@ class Recorder extends Service {
       scope,
       label,
       r1_fiberName: r1,
-      r2_entryId: r2,
+      entryId,
+      r2,
       ownRuntimeName: ownRuntimeName === undefined ? null : String(ownRuntimeName),
       composite: composite === null ? null : String(composite),
     })
@@ -137,7 +142,7 @@ async function main() {
     out.entryCallers = rows.filter((r) => r.scope === "entry").length
     out.distinct = {
       r1_fiberName: distinct("r1_fiberName", "entry").distinct,
-      r2_entryId: distinct("r2_entryId", "entry").distinct,
+      r2: distinct("r2", "entry").distinct,
       composite: compositeDistinct,
     }
     out.suffixOnlyForNamedFn = {
@@ -150,8 +155,8 @@ async function main() {
     // The three shapeless callers collapse onto the bare enclosing entry id.
     out.shapelessCollapse = { ids: shapeIds, distinct: new Set(shapeIds).size }
     out.rootBare = {
-      named: { entryId: rootNamed?.r2_entryId ?? null, identity: rootNamed?.composite ?? null },
-      anonymous: { entryId: rootAnon?.r2_entryId ?? null, identity: rootAnon?.composite ?? null },
+      named: { entryId: rootNamed?.entryId ?? null, identity: rootNamed?.composite ?? null },
+      anonymous: { entryId: rootAnon?.entryId ?? null, identity: rootAnon?.composite ?? null },
       collidesWithHostIdentity: rootAnon?.composite === "root",
     }
     out.ok =

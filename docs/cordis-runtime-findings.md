@@ -174,7 +174,7 @@ interceptEntrySvc:   null
 { "callerFiberName":"barePlugin", "callerFiberUid":4, "hasEntry": false }
 ```
 
-**两条结论**：
+**三条结论**：
 
 1. ✅ 服务**可以**沿 `this[symbols.caller] → .fiber.entry → .options` 读到调用插件的身份与声明——**这是 M2-8 的落点**。
 2. ⚠ **Entry options 没有放自定义 manifest 的位置**：实测 own keys 只有 `["id","name","inject","config"]`（另有 `group`/`disabled`）。
