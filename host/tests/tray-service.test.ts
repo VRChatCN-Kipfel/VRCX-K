@@ -2,11 +2,17 @@
 // revision bumping, fingerprint diffing, coalescing, push serialization,
 // no-shell behaviour and action fan-out. No real shell is involved.
 import { describe, expect, test } from "bun:test"
-import { TrayService, fingerprintGroups, type TrayPush, type TrayVerdict } from "../src/tray"
+import { Context } from "cordis"
+import { TrayService, fingerprintGroups, type TrayPush, type TrayServiceOptions, type TrayVerdict } from "../src/tray"
 import type { TrayGroup, TrayMenuSnapshot } from "../src/tray-contract.generated"
 import type { TraySetSnapshotResult } from "../src/stdio"
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+// TrayService is a cordis `Service` (M2-1 attribution), so it needs a Context
+// to register on. Each service gets its own root Context — a shared one would
+// reject the second "tray" registration.
+const makeTray = (options?: TrayServiceOptions) => new TrayService(new Context(), options)
 
 function action(id: string) {
   return {
@@ -36,7 +42,7 @@ function recordingPush() {
 describe("TrayService publication", () => {
   test("pushes a new snapshot once and reports the bumped revision", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     const verdict = await service.setGroups([group("host.a")])
     expect(verdict).toEqual({ status: "pushed", revision: 1, changed: true })
     expect(snapshots).toHaveLength(1)
@@ -49,7 +55,7 @@ describe("TrayService publication", () => {
 
   test("never pushes an identical snapshot (fingerprint diffing)", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     expect(await service.setGroups([group("host.a")])).toEqual({ status: "pushed", revision: 1, changed: true })
     const verdict = await service.setGroups([group("host.a")])
     expect(verdict).toEqual({ status: "unchanged", revision: 1, changed: false })
@@ -59,7 +65,7 @@ describe("TrayService publication", () => {
 
   test("a changed snapshot produces exactly one more push", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     await service.setGroups([group("host.a")])
     const verdict = await service.setGroups([group("host.a"), group("host.b")])
     expect(verdict).toEqual({ status: "pushed", revision: 2, changed: true })
@@ -75,7 +81,7 @@ describe("TrayService publication", () => {
 
   test("coalesces rapid updates into a single push of the latest content", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     const first = service.setGroups([group("host.a")])
     const second = service.setGroups([group("host.b")])
     expect(await first).toEqual({ status: "coalesced", revision: 1 })
@@ -91,7 +97,7 @@ describe("TrayService publication", () => {
       new Promise<TraySetSnapshotResult>((resolve) => {
         pending.push({ revision: snapshot.revision, release: () => resolve({ ok: true, revision: snapshot.revision }) })
       })
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     const first = service.setGroups([group("host.a")])
     await tick()
     expect(pending.map((item) => item.revision)).toEqual([1])
@@ -117,7 +123,7 @@ describe("TrayService publication", () => {
       snapshots.push(snapshot)
       return fail ? { ok: false, revision: snapshot.revision, error: "no tray" } : { ok: true, revision: snapshot.revision }
     }
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     const failed = await service.setGroups([group("host.a")])
     expect(failed).toEqual({ status: "error", revision: 1, error: "no tray" })
     expect(service.inSync).toBe(false)
@@ -129,7 +135,7 @@ describe("TrayService publication", () => {
   })
 
   test("a throwing push is reported, not propagated", async () => {
-    const service = new TrayService({
+    const service = makeTray({
       push: async () => {
         throw new Error("pipe gone")
       },
@@ -140,7 +146,7 @@ describe("TrayService publication", () => {
 
 describe("TrayService without a shell", () => {
   test("returns a no-shell verdict and stays functional", async () => {
-    const service = new TrayService()
+    const service = makeTray()
     const verdict = await service.setGroups([group("host.a")])
     expect(verdict).toEqual({ status: "no-shell", revision: 1 })
     expect(service.attached).toBe(false)
@@ -149,7 +155,7 @@ describe("TrayService without a shell", () => {
 
   test("resyncs the pending content when a shell attaches", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService()
+    const service = makeTray()
     await service.setGroups([group("host.a")]) // requested during bootstrap
     expect(snapshots).toHaveLength(0)
 
@@ -164,7 +170,7 @@ describe("TrayService without a shell", () => {
 describe("TrayService validation", () => {
   test("rejects core-owned groups (host may only push host/plugin groups)", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     const core = { id: "core.x", order: 0, label: null, visible: true, source: "core", items: [] } as unknown as TrayGroup
     const verdict: TrayVerdict = await service.setGroups([core])
     expect(verdict.status).toBe("invalid")
@@ -175,7 +181,7 @@ describe("TrayService validation", () => {
 
   test("rejects a malformed group via the contract schema", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     const bad = { ...group("host.a"), items: [{ kind: "action", id: "x" }] } as unknown as TrayGroup
     const verdict = await service.setGroups([bad])
     expect(verdict.status).toBe("invalid")
@@ -185,7 +191,7 @@ describe("TrayService validation", () => {
 
 describe("TrayService actions", () => {
   test("fans tray.action out to every handler and unsubscribes", () => {
-    const service = new TrayService()
+    const service = makeTray()
     const first: string[] = []
     const second: string[] = []
     const offFirst = service.onAction((action) => first.push(action.id))
@@ -202,7 +208,7 @@ describe("TrayService actions", () => {
   })
 
   test("a throwing handler does not stop the fan-out", () => {
-    const service = new TrayService()
+    const service = makeTray()
     const seen: string[] = []
     service.onAction(() => {
       throw new Error("handler exploded")
@@ -213,7 +219,7 @@ describe("TrayService actions", () => {
   })
 
   test("ignores a malformed tray.action payload", () => {
-    const service = new TrayService()
+    const service = makeTray()
     const seen: unknown[] = []
     service.onAction((action) => seen.push(action))
     expect(service.dispatchAction(null)).toBe(false)
@@ -225,7 +231,7 @@ describe("TrayService actions", () => {
 
   test("close() resolves a queued update as closed and refuses further ones", async () => {
     const { push, snapshots } = recordingPush()
-    const service = new TrayService({ push })
+    const service = makeTray({ push })
     const first = service.setGroups([group("host.a")])
     const second = service.setGroups([group("host.b")]) // still queued (flush is a microtask)
     service.close()

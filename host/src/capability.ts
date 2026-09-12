@@ -1,0 +1,289 @@
+import { Service, symbols, type Context } from "cordis"
+import type {
+  AppInfo,
+  PathKind,
+  ShellStdioBridge,
+  ShellSysAPI,
+} from "./stdio"
+
+type ShellApi = ShellSysAPI["shell"]
+
+/**
+ * The raw `ctx.shell` surface: `ShellSysAPI["shell"]` key-for-key, except two
+ * methods are nullable here. With no shell attached the capability returns
+ * `null` instead of throwing (the "never throws" guarantee), so `app.info` and
+ * `path.dir` must not claim a value is always present — otherwise the type
+ * invites a plugin to dereference `null`. (`dialog.pickFile` is already
+ * nullable in the wire type, so it needs no adjustment.)
+ */
+export type ShellCapability = Omit<ShellApi, "app" | "path"> & {
+  app: Omit<ShellApi["app"], "info"> & { info(): Promise<AppInfo | null> }
+  path: Omit<ShellApi["path"], "dir"> & { dir(): Promise<Record<PathKind, string> | null> }
+}
+
+export type CapabilityAudit = (line: string) => void
+
+/**
+ * Identity of the calling plugin, or null when the call cannot be attributed.
+ *
+ * `entry.id` is the primary key: the entry is the installable unit (it owns
+ * config/inject/reload), and M2-8 builds its registry on `entry.id`.
+ *
+ * `fiber.name` alone is NOT an identity — it walks up the parent chain
+ * (cordis/lib/index.js:789-796). An apply-only module (`export function apply`,
+ * e.g. `host/plugins/heartbeat.ts`) reaches the loader as a namespace; the
+ * loader's `unwrapExports` (plugin-loader rc.6:623-628) hands back a namespace
+ * with no `name` property, so `runtime.name` is undefined. (The separate guard
+ * at cordis/lib/index.js:1365-1366 blanks a plain function literally named
+ * "apply".) Such a plugin therefore resolves to the enclosing `Include`, i.e.
+ * the two-plugins-look-identical failure this surface exists to prevent.
+ *
+ * Under a loader, `entry` is INHERITED by plugins an entry starts
+ * (`internal/plugin` sets `fiber.entry = fiber.parent[Entry.key]`,
+ * plugin-loader rc.6:577-581). Appending the fiber's own `runtime.name`
+ * distinguishes nested callers ONLY when that name exists — a **named function
+ * expression** (`ctx.plugin(function named(inner) {...})`). An anonymous arrow
+ * (`runtime.name === ""`), an object literal `{ apply() {} }`, and an apply-only
+ * module namespace have no own name, so they fall back to the bare `entry.id`
+ * and collapse onto their enclosing entry. `entry.id` is the prefix (and the
+ * M2-8 registry key) either way. `docs/probes/probe8.ts` measures this: 6
+ * entry-scoped callers yield only 4 composite identities, and only the
+ * named-function shapes get a `#suffix`.
+ *
+ * With no entry the code falls back to `fiber.name`. The loader sets `entry`
+ * from `fiber.parent[Entry.key]`, so a plugin started on the **root Context has
+ * no entry even while a loader is live**. ⚠ That fallback is not a real
+ * identity: an anonymous root-level plugin audits as `"root"`, exactly what a
+ * genuine host call resolves to — the two are indistinguishable. Root-level
+ * plugins are host-internal wiring, not installable plugins; do not rely on it.
+ *
+ * `entry.id` carries a per-run random prefix (plugin-loader/lib/index.js:176,
+ * e.g. `4daad489:shapes`); consumers must treat the prefix as opaque and match
+ * on the suffix.
+ *
+ * `self` is undefined when a caller destructures the method
+ * (`const { notify } = ctx.shell`): there is no `this` to read the caller from,
+ * so fall back to null rather than throwing.
+ */
+export function callerName(self: unknown): string | null {
+  if (self == null) return null
+  const caller = (self as Record<PropertyKey, unknown>)[symbols.caller] as
+    | { fiber?: { name?: string; runtime?: { name?: string }; entry?: { id?: string } } }
+    | undefined
+  const fiber = caller?.fiber
+  if (!fiber) return null
+  const entryId = fiber.entry?.id
+  if (!entryId) return fiber.name ?? null
+  return fiber.runtime?.name ? `${entryId}#${fiber.runtime.name}` : entryId
+}
+
+/**
+ * Shared, mutable handle to the shell bridge.
+ *
+ * It is created before any plugin loads (plugins may inject the capability
+ * services during load) and the shell attaches later, so every method reads
+ * `handle.shell` lazily and reports "no shell" until then.
+ */
+export class ShellHandle {
+  bridge?: ShellStdioBridge
+  constructor(private readonly audit: CapabilityAudit) {}
+
+  attach(bridge: ShellStdioBridge): void {
+    this.bridge = bridge
+  }
+
+  detach(): void {
+    this.bridge = undefined
+  }
+
+  get shell(): ShellApi | undefined {
+    return this.bridge?.shell
+  }
+
+  /** Transparent call record: one line per capability call, with its caller. */
+  record(self: unknown, method: string, args: unknown[]): void {
+    // `callerName` returns null only when attribution was lost (e.g. a
+    // destructured call). Never label that as the host: a real host caller
+    // resolves through the same proxy to "root", so "<host>" would actively
+    // misattribute plugin behaviour instead of admitting the gap.
+    const who = callerName(self) ?? "<unknown>"
+    const detail = args.length > 0 ? ` ${args.map(describe).join(", ")}` : ""
+    this.audit(`[cap] ${who} -> ${method}${detail}`)
+  }
+}
+
+function describe(value: unknown): string {
+  if (typeof value === "string") {
+    return JSON.stringify(value.length > 60 ? `${value.slice(0, 57)}...` : value)
+  }
+  if (value === null || typeof value !== "object") return String(value)
+  if (Array.isArray(value)) return `[${value.length}]`
+  return "{...}"
+}
+
+/**
+ * A capability namespace node.
+ *
+ * Every node must be a cordis `Service` instance: only then does cordis wrap
+ * each method with a per-caller shadow and expose `this[symbols.caller]`
+ * (docs/cordis-runtime-findings.md §1.7). A plain object property would
+ * silently lose the caller.
+ */
+class CapabilityNode extends Service {}
+
+type CapabilityMethod = (shell: ShellApi | undefined, ...args: any[]) => unknown
+type CapabilitySpec = { [key: string]: CapabilityMethod | CapabilitySpec }
+
+/**
+ * Compile-time guard for the raw mirror: every `ShellApi` key must be present.
+ * `CapabilitySpec` is an index signature, so without this a deleted mirror entry
+ * compiles fine while the `ctx.shell` declaration still advertises it — the
+ * plugin gets `is not a function` at runtime. (Nested namespaces are pinned by
+ * the key-completeness test in capability.test.ts.)
+ */
+type RawShellSpec = { [K in keyof ShellApi]: CapabilitySpec[string] }
+
+function buildNode(
+  ctx: Context,
+  name: string,
+  handle: ShellHandle,
+  spec: CapabilitySpec,
+): CapabilityNode {
+  const node = new CapabilityNode(ctx, name)
+  for (const [key, entry] of Object.entries(spec)) {
+    if (typeof entry === "function") {
+      const method = entry
+      // A normal function (NOT an arrow) so cordis's shadow rewrite can hand it
+      // the calling plugin's context; the arrow form would drop attribution.
+      Object.defineProperty(node, key, {
+        configurable: true,
+        value: function (this: unknown, ...args: unknown[]) {
+          handle.record(this, `${name}.${key}`, args)
+          return method(handle.shell, ...args)
+        },
+      })
+    } else {
+      Object.defineProperty(node, key, {
+        configurable: true,
+        value: buildNode(ctx, `${name}.${key}`, handle, entry),
+      })
+    }
+  }
+  return node
+}
+
+const DIALOG_SPEC: CapabilitySpec = {
+  message: (s, text, opts) => (s ? s.dialog.message(text, opts) : Promise.resolve(false)),
+  ask: (s, text, opts) => (s ? s.dialog.ask(text, opts) : Promise.resolve("")),
+  pickFile: (s, opts) => (s ? s.dialog.pickFile(opts) : Promise.resolve(null)),
+}
+
+const WINDOW_SPEC: CapabilitySpec = {
+  show: (s) => (s ? s.window.show() : Promise.resolve(false)),
+  hide: (s) => (s ? s.window.hide() : Promise.resolve(false)),
+  minimize: (s) => (s ? s.window.minimize() : Promise.resolve(false)),
+  maximize: (s) => (s ? s.window.maximize() : Promise.resolve(false)),
+  unmaximize: (s) => (s ? s.window.unmaximize() : Promise.resolve(false)),
+  focus: (s) => (s ? s.window.focus() : Promise.resolve(false)),
+  close: (s) => (s ? s.window.close() : Promise.resolve(false)),
+}
+
+const NOTIFY_SPEC: CapabilitySpec = {
+  send: (s, title, body) => (s ? s.notify(title, body) : Promise.resolve(false)),
+}
+
+const OS_SPEC: CapabilitySpec = {
+  openUrl: (s, url) => (s ? s.openUrl(url) : Promise.resolve(false)),
+  openPath: (s, path) => (s ? s.openPath(path) : Promise.resolve(false)),
+  reveal: (s, path) => (s ? s.reveal(path) : Promise.resolve(false)),
+  appInfo: (s) => (s ? s.app.info() : Promise.resolve(null)),
+  appExit: (s, code) => (s ? s.app.exit(code) : Promise.resolve(false)),
+  pathDir: (s) => (s ? s.path.dir() : Promise.resolve(null)),
+  pathResolve: (s, kind) => (s ? s.path.resolve(kind) : Promise.resolve("")),
+}
+
+/**
+ * Raw escape hatch: mirrors the shell API one-for-one. Kept deliberately thin
+ * so a plugin is never blocked on the host adding a curated method — but every
+ * call is audited, and the curated services below are what SDK templates use.
+ *
+ * `tray.setSnapshot` and `shortcut.*` are included for completeness, but they
+ * bypass the bookkeeping of the `ctx.tray` / `ctx.shortcut` services: a raw
+ * tray snapshot leaves `TrayService`'s fingerprint cache describing a menu the
+ * shell no longer shows, and a raw shortcut registration leaves
+ * `ShortcutService.bindings` empty so presses are dropped as unbound. Those two
+ * services are the supported entry points; treat the raw forms as last resort.
+ */
+const RAW_SHELL: RawShellSpec = {
+  notify: (s, title, body) => (s ? s.notify(title, body) : Promise.resolve(false)),
+  openUrl: (s, url) => (s ? s.openUrl(url) : Promise.resolve(false)),
+  openPath: (s, path) => (s ? s.openPath(path) : Promise.resolve(false)),
+  reveal: (s, path) => (s ? s.reveal(path) : Promise.resolve(false)),
+  dialog: DIALOG_SPEC,
+  window: WINDOW_SPEC,
+  shortcut: {
+    register: (s, accelerator) =>
+      s ? s.shortcut.register(accelerator) : Promise.resolve({ ok: false, error: "no-shell" }),
+    unregister: (s, accelerator) =>
+      s ? s.shortcut.unregister(accelerator) : Promise.resolve({ ok: false, error: "no-shell" }),
+    isRegistered: (s, accelerator) => (s ? s.shortcut.isRegistered(accelerator) : Promise.resolve(false)),
+  },
+  app: {
+    info: (s) => (s ? s.app.info() : Promise.resolve(null)),
+    exit: (s, code) => (s ? s.app.exit(code) : Promise.resolve(false)),
+  },
+  path: {
+    dir: (s) => (s ? s.path.dir() : Promise.resolve(null)),
+    resolve: (s, kind) => (s ? s.path.resolve(kind) : Promise.resolve("")),
+  },
+  devWatchEvent: (s, event) => (s ? s.devWatchEvent(event) : Promise.resolve(false)),
+  tray: {
+    setSnapshot: (s, snapshot) =>
+      s ? s.tray.setSnapshot(snapshot) : Promise.resolve({ ok: false, revision: 0, error: "no-shell" }),
+  },
+}
+
+export type NotifyCapability = {
+  send(title: string, body: string): Promise<boolean>
+}
+
+export type OsCapability = {
+  openUrl(url: string): Promise<boolean>
+  openPath(path: string): Promise<boolean>
+  reveal(path: string): Promise<boolean>
+  appInfo(): Promise<AppInfo | null>
+  appExit(code?: number): Promise<boolean>
+  pathDir(): Promise<Record<PathKind, string> | null>
+  pathResolve(kind: PathKind): Promise<string>
+}
+
+/**
+ * Register the capability services on `ctx`.
+ *
+ * Two layers, both attributable: the raw `ctx.shell` mirror and the curated
+ * `ctx.notify`/`ctx.dialog`/`ctx.window`/`ctx.os` domain services. Must run
+ * before plugins load (they may inject these).
+ */
+export function createShellCapabilities(ctx: Context, handle: ShellHandle): void {
+  buildNode(ctx, "shell", handle, RAW_SHELL)
+  buildNode(ctx, "notify", handle, NOTIFY_SPEC)
+  buildNode(ctx, "dialog", handle, DIALOG_SPEC)
+  buildNode(ctx, "window", handle, WINDOW_SPEC)
+  buildNode(ctx, "os", handle, OS_SPEC)
+}
+
+declare module "cordis" {
+  interface Context {
+    /**
+     * Raw shell surface (M2-1). `ShellSysAPI["shell"]` key-for-key (see
+     * `ShellCapability` for the two nullable methods); every call is audited
+     * with the calling plugin. Prefer the curated services below, which exist so
+     * SDK templates have one stable, typed entry point.
+     */
+    shell: ShellCapability
+    notify: NotifyCapability
+    dialog: ShellSysAPI["shell"]["dialog"]
+    window: ShellSysAPI["shell"]["window"]
+    os: OsCapability
+  }
+}

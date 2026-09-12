@@ -3,7 +3,7 @@
 > 目的：#13 评论提出的"早期接口方案"必须先答的问题——**能力服务能否知道"是哪个插件在调"、并读到它声明的能力**。
 > 结论决定：护栏（透明审计）能否实现、`ctx.shell.*` 该用什么形状、以及 manifest 与运行时如何挂钩。
 > 环境：`cordis 4.0.0-rc.9` + `@cordisjs/plugin-loader 1.0.0-rc.6`（锁定版本），bun 1.4.2。
-> 探针：`docs/probes/probe{,2,3,4,5,6,7}.ts` + `docs/probes/fixtures/`（可直接 `bun run` 复跑；probe7 自建自清测试目录）。**全部结论均为实测**，非读源码推断。
+> 探针：`docs/probes/probe{,2,3,4,5,6,7,8}.ts` + `docs/probes/fixtures/`（可直接 `bun run` 复跑；probe7/probe8 自建自清测试目录）。**全部结论均为实测**，非读源码推断。
 
 ---
 
@@ -21,7 +21,8 @@
 | 8 | **Entry options 没有放自定义 manifest 的位置**（只有 `id/name/inject/config/group/disabled`） | §1.12 |
 | 9 | `Service[symbols.filter]` **不是访问门**，不能用来做允许/拒绝 | §1.9 |
 | 10 | 服务必须**先 provide、后 attach**（否则注入它的插件卡在 PENDING） | §1.5 |
-| 11 | 现有 `TrayService` / `ShortcutService` **是普通 class，今天零归因** | §1.13 |
+| 11 | `TrayService` / `ShortcutService` 曾是普通 class（零归因），**M2-1 已迁为 `Service` 子类** | §1.13 |
+| 12 | **调用者身份用 `entry.id`**；`fiber.name` 对 apply-only 插件塌缩为 `Include`；嵌套插件继承外层 entry，**只有具名函数表达式**能补 `runtime.name`（匿名箭头/对象字面量/apply-only 命名空间仍塌缩）；根级裸插件无 entry 且匿名者与宿主同为 `"root"`；`entry.id` 前缀每次运行随机 | §1.14 |
 
 ---
 
@@ -173,22 +174,43 @@ interceptEntrySvc:   null
 { "callerFiberName":"barePlugin", "callerFiberUid":4, "hasEntry": false }
 ```
 
-**两条结论**：
+**三条结论**：
 
 1. ✅ 服务**可以**沿 `this[symbols.caller] → .fiber.entry → .options` 读到调用插件的身份与声明——**这是 M2-8 的落点**。
 2. ⚠ **Entry options 没有放自定义 manifest 的位置**：实测 own keys 只有 `["id","name","inject","config"]`（另有 `group`/`disabled`）。
    ⇒ manifest **不能**挂在 `EntryOptions` 上；应由宿主**按 `entry.id` 建注册表**（或在 `config` 里约定一个保留键）。前者更干净，且与 M2-5 的市场清单天然同源。
-3. ⚠ **裸 `ctx.plugin()` 没有 Entry**（`hasEntry:false`）——服务必须处理"无 entry 的调用者"（宿主内部插件）。
+3. ⚠ **根级裸 `ctx.plugin()` 没有 Entry，即使 loader 活着**：loader 由 `fiber.parent[Entry.key]` 是否存在决定是否赋 `entry`（`plugin-loader:578`），根 Context 没有该键。服务必须处理"无 entry 的调用者"，且**匿名根级插件与真实宿主调用同为 `"root"`、无法区分**（见 §1.14）。而**嵌套**裸插件会继承外层 entry（`parent[Entry.key]` 存在）。
 
-### 1.13 现有服务零归因（直接后果）
+### 1.13 现有服务已迁到 `Service`（原"零归因"已解决）
+
+M2-1 之前 `TrayService` / `ShortcutService` 是普通 class，由 `ctx.provide("tray"/"shortcut", ...)` 提供 ⇒ 那时任何插件经 `ctx.tray` / `ctx.shortcut` 的调用都无法归因。
+
+**本 PR 已把两者迁为 `Service` 子类**（`tray.ts` / `shortcut.ts`，构造即自注册），并删除了对应的 `ctx.provide`。回归由 `host/tests/service-attribution.test.ts` 钉住（`ctx.get("tray")` 每次返回新的可追踪代理；插件调用带出调用者 fiber）。迁移时已审计 §1.3 的 `this.ctx` 语义：两者都不使用 `this.ctx`，且 `Service` 的 set-trap 会把写入落回提供者实例，故行为保持。
+
+### 1.14 ✅ **调用者身份：`entry.id` 是主键；`runtime.name` 只对具名函数表达式有效；根级裸插件与宿主撞名**
+
+`probe8.ts`（真实 Loader + Include + `cordis.yml`）对比三种命名策略，并覆盖**五种嵌套形态**与**根级裸插件**（`<r>` = 每次运行随机的 entry 前缀）：
 
 ```
-host/src/tray.ts:109      export class TrayService {          // 普通 class
-host/src/shortcut.ts:72   export class ShortcutService {      // 普通 class
+scope  call             R1 fiber.name   R2 entry.id    C entry.id#own runtime.name   own runtime.name
+entry  entryOwn         Include         <r>:shapes     <r>:shapes                    —（裸 entry）
+entry  namedFn          namedFn         <r>:shapes     <r>:shapes#namedFn            "namedFn"
+entry  anonArrow        Include         <r>:shapes     <r>:shapes                    ""（空串）
+entry  objectLiteral    Include         <r>:shapes     <r>:shapes                    —
+entry  explicitNamed    explicitNamed   <r>:shapes     <r>:shapes#explicitNamed      "explicitNamed"
+entry  beta             Include         <r>:beta       <r>:beta                      —
+root   namedRootBare    namedRootBare   namedRootBare  namedRootBare                 "namedRootBare"
+root   anonRootBare     root            root           "root"                        ""（空串）
+
+entry 调用 6 次 → distinct: R1 = 3    R2 = 2    C = 4（不是 6）
 ```
 
-两者都由 `ctx.provide("tray"/"shortcut", ...)` 提供（`host/src/index.ts:165/173`）⇒ **今天任何插件通过 `ctx.tray` / `ctx.shortcut` 的调用都无法归因**。
-要获得归因，必须迁移为 `Service` 子类（并审计 §1.3 的 `this.ctx` 语义变化）。
+- **R1**：apply-only 的调用者（entry 自身、匿名箭头、对象字面量）都塌缩成 `Include`。
+- **R2**：`entry.id` 能区分 entry，但**嵌套插件继承外层 entry**，同 entry 内多个嵌套互相塌缩。
+- **C**：以 `entry.id` 为主键（与 M2-8 的注册表对齐），**仅当该 fiber 有自己的 `runtime.name` 时**再补 `#runtime.name`。**只有具名函数表达式**（`ctx.plugin(function named(inner){...})`）满足；匿名箭头（`runtime.name === ""`）、对象字面量 `{ apply() {} }`、apply-only 命名空间都没有 own name → 仍塌缩到裸 `entry.id`。⇒ **复合修法让区分变好，但不是对所有嵌套形态通用**；目前无生产调用点，现实影响面未知。
+- **根级裸插件**：loader 由 `fiber.parent[Entry.key]` 决定是否赋 `entry`（`plugin-loader:578`），根 Context 无该键 ⇒ **即使 loader 活着 `entryId` 仍为 null**，回退 `fiber.name`。**匿名根级插件得到 `"root"`，与真实宿主调用完全同名、无法区分**（具名的则得到函数名）。
+- **M2-1 的 `callerName()` 采用 C**（`host/src/capability.ts`）。
+- ⚠ **`entry.id` 前缀每次运行随机**（`plugin-loader/lib/index.js:176` 的 `Math.random().toString(16).slice(2,10)`；实测同一次 include 内所有 entry 同前缀，重启后变）⇒ 日志/审计消费方必须**按后缀匹配、把前缀当不透明**。
 
 ---
 
@@ -196,7 +218,7 @@ host/src/shortcut.ts:72   export class ShortcutService {      // 普通 class
 
 | M2 任务 | 由本次验证确定的事实 |
 |---|---|
-| **M2-1 能力接口面** | `ctx.shell.*` raw 直出**可以**做审计，但：必须用 `Service` 子类；**每个命名空间也要是 Service 实例**；**方法一律类方法**；无 entry 的调用者要单独处理 |
+| **M2-1 能力接口面** | `ctx.shell.*` raw 直出**可以**做审计，但：必须用 `Service` 子类；**每个命名空间也要是 Service 实例**；**方法一律类方法**；无 entry 的调用者要单独处理；**归因粒度止于 entry（+具名函数嵌套）**——匿名嵌套/根级裸插件会塌缩或与宿主撞名（§1.14） |
 | **M2-2 manifest 契约** | manifest **不能**挂在 `EntryOptions`；改为**宿主按 `entry.id` 建注册表**（与 M2-5 市场清单同源） |
 | **M2-4 / M2-5 管理面与市场** | Entry 是**可枚举、可寻址**的（`entry.id`、`entry.options`、`entry.fiber`）——管理面有实证落点 |
 | **M2-8 access 声明 + warn** | 落点 = `caller.fiber.entry.options` + 宿主 manifest 注册表；**只做观测不做拒绝**；拒绝将来也不能用 `filter`（§1.9） |
@@ -208,7 +230,7 @@ host/src/shortcut.ts:72   export class ShortcutService {      // 普通 class
 
 ## 3. 未验证 / 遗留
 
-1. **`Service` 迁移对既有服务代码的实际影响面**：只测到"per-caller 代理上读 `.ctx` 得调用者 ctx"，`TrayService`/`ShortcutService` 迁移后的具体改动量未评估。
+1. **归因的粒度边界**：`entry.id` 只能区分到 entry；匿名嵌套形态与根级裸插件会塌缩/撞名（§1.14）。目前无生产调用点，现实影响面未知。
 2. **kkrpc 异步链路上的归因**：只测同进程调用；跨 stdio RPC 往返后再读 `symbols.caller` 未测（§1.6 的 await 存活结果使其低风险，但未实测）。
 3. **`entry.options.config` 能否承载 manifest**：`config` 是插件自己的配置，塞 manifest 属滥用；按 §1.12 的建议走独立注册表，但**未实现验证**。
 4. **Entry 的 `group` / 子树的 identity 语义**：M2-4 管理插件组时需要，本轮未测。

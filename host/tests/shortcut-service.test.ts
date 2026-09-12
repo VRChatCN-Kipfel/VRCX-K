@@ -9,15 +9,22 @@
 //   - one throwing handler cannot break the others or the notification path;
 //   - with no shell attached nothing pretends to be registered.
 import { describe, expect, test } from "bun:test"
+import { Context } from "cordis"
 import {
   ShortcutService,
   normalizePress,
+  type ShortcutServiceOptions,
 } from "../src/shortcut"
 import type {
   ShellShortcutBridge,
   ShortcutPressEvent,
   ShortcutRegistration,
 } from "../src/stdio"
+
+// ShortcutService is a cordis `Service` (M2-1 attribution), so it needs a
+// Context to register on. Each service gets its own root Context — a shared one
+// would reject the second "shortcut" registration.
+const makeShortcut = (options?: ShortcutServiceOptions) => new ShortcutService(new Context(), options)
 
 /** Canonical spelling a real shell returns for `CommandOrControl+Shift+K`. */
 const CANONICAL = "shift+control+KeyK"
@@ -64,7 +71,7 @@ function fakeBridge(
 describe("ShortcutService registration", () => {
   test("binds under the canonical spelling the shell returned", async () => {
     const shell = fakeBridge()
-    const service = new ShortcutService()
+    const service = makeShortcut()
     service.attachShell(shell.bridge)
 
     const seen: ShortcutPressEvent[] = []
@@ -82,7 +89,7 @@ describe("ShortcutService registration", () => {
 
   test("a rejected registration binds nothing", async () => {
     const shell = fakeBridge(() => ({ ok: false, error: "already in use" }))
-    const service = new ShortcutService()
+    const service = makeShortcut()
     service.attachShell(shell.bridge)
 
     expect(await service.register("Ctrl+Shift+K", () => {})).toEqual({
@@ -92,14 +99,14 @@ describe("ShortcutService registration", () => {
     expect(service.bound).toEqual([])
     // A press of that chord must find no handler.
     const logs: string[] = []
-    const logging = new ShortcutService({ log: (line) => logs.push(line) })
+    const logging = makeShortcut({ log: (line) => logs.push(line) })
     logging.attachShell(shell.bridge)
     expect(logging.dispatchPress({ accelerator: CANONICAL, id: 1 })).toBe(false)
     expect(logs[0]).toContain("unbound chord")
   })
 
   test("with no shell attached register reports no-shell instead of throwing", async () => {
-    const service = new ShortcutService()
+    const service = makeShortcut()
     expect(await service.register("Ctrl+Shift+K", () => {})).toEqual({ status: "no-shell" })
     expect(await service.unregister("Ctrl+Shift+K")).toEqual({ status: "no-shell" })
     expect(service.bound).toEqual([])
@@ -107,7 +114,7 @@ describe("ShortcutService registration", () => {
 
   test("unregister drops the binding so the chord goes silent", async () => {
     const shell = fakeBridge()
-    const service = new ShortcutService()
+    const service = makeShortcut()
     service.attachShell(shell.bridge)
     await service.register("Ctrl+Shift+K", () => {})
     expect(service.bound).toEqual([CANONICAL])
@@ -120,7 +127,7 @@ describe("ShortcutService registration", () => {
   })
 
   test("a bridge that throws is reported, not surfaced as a crash", async () => {
-    const service = new ShortcutService()
+    const service = makeShortcut()
     service.attachShell({
       register: async () => {
         throw new Error("pipe closed")
@@ -144,7 +151,7 @@ describe("ShortcutService registration", () => {
 describe("ShortcutService press fan-out", () => {
   test("only the bound chord runs a handler", async () => {
     const shell = fakeBridge()
-    const service = new ShortcutService()
+    const service = makeShortcut()
     service.attachShell(shell.bridge)
     let runs = 0
     await service.register("Ctrl+Shift+K", () => {
@@ -165,7 +172,7 @@ describe("ShortcutService press fan-out", () => {
 
   test("a malformed payload is logged and ignored instead of guessed at", () => {
     const logs: string[] = []
-    const service = new ShortcutService({ log: (line) => logs.push(line) })
+    const service = makeShortcut({ log: (line) => logs.push(line) })
     for (const payload of [
       null,
       "shift+control+KeyK",
@@ -184,7 +191,7 @@ describe("ShortcutService press fan-out", () => {
   test("one throwing handler cannot stop the press path", async () => {
     const shell = fakeBridge()
     const logs: string[] = []
-    const service = new ShortcutService({ log: (line) => logs.push(line) })
+    const service = makeShortcut({ log: (line) => logs.push(line) })
     service.attachShell(shell.bridge)
     await service.register("Ctrl+Shift+K", () => {
       throw new Error("business handler exploded")
@@ -198,7 +205,7 @@ describe("ShortcutService press fan-out", () => {
 
   test("reattaching a shell never double-delivers", async () => {
     const shell = fakeBridge()
-    const service = new ShortcutService()
+    const service = makeShortcut()
     service.attachShell(shell.bridge)
     let runs = 0
     await service.register("Ctrl+Shift+K", () => {
@@ -219,7 +226,7 @@ describe("ShortcutService press fan-out", () => {
 
   test("close() unsubscribes and stops delivering", async () => {
     const shell = fakeBridge()
-    const service = new ShortcutService()
+    const service = makeShortcut()
     service.attachShell(shell.bridge)
     let runs = 0
     await service.register("Ctrl+Shift+K", () => {

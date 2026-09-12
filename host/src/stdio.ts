@@ -107,8 +107,11 @@ export type DevWatchPush = {
  * Mirrors `src-tauri/src/shell_sys.rs` exactly; each nested member maps to a
  * dot-namespaced kkrpc method on the Rust side.
  *
- * 前瞻性：能力面尽量完整，host 业务插件以后直接 `ctx.shell.*` 调用，不必
- * 再等壳补 handler。
+ * Plugin access goes through the `ctx.shell` capability mirror (capability.ts),
+ * which rebuilds these namespaces as cordis `Service`s so every call is
+ * attributable; `ctx.notify`/`ctx.dialog`/`ctx.window`/`ctx.os` are the curated
+ * equivalents. Adding a method here does not expose it by itself — the mirror
+ * spec in capability.ts must list it too.
  */
 export type ShellSysAPI = {
   ready(info: HostWsReady): Promise<void>
