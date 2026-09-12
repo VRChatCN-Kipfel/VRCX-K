@@ -5,8 +5,9 @@
 // 1:1 by the Rust shell (`src-tauri/src/host_lifecycle.rs`). This module is the
 // single import site for the face: it re-exports the canonical types,
 // constants *and validator* — never a hand-forked copy — and adds the
-// IPC-specific pieces (the `{ snapshot }` response envelope plus the pure
-// reducer/formatting used by `hostLifecyclePanel.tsx`).
+// IPC-specific pieces (the `{ snapshot }` response envelope, the pure
+// reducer/formatting, and the injectable mount orchestration
+// `subscribeHostLifecycle` used by `hostLifecyclePanel.tsx`).
 //
 // Guard rule: `isHostSnapshot` must stay exactly as strict as the host
 // validator, so it *is* the host validator. `{ lastExit: [] }` fails it (an
@@ -177,9 +178,10 @@ export type HostLifecycleSubscribeDeps = {
  * event has made the view live, so an event landing in between still wins.
  *
  * On a listen failure the seed is read anyway — the command may still work, and
- * the `error` reducer branch keeps `view.snapshot` (last known state). The
- * `readSeed` helper swallows its own failure, so the `.catch` below only ever
- * sees listen failures.
+ * the `error` reducer branch keeps `view.snapshot` (last known state). `readSeed`
+ * is a single `invoke`, so the two-argument `.then(onFulfilled, onRejected)` on
+ * it routes exactly one rejection source to `unsupported`: a throw from `apply`
+ * is not mis-labelled as a missing command, and the seed is not read twice.
  */
 export function subscribeHostLifecycle(deps: HostLifecycleSubscribeDeps): () => void {
   let cancelled = false
@@ -188,30 +190,29 @@ export function subscribeHostLifecycle(deps: HostLifecycleSubscribeDeps): () => 
     if (!cancelled) deps.apply(action)
   }
   const seed = () =>
-    deps
-      .readSeed()
-      .then((raw) => applyIfLive({ kind: "response", raw }))
-      .catch((err: unknown) => {
-        // Missing command on an older shell → unsupported, never a crash.
-        applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` })
-      })
+    deps.readSeed().then(
+      (raw) => applyIfLive({ kind: "response", raw }),
+      // Missing command on an older shell → unsupported, never a crash.
+      (err: unknown) =>
+        applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` }),
+    )
 
-  void deps
-    .listen((raw) => applyIfLive({ kind: "event", raw }))
-    .then((fn) => {
+  void deps.listen((raw) => applyIfLive({ kind: "event", raw })).then(
+    (fn) => {
       if (cancelled) {
         fn()
         return
       }
       unlisten = fn
       return seed()
-    })
-    .catch((err: unknown) => {
+    },
+    (err: unknown) => {
       deps.onListenError?.(err)
       return seed().then(() =>
         applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
       )
-    })
+    },
+  )
 
   return () => {
     cancelled = true

@@ -352,4 +352,68 @@ describe("subscribeHostLifecycle (mount ordering)", () => {
     expect(actions.map((action) => action.kind)).toEqual(["unsupported", "error"])
     dispose()
   })
+
+  test("a listener that resolves after dispose is released, and the seed is not read", async () => {
+    const { apply } = collect()
+    let resolveListen: ((fn: () => void) => void) | undefined
+    const unlistenCalls: string[] = []
+    let seedCalls = 0
+    const dispose = subscribeHostLifecycle({
+      listen: () => new Promise<() => void>((resolve) => (resolveListen = resolve)),
+      readSeed: async () => {
+        seedCalls++
+        return { snapshot: snapshot({ generation: 1 }) }
+      },
+      apply,
+    })
+    // Unmount (StrictMode) before `listen` resolves.
+    dispose()
+    resolveListen?.(() => unlistenCalls.push("unlisten"))
+    await flush()
+
+    // The late resolution releases the listener immediately and never reads the
+    // seed — otherwise the listener leaks past the unmounted component.
+    expect(unlistenCalls).toEqual(["unlisten"])
+    expect(seedCalls).toBe(0)
+  })
+
+  test("after dispose, neither a late event nor a late seed reaches the view", async () => {
+    const { actions, apply } = collect()
+    let fireEvent: ((raw: unknown) => void) | undefined
+    let resolveSeed: ((value: unknown) => void) | undefined
+    const dispose = subscribeHostLifecycle({
+      listen: async (onEvent) => {
+        fireEvent = onEvent
+        return () => {}
+      },
+      readSeed: () => new Promise((resolve) => (resolveSeed = resolve)),
+      apply,
+    })
+    await flush()
+    dispose()
+
+    fireEvent?.({ snapshot: snapshot({ generation: 2 }) })
+    resolveSeed?.({ snapshot: snapshot({ generation: 1 }) })
+    await flush()
+
+    expect(actions).toHaveLength(0)
+  })
+
+  test("onListenError receives the failure while the seed is still read", async () => {
+    const { actions, apply } = collect()
+    const seen: unknown[] = []
+    subscribeHostLifecycle({
+      listen: async () => {
+        throw new Error("listen boom")
+      },
+      readSeed: async () => ({ snapshot: snapshot({ generation: 3, port: 4444 }) }),
+      apply,
+      onListenError: (err) => seen.push(err),
+    })
+    await flush()
+
+    expect(seen).toHaveLength(1)
+    expect(String(seen[0])).toContain("listen boom")
+    expect(actions.map((action) => action.kind)).toEqual(["response", "error"])
+  })
 })
