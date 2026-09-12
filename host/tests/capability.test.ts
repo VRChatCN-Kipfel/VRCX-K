@@ -110,4 +110,48 @@ describe("capability surface (M2-1)", () => {
     expect(await pending).toBe(false)
     expect(audit.some((line) => line.includes("lonelyPlugin -> notify.send"))).toBe(true)
   })
+
+  // `CapabilitySpec` is an index signature, so a deleted mirror entry still
+  // compiles while the `ctx.shell` declaration keeps advertising it — the plugin
+  // then gets `is not a function` at runtime. `RawShellSpec` pins the top level;
+  // this pins the nested namespaces.
+  test("the raw shell mirror enumerates every ShellSysAPI[\"shell\"] method", () => {
+    const ctx = new Context()
+    createShellCapabilities(ctx, new ShellHandle(() => {}))
+    // `Service` adds own `ctx`/`name`; every other own key is a mirror entry.
+    const keys = (node: object) =>
+      Object.getOwnPropertyNames(node)
+        .filter((key) => key !== "ctx" && key !== "name")
+        .sort()
+
+    expect(keys(ctx.shell)).toEqual(
+      [
+        "app",
+        "devWatchEvent",
+        "dialog",
+        "notify",
+        "openPath",
+        "openUrl",
+        "path",
+        "reveal",
+        "shortcut",
+        "tray",
+        "window",
+      ].sort(),
+    )
+    expect(keys(ctx.shell.dialog)).toEqual(["ask", "message", "pickFile"])
+    expect(keys(ctx.shell.window)).toEqual([
+      "close",
+      "focus",
+      "hide",
+      "maximize",
+      "minimize",
+      "show",
+      "unmaximize",
+    ])
+    expect(keys(ctx.shell.shortcut)).toEqual(["isRegistered", "register", "unregister"])
+    expect(keys(ctx.shell.app)).toEqual(["exit", "info"])
+    expect(keys(ctx.shell.path)).toEqual(["dir", "resolve"])
+    expect(keys(ctx.shell.tray)).toEqual(["setSnapshot"])
+  })
 })

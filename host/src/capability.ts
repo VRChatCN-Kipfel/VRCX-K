@@ -8,23 +8,47 @@ import type {
 
 type ShellApi = ShellSysAPI["shell"]
 
+/**
+ * The raw `ctx.shell` surface: `ShellSysAPI["shell"]` key-for-key, except two
+ * methods are nullable here. With no shell attached the capability returns
+ * `null` instead of throwing (the "never throws" guarantee), so `app.info` and
+ * `path.dir` must not claim a value is always present — otherwise the type
+ * invites a plugin to dereference `null`. (`dialog.pickFile` is already
+ * nullable in the wire type, so it needs no adjustment.)
+ */
+export type ShellCapability = Omit<ShellApi, "app" | "path"> & {
+  app: Omit<ShellApi["app"], "info"> & { info(): Promise<AppInfo | null> }
+  path: Omit<ShellApi["path"], "dir"> & { dir(): Promise<Record<PathKind, string> | null> }
+}
+
 export type CapabilityAudit = (line: string) => void
 
 /**
- * Calling plugin's fiber name, or null when the host itself is the caller.
+ * Identity of the calling plugin, or null when the call cannot be attributed.
  *
- * `fiber.name` is used (not `fiber.entry`): a bare `ctx.plugin()` has no loader
- * Entry (`hasEntry:false`, docs/cordis-runtime-findings.md §1.12), so the audit
- * must not depend on one. `self` is undefined when a caller destructures the
- * method (`const { notify } = ctx.shell`), in which case there is no `this` to
- * read the caller from — fall back to null rather than throwing.
+ * `fiber.entry.id` is preferred because it is the only *identity* available:
+ * `fiber.name` walks up the parent chain (cordis/lib/index.js:789-796) and the
+ * loader drops the `apply` name (cordis/lib/index.js:1365-1366), so a plugin
+ * that only exports `apply` — the normal shape, and exactly what
+ * `host/plugins/heartbeat.ts` is — has no `runtime.name` and resolves to the
+ * enclosing `Include`. Every such plugin would audit as "Include", i.e. the
+ * two-plugins-look-identical failure this surface exists to prevent. The loader
+ * sets `entry` per `cordis.yml` entry (id like `2eccc820:alpha`).
+ *
+ * A bare `ctx.plugin()` has no loader Entry (docs/cordis-runtime-findings.md
+ * §1.12), so fall back to `fiber.name` — lower fidelity, but those are ad-hoc
+ * in-process fibers, not the production plugin path.
+ *
+ * `self` is undefined when a caller destructures the method
+ * (`const { notify } = ctx.shell`): there is no `this` to read the caller from,
+ * so fall back to null rather than throwing.
  */
 export function callerName(self: unknown): string | null {
   if (self == null) return null
   const caller = (self as Record<PropertyKey, unknown>)[symbols.caller] as
-    | { fiber?: { name?: string } }
+    | { fiber?: { name?: string; entry?: { id?: string } } }
     | undefined
-  return caller?.fiber?.name ?? null
+  return caller?.fiber?.entry?.id ?? caller?.fiber?.name ?? null
 }
 
 /**
@@ -52,7 +76,11 @@ export class ShellHandle {
 
   /** Transparent call record: one line per capability call, with its caller. */
   record(self: unknown, method: string, args: unknown[]): void {
-    const who = callerName(self) ?? "<host>"
+    // `callerName` returns null only when attribution was lost (e.g. a
+    // destructured call). Never label that as the host: a real host caller
+    // resolves through the same proxy to "root", so "<host>" would actively
+    // misattribute plugin behaviour instead of admitting the gap.
+    const who = callerName(self) ?? "<unknown>"
     const detail = args.length > 0 ? ` ${args.map(describe).join(", ")}` : ""
     this.audit(`[cap] ${who} -> ${method}${detail}`)
   }
@@ -79,6 +107,15 @@ class CapabilityNode extends Service {}
 
 type CapabilityMethod = (shell: ShellApi | undefined, ...args: any[]) => unknown
 type CapabilitySpec = { [key: string]: CapabilityMethod | CapabilitySpec }
+
+/**
+ * Compile-time guard for the raw mirror: every `ShellApi` key must be present.
+ * `CapabilitySpec` is an index signature, so without this a deleted mirror entry
+ * compiles fine while the `ctx.shell` declaration still advertises it — the
+ * plugin gets `is not a function` at runtime. (Nested namespaces are pinned by
+ * the key-completeness test in capability.test.ts.)
+ */
+type RawShellSpec = { [K in keyof ShellApi]: CapabilitySpec[string] }
 
 function buildNode(
   ctx: Context,
@@ -143,8 +180,15 @@ const OS_SPEC: CapabilitySpec = {
  * Raw escape hatch: mirrors the shell API one-for-one. Kept deliberately thin
  * so a plugin is never blocked on the host adding a curated method — but every
  * call is audited, and the curated services below are what SDK templates use.
+ *
+ * `tray.setSnapshot` and `shortcut.*` are included for completeness, but they
+ * bypass the bookkeeping of the `ctx.tray` / `ctx.shortcut` services: a raw
+ * tray snapshot leaves `TrayService`'s fingerprint cache describing a menu the
+ * shell no longer shows, and a raw shortcut registration leaves
+ * `ShortcutService.bindings` empty so presses are dropped as unbound. Those two
+ * services are the supported entry points; treat the raw forms as last resort.
  */
-const RAW_SHELL: CapabilitySpec = {
+const RAW_SHELL: RawShellSpec = {
   notify: (s, title, body) => (s ? s.notify(title, body) : Promise.resolve(false)),
   openUrl: (s, url) => (s ? s.openUrl(url) : Promise.resolve(false)),
   openPath: (s, path) => (s ? s.openPath(path) : Promise.resolve(false)),
@@ -205,11 +249,12 @@ export function createShellCapabilities(ctx: Context, handle: ShellHandle): void
 declare module "cordis" {
   interface Context {
     /**
-     * Raw shell surface (M2-1). Mirrors `ShellSysAPI["shell"]`; every call is
-     * audited with the calling plugin. Prefer the curated services below, which
-     * exist so SDK templates have one stable, typed entry point.
+     * Raw shell surface (M2-1). `ShellSysAPI["shell"]` key-for-key (see
+     * `ShellCapability` for the two nullable methods); every call is audited
+     * with the calling plugin. Prefer the curated services below, which exist so
+     * SDK templates have one stable, typed entry point.
      */
-    shell: ShellSysAPI["shell"]
+    shell: ShellCapability
     notify: NotifyCapability
     dialog: ShellSysAPI["shell"]["dialog"]
     window: ShellSysAPI["shell"]["window"]
