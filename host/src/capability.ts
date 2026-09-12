@@ -27,31 +27,39 @@ export type CapabilityAudit = (line: string) => void
  * Identity of the calling plugin, or null when the call cannot be attributed.
  *
  * `entry.id` is the primary key: the entry is the installable unit (it owns
- * config/inject/reload), and M2-8 builds its registry on `entry.id`. `fiber.name`
- * alone is NOT an identity — it walks up the parent chain
- * (cordis/lib/index.js:789-796) and the loader drops the `apply` name
- * (cordis/lib/index.js:1365-1366), so a plugin that only exports `apply` (the
- * normal shape, and exactly what `host/plugins/heartbeat.ts` is) has no
- * `runtime.name` and resolves to the enclosing `Include`. Every such plugin
- * would audit as "Include", i.e. the two-plugins-look-identical failure this
- * surface exists to prevent.
+ * config/inject/reload), and M2-8 builds its registry on `entry.id`.
  *
- * Under a loader, `entry` is not only set per entry but INHERITED by plugins an
- * entry starts (`internal/plugin` sets `fiber.entry = fiber.parent[Entry.key]`,
- * plugin-loader rc.6:577-581), so a nested bare `ctx.plugin()` would collapse
- * onto its enclosing entry. Appending the fiber's own `runtime.name` keeps two
- * different nested plugins in the same entry distinguishable while `entry.id`
- * stays the prefix (and the M2-8 registry key). `docs/probes/probe8.ts` measures
- * the strategies on one fixture: distinct callers for `fiber.name` 3/4 (two
- * collapse to `Include`), `entry.id` 2/4 (both nested collide), composite 4/4.
+ * `fiber.name` alone is NOT an identity — it walks up the parent chain
+ * (cordis/lib/index.js:789-796). An apply-only module (`export function apply`,
+ * e.g. `host/plugins/heartbeat.ts`) reaches the loader as a namespace; the
+ * loader's `unwrapExports` (plugin-loader rc.6:623-628) hands back a namespace
+ * with no `name` property, so `runtime.name` is undefined. (The separate guard
+ * at cordis/lib/index.js:1365-1366 blanks a plain function literally named
+ * "apply".) Such a plugin therefore resolves to the enclosing `Include`, i.e.
+ * the two-plugins-look-identical failure this surface exists to prevent.
+ *
+ * Under a loader, `entry` is INHERITED by plugins an entry starts
+ * (`internal/plugin` sets `fiber.entry = fiber.parent[Entry.key]`,
+ * plugin-loader rc.6:577-581). Appending the fiber's own `runtime.name`
+ * distinguishes nested callers ONLY when that name exists — a **named function
+ * expression** (`ctx.plugin(function named(inner) {...})`). An anonymous arrow
+ * (`runtime.name === ""`), an object literal `{ apply() {} }`, and an apply-only
+ * module namespace have no own name, so they fall back to the bare `entry.id`
+ * and collapse onto their enclosing entry. `entry.id` is the prefix (and the
+ * M2-8 registry key) either way. `docs/probes/probe8.ts` measures this: 6
+ * entry-scoped callers yield only 4 composite identities, and only the
+ * named-function shapes get a `#suffix`.
+ *
+ * With no entry the code falls back to `fiber.name`. The loader sets `entry`
+ * from `fiber.parent[Entry.key]`, so a plugin started on the **root Context has
+ * no entry even while a loader is live**. ⚠ That fallback is not a real
+ * identity: an anonymous root-level plugin audits as `"root"`, exactly what a
+ * genuine host call resolves to — the two are indistinguishable. Root-level
+ * plugins are host-internal wiring, not installable plugins; do not rely on it.
  *
  * `entry.id` carries a per-run random prefix (plugin-loader/lib/index.js:176,
- * e.g. `cb2181d4:alpha`); consumers must treat the prefix as opaque and match on
- * the suffix.
- *
- * `fiber.name` is reached only when there is no entry anywhere in the chain — a
- * Context with no loader at all (docs/cordis-runtime-findings.md §1.14); those
- * are ad-hoc in-process fibers.
+ * e.g. `4daad489:shapes`); consumers must treat the prefix as opaque and match
+ * on the suffix.
  *
  * `self` is undefined when a caller destructures the method
  * (`const { notify } = ctx.shell`): there is no `this` to read the caller from,
