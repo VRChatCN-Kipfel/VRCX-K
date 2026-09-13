@@ -6,7 +6,7 @@ import {
 } from "kkrpc/stdio"
 import { HOST_RESTART_EXIT, hostWsAPI } from "./api"
 import { gracefulStopWithTimeout, stopOnStdinLoss } from "./lifecycle"
-import { stdinIsPipe } from "./stdin-watch"
+import { stdinIsPeerChannel } from "./stdin-watch"
 import type { Context } from "cordis"
 import type { HostWsReady } from "./ws"
 import type { TrayMenuSnapshot } from "./tray-contract.generated"
@@ -307,12 +307,13 @@ function bunStdioTransport(onDone?: () => void) {
 export function connectShellStdio(ctx: Context, options: { transport?: Transport<RPCMessage> } = {}): ShellStdioBridge {
   const trayActions = fanout<TrayActionEvent>("tray.action")
   const shortcutPresses = fanout<ShortcutPressEvent>("shortcut.pressed")
-  // #33: EOF on the shell's stdin pipe means the shell is gone. Its ProcessTree
-  // Job Object would hard-reap us anyway — this turns that into the same
-  // graceful teardown the stop RPC uses. Only a real pipe carries that meaning
-  // (stdin-watch.ts); a test-supplied transport owns other streams, so the
-  // callback is wired for the default transport only.
-  const onStdinLost = stdinIsPipe() ? () => void stopOnStdinLoss(ctx, "shell") : undefined
+  // #33: EOF on the shell's stdin channel means the shell is gone. Its
+  // ProcessTree Job Object would hard-reap us anyway — this turns that into the
+  // same graceful teardown the stop RPC uses. Only a peer channel (pipe on
+  // Windows, socketpair on POSIX — see stdin-watch.ts) carries that meaning; a
+  // test-supplied transport owns other streams, so the callback is wired for
+  // the default transport only.
+  const onStdinLost = stdinIsPeerChannel() ? () => void stopOnStdinLoss(ctx, "shell") : undefined
   const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(onStdinLost), {
     expose: {
       ping: () => hostWsAPI.ping(),

@@ -8,7 +8,9 @@
 // delivered it. See docs/probes/probe10.ts for the detached measurement and
 // host/src/stdin-watch.ts for why EOF is guarded by an fd check: `ignore`
 // reaches EOF in ~3ms, so an unguarded "EOF means stop" would kill every
-// ignore-spawned host at startup.
+// ignore-spawned host at startup. The guard accepts a FIFO OR a socket —
+// libuv implements stdio pipes as socketpairs on POSIX, so `isFIFO()` alone
+// silently disarms the watch there (this suite caught exactly that on CI).
 
 import { afterEach, beforeAll, expect, test } from "bun:test"
 import { join } from "node:path"
@@ -111,24 +113,31 @@ test("shell-attached host stops when the shell end of stdin goes away", async ()
   expect(code).toBe(0)
 }, 40_000)
 
-test("stdinIsPipe classifies the real fd 0 (pipe vs ignore)", async () => {
+test("stdinIsPeerChannel classifies the real fd 0 (pipe vs ignore)", async () => {
   const moduleUrl = pathToFileURL(join(hostDir, "src", "stdin-watch.ts")).href
+  // The child reports the raw fd facts alongside the verdict, so a
+  // platform-specific failure names the actual fd type instead of just "false".
+  const probe = `Promise.all([import(${JSON.stringify(moduleUrl)}), import("node:fs")]).then(([m, fs]) => {
+    const st = fs.fstatSync(0)
+    console.log(JSON.stringify({
+      peer: m.stdinIsPeerChannel(),
+      fifo: st.isFIFO(),
+      socket: st.isSocket(),
+      char: st.isCharacterDevice(),
+      file: st.isFile(),
+    }))
+  })`
   const ask = (stdin: "pipe" | "ignore") =>
-    Bun.spawn(
-      [
-        bun,
-        "-e",
-        `import(${JSON.stringify(moduleUrl)}).then((m) => console.log(m.stdinIsPipe()))`,
-      ],
-      { cwd: hostDir, stdin, stdout: "pipe", stderr: "pipe" },
-    )
+    Bun.spawn([bun, "-e", probe], { cwd: hostDir, stdin, stdout: "pipe", stderr: "pipe" })
 
   const piped = ask("pipe")
+  const pipedFacts = JSON.parse((await new Response(piped.stdout).text()).trim())
   piped.stdin!.end?.()
-  expect((await new Response(piped.stdout).text()).trim()).toBe("true")
+  expect(pipedFacts.peer, `piped fd 0 facts: ${JSON.stringify(pipedFacts)}`).toBe(true)
   await piped.exited
 
   const ignored = ask("ignore")
-  expect((await new Response(ignored.stdout).text()).trim()).toBe("false")
+  const ignoredFacts = JSON.parse((await new Response(ignored.stdout).text()).trim())
+  expect(ignoredFacts.peer, `ignored fd 0 facts: ${JSON.stringify(ignoredFacts)}`).toBe(false)
   await ignored.exited
 }, 30_000)
