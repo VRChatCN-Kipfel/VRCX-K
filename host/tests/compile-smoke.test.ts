@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test"
 import { unlink } from "node:fs/promises"
 import { join } from "node:path"
 import { HOST_VERSION } from "../src/api"
-import { drain, killTree, readReady, resolveBun, warmBun } from "./helpers"
+import { drain, HOST_SPAWN_DETACHED, killTree, readReady, resolveBun, warmBun } from "./helpers"
 
 const hostDir = join(import.meta.dir, "..")
 const bun = resolveBun()
@@ -37,9 +37,10 @@ test("compiled host finds cordis.yml via cwd", async () => {
     cwd: hostDir,
     stdout: "pipe",
     stderr: "pipe",
-    // The compile step is a one-shot; detached keeps it from dragging the
-    // runner's group into a failure (its own host children get own groups).
-    detached: true,
+    // The compile step is a one-shot; POSIX keeps it out of the runner's
+    // process group. Windows: non-detached ties it to the runner's job
+    // object instead of letting it outlive the runner (#33).
+    detached: HOST_SPAWN_DETACHED,
   })
   const compileCode = await compile.exited
   const compileErr = await new Response(compile.stderr).text()
@@ -51,10 +52,12 @@ test("compiled host finds cordis.yml via cwd", async () => {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    // Source: the sidecar becomes its own process-group leader (setsid), so
+    // POSIX: the sidecar becomes its own process-group leader (setsid), so
     // killTree's kill(-pid) reaps host + any descendants in one signal — same
     // semantics as the Rust shell's process_group(0) / Job Object.
-    detached: true,
+    // Windows: NOT detached (#33) — a detached child outlives the runner
+    // (probe10), which is how orphaned hosts accumulate.
+    detached: HOST_SPAWN_DETACHED,
   })
   // Cold start of a compiled sidecar is slow on Windows (see afterEach).
   const ready = await readReady(proc.stderr, 60_000)

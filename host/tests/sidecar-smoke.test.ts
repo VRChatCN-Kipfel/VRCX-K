@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { killTree, readReady, warmBun } from "./helpers"
+import { HOST_SPAWN_DETACHED, killTree, readReady, warmBun } from "./helpers"
 
 const repoRoot = join(import.meta.dir, "..", "..")
 
@@ -81,10 +81,13 @@ test.skipIf(!available)("sidecar launches to ready and stops gracefully via stdi
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    // Source: the sidecar becomes its own process-group leader (setsid), so
+    // POSIX: the sidecar becomes its own process-group leader (setsid), so
     // killTree's kill(-pid) reaps host + any descendants in one signal — same
     // semantics as the Rust shell's process_group(0) / Job Object.
-    detached: true,
+    // Windows: NOT detached (#33) — detached lets the child outlive the runner
+    // (probe10: 8/8 survived); non-detached ties it to the runner's job object
+    // so an interrupted run reaps it.
+    detached: HOST_SPAWN_DETACHED,
     // The Rust shell always marks the child as shell-attached so the host
     // connects the kkrpc/stdio bridge (VRCXK_SHELL=1, see host.rs
     // start_host_process / host/src/index.ts).
