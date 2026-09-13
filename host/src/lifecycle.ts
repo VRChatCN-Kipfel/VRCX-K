@@ -167,3 +167,18 @@ export async function gracefulStopWithTimeout(
   }
   return true
 }
+
+/**
+ * Stop the host because the far end of stdin is gone (issue #33): the shell
+ * died (shell-attached runs) or the launcher went away (shell-less dev hosts).
+ * EOF is observable only through the transport's own reader (stdio.ts) or the
+ * dedicated stdin watch — `process.stdin`'s events never fire under the
+ * transport's stream lock. Same stopping gate as the stop/restart RPCs, so a
+ * concurrent trigger (stop RPC already in flight) can never double-run
+ * cleanup or schedule a competing exit.
+ */
+export async function stopOnStdinLoss(ctx: Context, origin: "shell" | "launcher"): Promise<void> {
+  console.error(`[host] stdin closed (${origin} is gone) — graceful shutdown`)
+  const acquired = await gracefulStopWithTimeout(ctx, "stop")
+  if (acquired) setTimeout(() => process.exit(0), 10)
+}
