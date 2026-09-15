@@ -5,7 +5,8 @@ import {
   type WritableLike,
 } from "kkrpc/stdio"
 import { HOST_RESTART_EXIT, hostWsAPI } from "./api"
-import { gracefulStopWithTimeout } from "./lifecycle"
+import { gracefulStopWithTimeout, stopOnStdinLoss } from "./lifecycle"
+import { stdinIsPeerChannel } from "./stdin-watch"
 import type { Context } from "cordis"
 import type { HostWsReady } from "./ws"
 import type { TrayMenuSnapshot } from "./tray-contract.generated"
@@ -221,10 +222,24 @@ function fanout<T>(label: string) {
   }
 }
 
+/**
+ * Wrap a Web ReadableStream in the Node-style `ReadableLike` the kkrpc stdio
+ * transport consumes.
+ *
+ * `onDone` is the EOF signal, and this pump's own reader is the ONLY place in
+ * the process that can observe stdin ending: `getReader()` locks the stream,
+ * so `process.stdin`'s `end`/`close` events never fire and a second reader is
+ * rejected with ERR_INVALID_STATE (measured, docs/probes/probe9.ts). Until
+ * #33 the done branch returned silently, which left "the peer holding our
+ * write end is gone" unobservable.
+ */
 class ReadableStreamLike implements ReadableLike {
   private listeners = new Set<(chunk: Uint8Array | string) => void>()
 
-  constructor(stream: ReadableStream<Uint8Array>) {
+  constructor(
+    stream: ReadableStream<Uint8Array>,
+    private readonly onDone?: () => void,
+  ) {
     void this.pump(stream)
   }
 
@@ -243,7 +258,10 @@ class ReadableStreamLike implements ReadableLike {
     try {
       while (true) {
         const result = await reader.read()
-        if (result.done) return
+        if (result.done) {
+          this.onDone?.()
+          return
+        }
         for (const listener of this.listeners) listener(result.value)
       }
     } finally {
@@ -263,9 +281,9 @@ function bunWritable(): WritableLike {
   }
 }
 
-function bunStdioTransport() {
+function bunStdioTransport(onDone?: () => void) {
   return stdioJsonTransport({
-    readable: new ReadableStreamLike(Bun.stdin.stream()),
+    readable: new ReadableStreamLike(Bun.stdin.stream(), onDone),
     writable: bunWritable(),
     lifecycle: process.stdin,
   })
@@ -289,7 +307,14 @@ function bunStdioTransport() {
 export function connectShellStdio(ctx: Context, options: { transport?: Transport<RPCMessage> } = {}): ShellStdioBridge {
   const trayActions = fanout<TrayActionEvent>("tray.action")
   const shortcutPresses = fanout<ShortcutPressEvent>("shortcut.pressed")
-  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(), {
+  // #33: EOF on the shell's stdin channel means the shell is gone. Its
+  // ProcessTree Job Object would hard-reap us anyway — this turns that into the
+  // same graceful teardown the stop RPC uses. Only a peer channel (pipe on
+  // Windows, socketpair on POSIX — see stdin-watch.ts) carries that meaning; a
+  // test-supplied transport owns other streams, so the callback is wired for
+  // the default transport only.
+  const onStdinLost = stdinIsPeerChannel() ? () => void stopOnStdinLoss(ctx, "shell") : undefined
+  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(onStdinLost), {
     expose: {
       ping: () => hostWsAPI.ping(),
       stop: async () => {

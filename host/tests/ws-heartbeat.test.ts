@@ -4,7 +4,7 @@ import { wrap, dispose } from "kkrpc"
 import { webSocketClientTransport } from "kkrpc/ws"
 import type { HostWsAPI } from "../src/api"
 import { HOST_VERSION } from "../src/api"
-import { drain, killTree, readReady, resolveBun, warmBun } from "./helpers"
+import { drain, HOST_SPAWN_DETACHED, killTree, readReady, resolveBun, warmBun } from "./helpers"
 
 const hostDir = join(import.meta.dir, "..")
 const bun = resolveBun()
@@ -28,9 +28,12 @@ async function spawnHost() {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    // Source: host becomes its own process-group leader (setsid), so
+    // POSIX: host becomes its own process-group leader (setsid), so
     // killTree's kill(-pid) reaps it in one signal (Rust-shell parity).
-    detached: true,
+    // Windows: NOT detached (#33) — probe10 measured a detached host
+    // outliving its parent 8/8; non-detached ties it to the runner's job
+    // object so an interrupted run reaps it.
+    detached: HOST_SPAWN_DETACHED,
   })
   const ready = await readReady(proc.stderr)
   return { proc, ready }
