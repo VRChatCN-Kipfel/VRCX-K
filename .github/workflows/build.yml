@@ -147,8 +147,20 @@ jobs:
       - name: Cache cargo (Android targets)
         uses: Swatinem/rust-cache@v2
 
+      # 两个都是必须的，且互相不能替代：
+      #  1) 升 v4：v3 是 node20（已被 GitHub 强制按 node24 跑并告警），v4 是
+      #     node24，顺带把 cmdline-tools 默认版本 16.0 提到 20.0。
+      #     ⚠️ 升级本身**不会**修掉下面的问题 —— `packages` 的默认值在 v3/v4
+      #     里逐字相同，都是 "tools platform-tools"。
+      #  2) 覆盖 packages：Google 已从 SDK 仓库下架 `tools` 包，新版 sdkmanager
+      #     执行 `sdkmanager tools` 会 "Warning: Failed to find package 'tools'"
+      #     并 exit 1，整个 android job 在装 SDK 这步就挂（与代码无关，外部仓库
+      #     变更所致）。只留 platform-tools；编译所需的 build-tools / platforms
+      #     由 tauri 的 android init/build 自行解析安装。
       - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       # 先生成 Android gradle 工程：`tauri android build` 会自己 init，但
       # setup-java 的 `cache: gradle` 需要 gradle 文件已存在才能计算缓存键
