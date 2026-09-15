@@ -1,32 +1,32 @@
 // TEMPORARY PROBE — not a real test. Delete before merge.
 //
-// Purpose: settle WHY `HostWatcher > debounces changes and maps exact and root
-// events` fails on macOS with "Expected length: 1 / Received length: 2",
-// in ~2 of 3 runs on an identical commit (desktop macOS job 103755484057,
-// 103756723637 failed; 104365863369 passed — same SHA 0f77be5d).
+// Settles WHY `HostWatcher > debounces changes and maps exact and root events`
+// fails on macOS with "Expected length: 1 / Received length: 2" — it failed
+// 2 of 3 macOS runs on the SAME commit 0f77be5d (jobs 103755484057 and
+// 103756723637 failed; 104365863369 passed).
 //
-// Two competing hypotheses, with DIFFERENT fixes:
+// Round 1 of this probe (commit c85a6334) did NOT reproduce it. On macOS it
+// reported a healthy 12/12: writes 0-3ms apart, exactly one `change` from
+// chokidar, arrival t+46..64ms, nothing dropped. That falsified both earlier
+// hypotheses (H1 "writes >debounceMs apart", H2 "isInitialReplay over-filter")
+// and, more importantly, revealed the probe was NOT equivalent to the real
+// test: it replaced `waitFor(change)` — which returns the instant the first
+// change lands — with a fixed 400ms settle. That changes the observation
+// window for everything that arrives after the first routed change, which is
+// exactly where the extra event must come from.
 //
-//   H1 "timing race": the two writeFile() calls land more than debounceMs
-//      (40ms) apart, so the trailing-edge debounce legitimately flushes twice.
-//      Fix: make the test wait for quiescence instead of sleeping 100ms.
+// This version is a line-for-line equivalent of the real test:
 //
-//   H2 "FSEvents replay": the SAME write is delivered twice — once as the real
-//      event, once as an initial-scan replay that `isInitialReplay` fails to
-//      filter (mtime/readyAtMs comparison). Fix: correct the mtime baseline.
+//     start() -> waitFor(started) -> write, write
+//     -> waitFor(first change) -> sleep 100ms -> assert exactly 1
 //
-// How the probe tells them apart: every raw chokidar event is timestamped
-// relative to `ready`, with the file's mtime at observation time, and with
-// whether isInitialReplay() would have dropped it. Then:
+// and it asserts exactly what the real test asserts, so a failure here IS the
+// CI failure. When it fails it dumps the full event timeline (every raw
+// chokidar event with arrival time and mtime, plus the routed events) so the
+// mechanism is captured in the same run instead of needing another round trip.
 //
-//   - H1  => the three raw events carry 2+ DISTINCT mtimes, and their arrival
-//            gaps straddle debounceMs.
-//   - H2  => two raw events carry the SAME mtime (same write observed twice),
-//            or an event is dropped/kept inconsistently around readyAtMs.
-//
-// It runs the failing scenario N times in-process and prints a report either
-// way, so a green run still yields data (unlike the real test, whose failure
-// is the only observable).
+// It also runs the scenario ROUNDS times, because a single pass proves nothing
+// about a defect that shows up 2 times in 3.
 
 import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -37,170 +37,149 @@ import { binding } from "../src/watch-path"
 import { HostWatcher, type WatcherEvent } from "../src/watcher"
 
 const DEBOUNCE_MS = 40
-const ROUNDS = 12
+const ROUNDS = 40
 
-type Raw = {
-  kind: string
-  path: string
-  atMs: number // ms since this round's `ready`
-  mtimeMs: number
-  ageVsReadyMs: number // mtime - readyAtMs; negative = predates ready (replay-ish)
-  isReplay: boolean
+type Timeline = {
+  label: string
+  atMs: number
 }
 
-type Round = {
+type RoundResult = {
   round: number
-  raw: Raw[]
-  changes: string[]
-  changeEvents: number
-  rawChokidar: string[]
-  mtimeFirst: number
-  mtimeSecond: number
-  verdict: string
+  routedChanges: number
+  routedPaths: string[]
+  rawEvents: Timeline[]
+  changeArrivals: number[]
+  writeSpreadMs: number
+  stepLog: string[]
+  events: WatcherEvent[]
+  failed: boolean
 }
 
-function summarise(rounds: Round[]) {
-  const twoChanges = rounds.filter((r) => r.changeEvents > 1).length
-  const missed = rounds.filter((r) => r.verdict.startsWith("MISSED")).length
-  const chokidarSaw = rounds.filter((r) => r.rawChokidar.some((s) => s.startsWith("change"))).length
-
-  console.log("\n================ WATCHER FLAKE PROBE ================")
-  console.log(`platform      : ${process.platform} (${process.arch})`)
-  console.log(`bun           : ${Bun.version}`)
-  console.log(`debounceMs    : ${DEBOUNCE_MS}`)
-  console.log(`rounds        : ${rounds.length}`)
-  console.log(`rounds w/ >1 change event : ${twoChanges}/${rounds.length}   <-- the CI failure`)
-  console.log(`rounds chokidar saw change: ${chokidarSaw}/${rounds.length}   <-- raw layer fired?`)
-  console.log(`rounds routed 0 (missed)  : ${missed}/${rounds.length}   <-- H2 over-filter`)
-  console.log(`rounds same-mtime writes  : ${rounds.filter((r) => r.mtimeFirst === r.mtimeSecond).length}/${rounds.length}`)
-  console.log("-----------------------------------------------------")
-  for (const r of rounds) {
-    console.log(`round ${r.round}: routed=${r.changeEvents} verdict=${r.verdict}`)
-    console.log(
-      `    write#1 mtime-ready=${Math.round(r.mtimeFirst - 0)} write#2 mtime-ready=${Math.round(r.mtimeSecond)} ` +
-        `sameMtime=${r.mtimeFirst === r.mtimeSecond}`,
-    )
-    console.log(`    chokidar raw: ${r.rawChokidar.join(", ") || "(none)"}`)
-    for (const e of r.raw) {
-      console.log(
-        `    raw ${e.kind.padEnd(6)} t+${String(e.atMs).padStart(5)}ms  ` +
-          `mtime-ready=${String(Math.round(e.ageVsReadyMs)).padStart(6)}ms  ` +
-          `replay=${e.isReplay ? "YES" : "no "}  ${e.path.split(/[\\/]/).pop()}`,
-      )
+function waitFor<T>(items: T[], predicate: (item: T) => boolean, timeout = 3_000): Promise<T> {
+  const started = Date.now()
+  return new Promise((resolve, reject) => {
+    const poll = () => {
+      const found = items.find(predicate)
+      if (found) return resolve(found)
+      if (Date.now() - started >= timeout) return reject(new Error("timed out waiting for watcher event"))
+      setTimeout(poll, 10)
     }
-  }
-  console.log("=====================================================\n")
+    poll()
+  })
 }
 
-describe("PROBE: HostWatcher flake mechanism", () => {
-  test(`reproduces the CI scenario ${ROUNDS}x and reports the mechanism`, async () => {
+function dumpRound(r: RoundResult) {
+  console.log(`\n--- ROUND ${r.round} : ${r.failed ? "FAILED (reproduced)" : "passed"} ---`)
+  console.log(`    routed changes   : ${r.routedChanges}  ${JSON.stringify(r.routedPaths.map((p) => p.split(/[\\/]/).pop()))}`)
+  console.log(`    change arrivals  : ${r.changeArrivals.join(", ") || "(none)"} ms after `+"`started`")
+  console.log(`    write mtime spread: ${r.writeSpreadMs}ms  (debounceMs=${DEBOUNCE_MS})`)
+  console.log(`    raw chokidar     : ${r.rawEvents.map((e) => `${e.label}@+${e.atMs}ms`).join(", ") || "(none)"}`)
+  console.log(`    steps            : ${r.stepLog.join(" -> ")}`)
+  console.log(`    full event types : ${r.events.map((e) => e.type).join(" ")}`)
+}
+
+describe("PROBE: HostWatcher flake mechanism (real-test equivalent)", () => {
+  test(`runs the CI scenario ${ROUNDS}x and dumps any reproduction`, async () => {
     const roots: string[] = []
-    const rounds: Round[] = []
+    const results: RoundResult[] = []
 
     try {
       for (let round = 0; round < ROUNDS; round++) {
-        const root = await mkdtemp(join(tmpdir(), "vrcxk-probe-"))
+        const root = await mkdtemp(join(tmpdir(), "vrcxk-probe2-"))
         roots.push(root)
-        await mkdir(join(root, "plugin"))
-        const entry = join(root, "plugin", "index.ts")
+        const pluginRoot = join(root, "plugin")
+        await mkdir(pluginRoot)
+        const entry = join(pluginRoot, "index.ts")
         await writeFile(entry, "export default {}")
 
-        const raw: Raw[] = []
+        const events: WatcherEvent[] = []
         const changes: string[] = []
-        let changeEvents = 0
-        let readyWall = 0 // absolute Date.now() when `started` fired
+        const rawEvents: Timeline[] = []
+        const changeArrivals: number[] = []
+        const stepLog: string[] = []
+        let readyWall = 0
+        let writeSpreadMs = -1
 
         const watcher = new HostWatcher({
           roots: [root],
           debounceMs: DEBOUNCE_MS,
-          bindings: [binding("plugin", entry, [join(root, "plugin")])],
+          bindings: [binding("plugin", entry, [pluginRoot])],
           onEvent: (event: WatcherEvent) => {
-            if (event.type === "started") {
-              readyWall = Date.now()
-              return
-            }
-            if (event.type !== "change") return
-            changeEvents += 1
-            // Mirror the real test's observation point.
-            if (event.path) {
-              let mtimeMs = Number.NaN
-              try {
-                mtimeMs = statSync(event.path).mtimeMs
-              } catch {
-                /* gone */
-              }
-              raw.push({
-                kind: "ROUTED",
-                path: event.path,
-                atMs: Date.now() - readyWall,
-                mtimeMs,
-                ageVsReadyMs: mtimeMs - readyWall,
-                isReplay: false,
-              })
-            }
+            if (event.type === "started") readyWall = Date.now()
+            if (event.type === "change" && readyWall) changeArrivals.push(Date.now() - readyWall)
+            events.push(event)
           },
-          onChange: (path) => {
-            changes.push(path)
-          },
+          onChange: (path) => changes.push(path),
         })
 
-        // Same shape as the real test: start(), wait for `started`, then two writes.
+        // Line-for-line equivalent of the real test from here on.
         await watcher.start()
-        const started = Date.now()
-        while (readyWall === 0 && Date.now() - started < 3_000) {
-          await new Promise((r) => setTimeout(r, 5))
-        }
-        const readyAt = readyWall
+        stepLog.push("start()")
+        await waitFor(events, (event) => event.type === "started")
+        stepLog.push("started")
 
-        // Bypass layer: observe chokidar directly, so we can tell "no event was
-        // ever emitted" from "an event was emitted but the router dropped it".
-        const rawChokidar: string[] = []
-        const fsWatcher = (watcher as unknown as { watcher?: { on(e: string, cb: (p: string) => void): void } }).watcher
+        // Tap chokidar AFTER start() so the underlying watcher exists.
+        const fsWatcher = (watcher as unknown as {
+          watcher?: { on(e: string, cb: (...a: unknown[]) => void): void }
+        }).watcher
         if (fsWatcher) {
           for (const kind of ["change", "add", "unlink", "raw"]) {
-            fsWatcher.on(kind, () => rawChokidar.push(`${kind}@+${Date.now() - readyAt}ms`))
+            fsWatcher.on(kind, () => rawEvents.push({ label: kind, atMs: Date.now() - readyWall }))
           }
         }
 
+        const mtimeBefore = statSync(entry).mtimeMs
         await writeFile(entry, "export default 1")
-        const mtimeAfterFirst = statSync(entry).mtimeMs
         await writeFile(entry, "export default 2")
-        const mtimeAfterSecond = statSync(entry).mtimeMs
+        const mtimeAfter = statSync(entry).mtimeMs
+        writeSpreadMs = Math.max(0, Math.round(mtimeAfter - mtimeBefore))
+        stepLog.push("two writes")
 
-        // Long settle: never sleep-then-assert; let everything that CAN arrive, arrive.
-        await new Promise((r) => setTimeout(r, 400))
+        await waitFor(events, (event) => event.type === "change")
+        stepLog.push("first change seen")
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        stepLog.push("slept 100ms")
+
+        const routedChanges = changes.length
+        const failed = routedChanges !== 1
+        if (failed) stepLog.push(`ASSERT FAILED (expected 1, got ${routedChanges})`)
         await watcher.close()
 
-        const distinctMtimes = new Set([mtimeAfterFirst, mtimeAfterSecond]).size
-        const verdict =
-          changeEvents > 1
-            ? distinctMtimes === 1
-              ? "FAIL>1 + single write mtime => H2 replay"
-              : "FAIL>1 + distinct write mtimes => H1 timing race"
-            : changeEvents === 0 && rawChokidar.some((s) => s.startsWith("change"))
-              ? "MISSED: chokidar emitted change, router dropped it => H2 over-filter"
-              : changeEvents === 0
-                ? "MISSED: chokidar never emitted change"
-                : "ok"
-
-        rounds.push({
+        const result: RoundResult = {
           round,
-          raw,
-          changes,
-          changeEvents,
-          rawChokidar,
-          mtimeFirst: mtimeAfterFirst,
-          mtimeSecond: mtimeAfterSecond,
-          verdict,
-        })
+          routedChanges,
+          routedPaths: changes,
+          rawEvents,
+          changeArrivals,
+          writeSpreadMs,
+          stepLog,
+          events,
+          failed,
+        }
+        results.push(result)
+        if (failed) dumpRound(result)
       }
 
-      summarise(rounds)
+      const failures = results.filter((r) => r.failed)
+      console.log("\n=========== PROBE v2 SUMMARY ===========")
+      console.log(`platform      : ${process.platform} (${process.arch})`)
+      console.log(`rounds        : ${results.length}`)
+      console.log(`FAILURES      : ${failures.length}/${results.length}  (expected 0, CI shows ~2/3)`)
+      console.log(`max write spread observed : ${Math.max(...results.map((r) => r.writeSpreadMs))}ms (debounceMs=${DEBOUNCE_MS})`)
+      console.log(`max routed changes ever   : ${Math.max(...results.map((r) => r.routedChanges))}`)
+      if (failures.length) {
+        console.log("REPRODUCED - failing rounds above carry full timelines.")
+      } else {
+        console.log("NOT reproduced in this run. See note at top: single non-repro proves nothing.")
+      }
+      console.log("========================================\n")
 
-      // The probe itself must not fail the build — it reports, it does not judge.
-      expect(rounds.length).toBe(ROUNDS)
+      // The probe reports; the real test judges. Never fail the build here,
+      // or a green probe would be indistinguishable from a broken one.
+      expect(results.length).toBe(ROUNDS)
     } finally {
       await Promise.all(roots.map((r) => rm(r, { recursive: true, force: true })))
     }
-  }, 60_000)
+  }, 180_000)
 })
