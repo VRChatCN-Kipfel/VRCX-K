@@ -23,6 +23,8 @@
 | 10 | 服务必须**先 provide、后 attach**（否则注入它的插件卡在 PENDING） | §1.5 |
 | 11 | `TrayService` / `ShortcutService` 曾是普通 class（零归因），**M2-1 已迁为 `Service` 子类** | §1.13 |
 | 12 | **调用者身份用 `entry.id`**；`fiber.name` 对 apply-only 插件塌缩为 `Include`；嵌套插件继承外层 entry，**只有具名函数表达式**能补 `runtime.name`（匿名箭头/对象字面量/apply-only 命名空间仍塌缩）；根级裸插件无 entry 且匿名者与宿主同为 `"root"`；`entry.id` 前缀每次运行随机 | §1.14 |
+| 13 | ⚠ **`entry.id` 不能当持久化键**（跨重启前缀变）；**持久化键 = id 后缀**；显式 `create({id})` 的 id 原样保留 | §1.14（末条）/ probe11 |
+| 14 | ⚠ **坏插件在 Fiber 层被隔离（其余 entry 照常 ACTIVE），但错误逃逸为 `unhandledRejection`**；**宿主当前把任一 FAILED 当致命 → 一个坏插件杀死整个宿主启动** | §1.15 / probe12 |
 
 ---
 
@@ -211,6 +213,51 @@ entry 调用 6 次 → distinct: R1 = 3    R2 = 2    C = 4（不是 6）
 - **根级裸插件**：loader 由 `fiber.parent[Entry.key]` 决定是否赋 `entry`（`plugin-loader:578`），根 Context 无该键 ⇒ **即使 loader 活着 `entryId` 仍为 null**，回退 `fiber.name`。**匿名根级插件得到 `"root"`，与真实宿主调用完全同名、无法区分**（具名的则得到函数名）。
 - **M2-1 的 `callerName()` 采用 C**（`host/src/capability.ts`）。
 - ⚠ **`entry.id` 前缀每次运行随机**（`plugin-loader/lib/index.js:176` 的 `Math.random().toString(16).slice(2,10)`；实测同一次 include 内所有 entry 同前缀，重启后变）⇒ 日志/审计消费方必须**按后缀匹配、把前缀当不透明**。
+- ⚠ **推论（probe11 实测）：`entry.id` 不能直接当持久化键**。ADR 要求把 base 的启停/配置覆盖持久化在 `base-state.json`，而本文档说注册表按 `entry.id` 建——**若照字面用完整 `entry.id`，每次重启映射全失效**。
+  - `probe11.ts` 连启两次测同一份 `cordis.yml`：`fullIdStable:false`、`suffixStable:true`、`explicitIdSurvivesVerbatim:true`、`prefixEqualsIncludeId:true`。
+  - ⇒ **持久化键 = id 后缀（yml 里显式写的 id）；完整 `entry.id` 仅作运行时键**。另外，显式传给 `ctx.loader.create({ id })` 的 id **原样保留、不加前缀**，是宿主装配 base 条目时的可选路径。
+
+### 1.15 ⚠ **坏插件的爆炸半径：cordis 在 Fiber 层隔离，但错误会逃逸到进程层**
+
+**这是宿主当前行为链上的一个真实缺口**，由 `probe12.ts` + 真实宿主实测发现。
+
+**两层事实（必须分开看）**：
+
+| 层 | 实测行为 | 结论 |
+|---|---|---|
+| **Fiber 层** | 一个 `apply()` 抛错的 entry 变 `FAILED`，**同树其他 entry 照常 `ACTIVE`**，include 树自身正常 settle | ✅ cordis 的隔离是有效的 |
+| **进程层** | 该错误仍以 **`unhandledRejection`** 逃逸；宿主**没有任何** `unhandledRejection`/`uncaughtException` 处理器（只有 SIGTERM/SIGINT） | ❌ 无人接管 |
+
+**⇒ 但真正杀死宿主的是我们自己的代码**：`host/src/index.ts` 的 `waitForIncludeReady` **主动把任何 FAILED entry 当致命错误抛出**：
+
+```ts
+if (fiber.state === FIBER_FAILED) { … throw new Error(`${entry.id} plugin failed to assemble: …`) }
+```
+
+真实宿主实测（`cordis.yml` = heartbeat + 一个抛错的插件）：
+
+```
+[host] starting Cordis...
+[host] fatal bootstrap error … 75a59760:broken plugin failed to assemble: boom: broken plugin
+EXITCODE=1
+```
+
+即：**一个坏插件 → 宿主启动失败 → 壳按 `Crashed` 走退避重试 → 上限后停在持久 `Failed`**（`src-tauri/src/host.rs` 的退出码分类：51=`RestartRequested`，其余非零=`Crashed`）。用户看到的是"**应用打不开**"，且**没有任何排查手段指出是哪个插件**。
+
+**这个一刀切在 M1 时代是对的**——当时树里只有我们自己的 base 插件（heartbeat），FAILED 就等于产品坏了。**但用户插件进来后它不成立**：
+
+- **base 插件**（我们发行、我们控制）→ FAILED 致命是合理的；
+- **用户插件**（本地/zip/市场）→ FAILED **必须隔离**，降级为「该插件未生效」+ warn。
+
+**为什么必须隔离（用户已拍板）**：否则「我们的插件与某个外部插件冲突」会表现为**整个应用崩溃且无排查手段**——这正是要避免的场景。
+
+**规避方向（供 M2-4 / #18 采纳）**：
+
+1. **拒绝/失败要发生在 entry 创建之前**（读 manifest → 校验 → 不过则不 `create`），从源头上不产生 FAILED fiber；
+2. `waitForIncludeReady` **区分来源**：base 严格、用户插件宽松（记 warn 并继续）；
+3. 补 **`unhandledRejection` / `uncaughtException` 兜底**（当前完全缺失），把进程级逃逸降为日志。
+
+> ⚠ **Bun 的默认行为（实测，影响严重程度定性）**：`bun run` 下未处理的 rejection **不会立刻杀死长跑进程**（实测 5s 后仍 `Running`），但**会**让最终退出码为 1；脚本自然结束时退出码同样为 1。⇒ 危险不在"当场猝死"，而在**它经由我们自己的就绪检查变成启动失败**。
 
 ---
 
