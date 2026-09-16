@@ -124,7 +124,11 @@ try {
         })
       }
     }
-    if (rows.every((r) => r.state !== "PENDING") || Date.now() >= deadline) break
+    // ⚠ `[].every(...)` is `true`, so an empty first iteration would break
+    // immediately and report zero entries as if that were the answer. The
+    // length guard is load-bearing, not defensive.
+    const settled = rows.length > 0 && rows.every((r) => r.state !== "PENDING")
+    if (settled || Date.now() >= deadline) break
     await new Promise((r) => setTimeout(r, 50))
   }
   rows.sort((a, b) => a.name.localeCompare(b.name))

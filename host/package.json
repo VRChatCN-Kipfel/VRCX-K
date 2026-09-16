@@ -19,6 +19,7 @@
     "chokidar": "4.0.3",
 
     "cordis": "4.0.0-rc.9",
+    "isomorphic-git": "^1.42.2",
     "kkrpc": "2.1.0",
     "ws": "^8.21.3"
   },
