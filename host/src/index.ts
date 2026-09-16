@@ -9,6 +9,8 @@ import { HOST_VERSION } from "./api"
 import { log } from "./log"
 import { ShutdownSignal } from "./signal"
 import { makeRestartRequester } from "./restart"
+import { stopOnStdinLoss } from "./lifecycle"
+import { watchStdinClose } from "./stdin-watch"
 import { connectShellStdio, type DevWatchPush } from "./stdio"
 import { listenHostWs } from "./ws"
 import { attachDevWatch, DevWatch, type DevWatchEvent } from "./dev-watch"
@@ -271,6 +273,17 @@ async function bootstrap() {
         })
       }
     }
+  } else {
+    // No shell supervises us (dev: `bun run dev:host`, test harnesses, agent
+    // sessions). Watch the stdin pipe instead: when the last writer goes away
+    // the pipe closes and we stop ourselves instead of orphaning (issue #33).
+    // watchStdinClose is a no-op unless fd 0 is a real pipe — `ignore`/TTY/
+    // file launches have no launcher lifetime to observe and must keep
+    // running. With a shell attached the kkrpc transport owns the reader, so
+    // this dedicated watch runs only here (see stdin-watch.ts).
+    watchStdinClose(() => {
+      void stopOnStdinLoss(ctx, "launcher")
+    })
   }
 }
 

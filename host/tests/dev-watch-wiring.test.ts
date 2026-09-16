@@ -14,7 +14,7 @@ import { afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { killTree, resolveBun, warmBun } from "./helpers"
+import { HOST_SPAWN_DETACHED, killTree, resolveBun, warmBun } from "./helpers"
 import { watchKey } from "../src/watch-path"
 
 const hostDir = join(import.meta.dir, "..")
@@ -114,9 +114,11 @@ describe("real host entry wiring", () => {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      // Source: host becomes its own process-group leader (setsid), so
+      // POSIX: host becomes its own process-group leader (setsid), so
       // killTree's kill(-pid) reaps it in one signal (Rust-shell parity).
-      detached: true,
+      // Windows: NOT detached (#33) — detached lets the host outlive the
+      // runner (probe10), orphaning it if the run is interrupted.
+      detached: HOST_SPAWN_DETACHED,
       env: { ...process.env, VRCXK_DEV_WATCH: "1", VRCXK_SHELL: "0" },
     })
     procs.push(proc)

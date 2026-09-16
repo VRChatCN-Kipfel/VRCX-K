@@ -74,12 +74,25 @@ export async function warmBun(): Promise<void> {
 }
 
 /**
+ * Host test spawns keep `detached: true` ONLY on POSIX, where `killTree`'s
+ * `kill(-pid)` group-kill needs the child to be its own process-group leader.
+ *
+ * On Windows, detached asks the kernel to let the child OUTLIVE the runner —
+ * measured in docs/probes/probe10.ts: a detached host survived its parent
+ * 8/8. That is exactly how orphaned hosts accumulate when a run is
+ * interrupted before afterEach fires (issue #33). A non-detached child is
+ * instead reaped together with the runner, so an interrupted run leaves
+ * nothing behind. `killTree` (taskkill /T /F) is unaffected by either choice.
+ */
+export const HOST_SPAWN_DETACHED = process.platform !== "win32"
+
+/**
  * Kill a process tree by PID. Windows: taskkill /T /F (tree kill, robust
  * against orphans). Unix: `killProcessGroup(pid)` — the child is spawned with
- * `detached: true` (Bun calls setsid → new process group leader) and its
- * descendants inherit that group, so one `kill(-pgid)` SIGKILLs the whole
- * tree. Non-blocking — the caller should not wait on it inside hooks (a sync
- * taskkill can stall a test hook past its timeout).
+ * `detached: HOST_SPAWN_DETACHED` (Bun calls setsid → new process group
+ * leader) and its descendants inherit that group, so one `kill(-pgid)`
+ * SIGKILLs the whole tree. Non-blocking — the caller should not wait on it
+ * inside hooks (a sync taskkill can stall a test hook past its timeout).
  */
 export function killTree(pid: number | undefined): void {
   if (!pid) return
