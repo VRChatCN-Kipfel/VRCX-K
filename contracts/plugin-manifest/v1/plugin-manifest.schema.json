@@ -120,18 +120,31 @@
       "enum": ["restartable", "frontend", "background"],
       "description": "restartable (default): sidecar restart + auto-reconnect; no author duty. frontend: entry broadcast + WebView reload, no backend restart; the author must make frontend assets independently reloadable. background: plugin-level refresh on config change and rolling replacement on upgrade; the author MUST implement a refresh contract plus reconnect and state recovery. v0 accepts ONLY `restartable` and rejects the others (an error, never a silent downgrade); M3 opens `frontend`, M4 opens `background`. The schema already carries the full vocabulary so it need not change — only the accepted subset widens."
     },
+    "DependencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:[A-Z][a-zA-Z0-9]*)?$|^[a-z0-9][a-z0-9-]*$",
+      "description": "A plugin id (kebab-case, e.g. `base-storage`) OR a service name (camelCase, e.g. `storage`). Both spellings are accepted TODAY, and that is deliberate: naming a SERVICE is what makes an implementation swappable, because a dependency on a service is satisfied by whoever provides it rather than by one specific plugin. Resolving a service-named dependency is not implemented yet (v0 resolves plugin ids); accepting the spelling now means adding third-party implementations later will not require editing every existing manifest. See docs/plugin-source-and-index-design.md §3.6."
+    },
     "Dependencies": {
       "type": "object",
       "maxProperties": 64,
-      "propertyNames": { "$ref": "#/$defs/PluginId" },
+      "propertyNames": { "$ref": "#/$defs/DependencyKey" },
       "additionalProperties": { "$ref": "#/$defs/VersionRange" }
     },
     "ServiceName": {
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "pattern": "^[a-zA-Z][a-zA-Z0-9]*$",
-      "description": "Service identity: a context key (`notify`) or a provisioned service name (`friendPresence`)."
+      "pattern": "^[a-z][a-zA-Z0-9]*$",
+      "not": {
+        "anyOf": [
+          { "pattern": "(?:^|[a-z])(?:Impl|Implementation)$" },
+          { "pattern": "^(?:base|core|vrcxk|official)[A-Z]" }
+        ]
+      },
+      "description": "Service identity: a context key (`notify`) or a provisioned service name (`friendPresence`). Names that LEAK AN IMPLEMENTATION are rejected: a trailing `Impl`/`Implementation` (e.g. `storageImpl`) or a first-party prefix (`baseStorage`, `officialStorage`). This is the swap-ability guard — a dependency on `storage` can be satisfied by any provider, whereas `baseStorage` bakes one implementation into every dependent's manifest and makes a third-party replacement impossible without editing them all. Must start lowercase so a camelCase service name can never be confused with a kebab-case plugin id."
     },
     "ServiceList": {
       "type": "array",

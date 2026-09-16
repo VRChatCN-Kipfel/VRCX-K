@@ -1,0 +1,5 @@
+# How a plugin is mounted. `name` is a path relative to THIS file (the Include
+# plugin rewrites ctx.baseUrl to the yml's directory), so a plugin can live in a
+# subdirectory without any absolute paths.
+- id: hello-plugin
+  name: ./src/index.ts

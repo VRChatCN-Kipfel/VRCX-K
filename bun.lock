@@ -20,6 +20,7 @@
         "@types/react-dom": "^19.1.6",
         "@types/ws": "^8.18.1",
         "@vitejs/plugin-react": "^6.0.2",
+        "cordis": "4.0.0-rc.9",
         "typescript": "~6.0.3",
         "vite": "^8.0.16",
       },

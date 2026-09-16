@@ -12,7 +12,7 @@ export type Platform = "win32-x64" | "win32-arm64" | "linux-x64" | "linux-arm64"
  */
 export type VersionRange = string;
 /**
- * Service identity: a context key (`notify`) or a provisioned service name (`friendPresence`).
+ * Service identity: a context key (`notify`) or a provisioned service name (`friendPresence`). Names that LEAK AN IMPLEMENTATION are rejected: a trailing `Impl`/`Implementation` (e.g. `storageImpl`) or a first-party prefix (`baseStorage`, `officialStorage`). This is the swap-ability guard — a dependency on `storage` can be satisfied by any provider, whereas `baseStorage` bakes one implementation into every dependent's manifest and makes a third-party replacement impossible without editing them all. Must start lowercase so a camelCase service name can never be confused with a kebab-case plugin id.
  */
 export type ServiceName = string;
 /**

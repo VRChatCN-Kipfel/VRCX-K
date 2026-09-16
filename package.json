@@ -14,7 +14,7 @@
     "tauri": "tauri",
     "dev:host": "bun run --cwd host dev",
     "build:host": "bun run scripts/build-host.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.host.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.host.json && tsc --noEmit -p tsconfig.examples.json",
     "check:contracts": "bun run scripts/check-contract-drift.ts",
     "generate:contracts": "bun run --cwd host generate:contracts",
     "test:ui": "bun test src",
@@ -38,6 +38,7 @@
     "@types/react-dom": "^19.1.6",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.2",
+    "cordis": "4.0.0-rc.9",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
   }

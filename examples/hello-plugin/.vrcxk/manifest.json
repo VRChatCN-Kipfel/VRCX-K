@@ -1,0 +1,16 @@
+{
+  "$schema": "https://vrcx-k.dev/contracts/plugin-manifest/v1/plugin-manifest.schema.json",
+  "id": "hello-plugin",
+  "version": "0.1.0",
+  "author": "VRCX-K contributors",
+  "name": "Hello Plugin",
+  "description": "A minimal loadable plugin used as the starting point for new VRCX-K plugins.",
+  "license": "MIT",
+  "restartClass": "restartable",
+  "services": {
+    "required": ["notify"]
+  },
+  "permissions": {
+    "notify": true
+  }
+}
