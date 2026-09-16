@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vrcx-k.dev/contracts/plugin-index/v1/plugin-index-entry.schema.json",
+  "title": "VRCX-K Plugin Index Entry",
+  "description": "One entry in a plugin SOURCE's index. A source is a table of id -> how to fetch it, plus a DISPLAY CACHE. It is not authoritative about anything that lives in the author's repository: version, permissions, dependencies and checksums are deliberately absent so that publishing a release requires no PR here. See docs/plugin-source-and-index-design.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "type", "source", "name", "description", "author", "repository"],
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/PluginId",
+      "description": "Stable plugin identifier. Also the key users see as {source}/{id}@{version}."
+    },
+    "type": {
+      "$ref": "#/$defs/PluginType",
+      "description": "Official FUNCTION category. Closed enum, and the only machine-reliable filter axis — free tags cannot be (utility/tools/工具 would each be spelled differently). Chosen deliberately narrow so that adding a value later is rare."
+    },
+    "source": {
+      "$ref": "#/$defs/Source",
+      "description": "Where to fetch the plugin. This is the index's ONLY authoritative content: without it nothing can be retrieved."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Display cache. The manifest in the author's repository is authoritative; an out-of-date value here is harmless and self-corrects when the plugin is installed."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Display cache; manifest wins."
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Identity signal, mirrored here so a change of owner is visible while browsing. Not an authenticator."
+    },
+    "repository": {
+      "$ref": "#/$defs/HttpsUrl",
+      "description": "Source repository, used for display and as an identity signal."
+    },
+    "homepage": { "$ref": "#/$defs/HttpsUrl" },
+    "license": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "SPDX identifier."
+    },
+    "tags": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/Tag" },
+      "description": "Free-form, author-chosen labels. Purely presentational: they are NOT a reliable filter axis, which is what `type` is for. Colour is a display-layer concern carried by the source, not the plugin."
+    }
+  },
+  "$defs": {
+    "PluginId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "HttpsUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^https://"
+    },
+    "PluginType": {
+      "type": "string",
+      "enum": ["core", "library", "feature", "ui", "integration", "tool"],
+      "description": "core = official core capability (login/db/connection); library = provides functionality to other plugins (NoneBot's `library`); feature = user-visible functionality; ui = interface extension; integration = third-party platform bridge; tool = utility."
+    },
+    "Source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^https://.+\\.git$",
+          "description": "Git repository URL. MUST end in `.git`: the suffix doubles as the discriminator, which is why there is no `type` field on the source (design P3). NOTE codeload rejects the suffix (404), so any DERIVED url (codeload tarball, raw file) must strip it first — that normalisation belongs in exactly one function."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$",
+          "description": "Plugin directory inside the repository, for monorepos. Omitted = repository root. Must not escape the repository: a `..` segment anywhere (including a trailing one) is rejected, as is a leading `/`. The manifest is read from `<path>/.vrcxk/manifest.json`, so its location is always derivable and needs no field of its own."
+        }
+      }
+    },
+    "Tag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "description": "Optional display colour, taken from the NoneBot store convention [{\"label\": ..., \"color\": \"#ea5252\"}]."
+        }
+      }
+    }
+  }
+}

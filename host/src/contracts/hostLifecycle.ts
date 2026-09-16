@@ -1,4 +1,20 @@
-/** Generated from contracts/host-lifecycle/v1/*.schema.json. Do not hand-edit wire names. */
+/**
+ * Host lifecycle contract — HYBRID file, read the note before editing.
+ *
+ * The TYPES below mirror `contracts/host-lifecycle/v1/*.schema.json` and can be
+ * regenerated with json-schema-to-typescript.
+ *
+ * The GUARDS (`isHostSnapshot` / `isHostExitSummary`) are HAND-WRITTEN and are
+ * NOT generated: they exist because the wire guard must also enforce semantics a
+ * JSON Schema cannot express for this shape, and because a hand-written guard
+ * keeps the check dependency-free at the call site.
+ *
+ * Because the two live in one file, it is deliberately excluded from
+ * `scripts/check-contract-drift.ts` (which byte-compares a fresh generation and
+ * would always report a false drift here). Its type/schema agreement is pinned
+ * by `host/tests/host-lifecycle-contract.test.ts`, which reads the schema at
+ * runtime. If you split this file, add it to that gate.
+ */
 
 export const HOST_LIFECYCLE_SCHEMA_VERSION = 1 as const
 export const MAX_SAFE_INTEGER = 9_007_199_254_740_991

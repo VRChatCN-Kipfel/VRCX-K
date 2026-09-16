@@ -324,32 +324,43 @@ protocolVersion: 1:
 
 **必填 4 个**：
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `id` | string | `^[a-z0-9][a-z0-9-]*$`，**必须与索引条目一致** |
-| `version` | string | semver，**权威版本**；须等于对应 tag 的版本段（§4.4） |
-| `author` | string | 身份元组（§3.5） |
-| `name` | string | 展示名（权威值；索引那份是缓存） |
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| `id` | string | `^[a-z0-9][a-z0-9-]*$`，≤64 | **必须与索引条目一致** |
+| `version` | string | **semver.org 官方正则**，≤128 | **权威版本**；须等于对应 tag 的版本段（§4.4） |
+| `author` | string | 1–64 | 身份元组（§3.5） |
+| `name` | string | 1–128 | 展示名（权威值；索引那份是缓存） |
 
-**可选 —— 展示**：`description` / `repository` / `homepage` / `license`
+**可选 —— 展示**：`description`(≤512) / `repository` / `homepage` / `license`(≤64)
 
 **可选 —— 运行语义**：
 
 | 字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `platforms` | string[] | 全平台 | `win32-x64` / `linux-x64` / `darwin-arm64`；**仅带原生库时需要** |
-| `restartClass` | enum | `restartable` | **变更如何生效**（见 §5.6） |
+| `platforms` | `enum[]`（≤6） | 全平台 | **封闭枚举，Node 语义**（见下） |
+| `restartClass` | `enum` | `restartable` | **变更如何生效**（见 §5.6） |
+
+⚠ **`platforms` 必须是 Node 语义，不是 Rust triple、不是 bun target**：
+
+```
+✅ win32-x64 / win32-arm64 / linux-x64 / linux-arm64 / darwin-x64 / darwin-arm64
+❌ windows-x64          （bun compile target 拼法）
+❌ x86_64-pc-windows-msvc  （Rust triple）
+❌ macos-arm64
+```
+
+因为运行时检查就是 `process.platform + '-' + process.arch`。**写错就永远匹配不上**——契约测试已钉住这四种拼法。
 
 **可选 —— 依赖与服务**：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `dependencies` | `{name: range}` | **不含 source**（§3.2） |
-| `services.required` | string[] | **就绪门**：未满足则不自加载 |
-| `services.optional` | string[] | 有则用，无则降级 |
-| `services.implements` | string[] | 我**提供**的服务名 |
+| `dependencies` | `{id: range}`（≤64 项） | **不含 source**（§3.2） |
+| `services.required` | `ServiceName[]` | **就绪门**：未满足则不自加载 |
+| `services.optional` | `ServiceName[]` | 有则用，无则降级 |
+| `services.implements` | `ServiceName[]` | 我**提供**的服务名（暂仅展示） |
 
-**可选 —— 能力声明**：`permissions`（M2-8：装时展示 + 越权 warn，**不拦截**）
+**可选 —— 能力声明**：`permissions`（§9.1）
 
 **可选 —— 前端（M3）**：`frontend.entry` / `frontend.slots`
 
@@ -357,6 +368,76 @@ protocolVersion: 1:
 ```json
 { "id": "x", "version": "1.0.0", "author": "me", "name": "X" }
 ```
+
+**完整示例**：
+
+```jsonc
+{
+  "id": "friend-presence",
+  "version": "1.2.0",
+  "author": "me",
+  "name": "好友在线状态",
+  "description": "追踪好友上下线与位置变化",
+  "repository": "https://github.com/me/vrcxk-plugins",
+  "homepage": "https://github.com/me/vrcxk-plugins#readme",
+  "license": "MIT",
+  "platforms": ["win32-x64", "linux-x64", "darwin-arm64"],
+  "restartClass": "restartable",
+  "dependencies": { "audit-logger": "*", "secrets-vault": "~2.1.0" },
+  "services": { "required": ["notify"], "optional": ["dialog"], "implements": ["friendPresence"] },
+  "permissions": { "shell": ["window", "path"], "notify": true, "dialog": true },
+  "frontend": { "entry": "ui/index.js", "slots": ["dashboard.widget"] }
+}
+```
+
+**契约文件**：`contracts/plugin-manifest/v1/plugin-manifest.schema.json`
+**TS 镜像**：`host/src/contracts/pluginManifest.generated.ts`（json2ts）
+**校验/注册表**：`host/src/contracts/pluginContract.ts` / `pluginRegistry.ts`
+**契约测试**：`host/tests/plugin-manifest-contract.test.ts`（24 项）
+
+**索引条目示例**：
+
+```jsonc
+{
+  "id": "friend-presence",
+  "type": "feature",
+  "source": {
+    "url": "https://github.com/me/vrcxk-plugins.git",
+    "path": "packages/friend-presence"
+  },
+  "name": "好友在线状态",
+  "description": "追踪好友上下线与位置变化，支持位置历史查询",
+  "author": "me",
+  "repository": "https://github.com/me/vrcxk-plugins",
+  "homepage": "https://github.com/me/vrcxk-plugins#readme",
+  "license": "MIT",
+  "tags": [{ "label": "好友", "color": "#ea5252" }, { "label": "状态" }]
+}
+```
+
+**契约文件**：`contracts/plugin-index/v1/plugin-index-entry.schema.json`
+**TS 镜像**：`host/src/contracts/pluginIndexEntry.generated.ts`
+
+### 5.2.1 ⚠ 路径正则的**已知边界**（不能只靠正则）
+
+`source.path` 与 `frontend.entry` 共用一个防逃逸正则：
+
+```
+^(?!/)(?!.*(^|/)\.\.(/|$)).+$
+```
+
+它挡住了全部字面 `..` 形态（**含尾随 `..`**——早期版本漏了这一种，由 `probe20.ts` 抓出：`..` 与 `ui/..` 曾能通过）。
+
+**但它挡不住这些**（`probe20.ts` 明确记录为 known limitation）：
+
+| 形态 | 例 |
+|---|---|
+| 百分号编码 | `ui/%2e%2e/x.js`、`..%2foutside.js` |
+| Windows 盘符 | `C:/abs.js` |
+| UNC 路径 | `\\server\share\x.js` |
+
+⇒ **正则只是第一道**。真正落实containment 的是**解析之后**再检查结果是否仍在插件目录内（Claude Code 同款：报 `path escapes plugin directory`）。
+**不要把 schema 校验当成 containment 保证。**
 
 ### 5.3 子插件：**manifest 无任何相关字段**（probe19）
 
@@ -525,31 +606,50 @@ koishi 能用它，是因为**它的 manifest 在 npm 上**（有发布记录、
 | # | 缺口 | 阻塞 | 状态 |
 |---|---|---|---|
 | **1** | **`base-state.json` 的 schema** | ADR §5.2-2 明确指派给 M2-2，但**本文未吸收** | **需拍**：本文吸收，或明确退回 #23 |
-| **2** | **`permissions` 的键集与粒度** | 能力清单**散在三个文件**（`capability.ts` 的 5 处 `buildNode` + `tray.ts` + `shortcut.ts`） | **已定粒度**（下述），**键集待导出** |
+| **2** | `permissions` 键集与运行时对齐的**契约测试** | schema 枚举 ≠ 运行时实际键时会静默漂移 | 待做（§9.1） |
 | **3** | **`.vrcxk` 目录名** | 已拍（§5.1），但**需与将来可能放的东西一起复核** | 暂定 |
-| **4** | **`type` 枚举最终值** | 已给 6 值（§2.4），**回填成本随时间涨** | 待确认 |
-| **5** | **索引条目 schema 的具体形状** | 本文只定**语义**（§2.1），未写 JSON Schema | #21 落地时写 |
-| **6** | **多源的启用时机** | 本文定**模型**（§2.3），但 v0 是否开放多源未定 | 需拍 |
-| **7** | **本地缓存策略**（作者删库后仍可用） | 与 ADR §5.2「base 保留最近 N 个」是**同一个决定** | 需拍 |
+| **4** | **索引条目 schema 的落点** | ✅ **已写**：`contracts/plugin-index/v1/` | ✅ 完成 |
+| **5** | **多源的启用时机** | 本文定**模型**（§2.3），但 v0 是否开放多源未定 | 需拍 |
+| **6** | **本地缓存策略**（作者删库后仍可用） | 与 ADR §5.2「base 保留最近 N 个」是**同一个决定** | 需拍 |
+| **7** | **取件实现** | 本文定**规则**（§4），`isomorphic-git` 已验证（probe14）但**生产代码零引用** | #21 落地时做 |
+| **8** | **manifest 注册表接入装载路径** | 注册表**已实现且测试通过**，但**尚未接进 `host/src/index.ts`**（含 D2 的 `inject` 派生） | #18 实现尾段 |
 
-### 9.1 `permissions` 粒度（用户拍板）
+### 9.2 已交付（对照 #18 验收）
+
+| #18 验收项 | 状态 |
+|---|---|
+| 契约测试通过（schema ↔ TS 镜像双向一致） | ✅ `host/tests/plugin-manifest-contract.test.ts`（**24 项**，含对抗性用例） |
+| 一份真实 manifest 往返成功 | ✅ `readFrom` 从临时目录读回并校验 |
+| 注册表可经 `entry.id` 查到该插件的声明 | ✅ `PluginManifestRegistry`（按**后缀**键，probe11） |
+| `contracts/plugin-manifest/v1/*.schema.json` | ✅ |
+| host 侧 TS 镜像 | ✅ json2ts 生成（D3 决定：统一到 tray 那套） |
+| 宿主按 `entry.id` 的 manifest 注册表 | ✅（含 `injectFor` 派生） |
+
+### 9.1 `permissions` 粒度与键集（用户拍板 + schema 已定）
 
 **原则：提倡最小权限，但不强制。允许列方法，也允许直接申请一个域。**
 
 ```jsonc
 "permissions": {
-  "shell": ["window", "path"],     // shell 只能按【子域】bool 判断放行
-  "notify": true,                  // 领域服务允许粗粒度（一个域）
+  "shell": ["window", "path"],   // shell 只能按【子域】放行
+  "notify": true,                // 领域服务：true = 申请整域
   "dialog": true
 }
 ```
 
-- **`shell` 是万能逃逸口**：只能按子域放行，做不到方法级细粒度（**技术限制，非设计选择**）
+**键集（schema 已固化为封闭枚举）**：
+
+| 键 | 允许的值 |
+|---|---|
+| `shell` | `boolean` 或**子域数组**（`notify` / `openUrl` / `openPath` / `reveal` / `dialog` / `window` / `shortcut` / `app` / `path` / `devWatchEvent` / `tray`，与 `capability.ts` 的 `RAW_SHELL` 一一对应） |
+| `notify` / `dialog` / `window` / `os` / `tray` / `shortcut` | `boolean` 或**方法名数组** |
+
+- **`shell` 是万能逃逸口**：只能按子域放行，**做不到方法级细粒度**（技术限制，非设计选择）
 - **其余服务尽量细**：允许列方法，也允许直接申请整个域
 - **不强制最小权限**：作者可粗可细
 
-**⚠ 实现注意**：schema 若用 `enum` 枚举能力，就是**第三次复制这份清单**（首次 `capability.ts`，第二次 `host/tests/capability.test.ts` 的 key-completeness 测试）。
-⇒ **建议**：从运行时**导出** `CAPABILITIES` 常量（`capability.ts` + `tray.ts` + `shortcut.ts` 共同引用），并加**契约测试**钉住 schema/类型与**实际 provide 的键**对齐。
+**⚠ 实现注意（防止第三次复制）**：能力清单目前散在三处（`capability.ts` 的 5 处 `buildNode`、`tray.ts`、`shortcut.ts`）。
+⇒ schema 里的枚举是**第二处**。必须加**契约测试**钉住 schema 与**运行时实际 provide 的键**对齐（照 `host/tests/capability.test.ts` 已有的 key-completeness 打法），否则新能力加进运行时而 schema 没跟上 ⇒ **插件无法声明它**。
 
 ---
 
@@ -566,8 +666,9 @@ koishi 能用它，是因为**它的 manifest 在 npm 上**（有发布记录、
 | **`_` 不是合法 semver 预发布字符** | `probe17.ts` | semver.org 正则；预发布默认被范围排除 |
 | **`dlopen` 是进程内的** | `probe18.ts` | `nativePid === jsPid === 8432` |
 | **`ctx.plugin()` 子插件继承外层 entry** | `probe19.ts` | 三个子形态 `entryId` 全同父 |
+| **路径防逃逸正则的边界** | `probe20.ts` | 尾随 `..` 曾漏过（`..`/`ui/..`）；百分号编码/盘符/UNC 正则抓不到 |
 
-**复跑**：`bun run docs/probes/probe11.ts`（编号 11–19 同理；probe14/15/16 需网络，可经 `HTTPS_PROXY`）。
+**复跑**：`bun run docs/probes/probe11.ts`（编号 11–20 同理；probe14/15/16 需网络，可经 `HTTPS_PROXY`；probe20 无需网络）。
 
 ---
 

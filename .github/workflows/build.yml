@@ -92,6 +92,13 @@ jobs:
       - name: Frontend + host typecheck
         run: bun run typecheck
 
+      # 契约漂移闸门（M2-2 决定 D3）：生成的 TS 镜像与 schema 必须同步。
+      # 在此之前仓库里【没有任何】机制能发现两者不一致——直接后果已经发生：
+      # host/src/contracts/hostLifecycle.ts 头部写着 "Generated ... Do not
+      # hand-edit"，却从来没有脚本或 CI 步骤生成过它。
+      - name: Contract drift gate (schemas <-> generated TS mirrors)
+        run: bun run check:contracts
+
       - name: Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 

@@ -87,6 +87,12 @@ VRCX-K/
 - **Windows junction 下 `import.meta.url` 会 realpath**：请求 `.../current/x.ts`，模块内 URL 是 `.../v1/x.ts`。⇒ 在插件路径中间插指针会引入**第二路径键空间**，而本仓库已为此维护两套机制（`watch-path.ts` 的 `canonicalExistingPath`、`dev-reload.ts` 的双键空间匹配）。junction 本身**无需管理员**。
 - **探针开发自身的坑**：`fn.name = "x"` 是**只读属性**（TypeError）；`ctx.plugin()` **是异步的，不 await 则插件停在 `LOADING` 且输出全空不报错**；PowerShell 里 `node -e "...&..."` 的 `&` 是保留字，**复杂脚本写成 `.cjs` 文件**再跑；bun 的 stderr 会被 PowerShell 包成 `NativeCommandError` 而掩盖真实报错。
 - **issue 编号会被 PR 占用**：不能由 `max(issues)` 推断下一个编号（本轮预算 #14、实际 M2 拿到 **#16**，因 #14/#15 是同日新 PR）。建 issue 前先查 `state=all` 的完整列表。
+- **`[].every()` 是 `true`**：轮询「所有行都已结算」时若忘了 `rows.length > 0`，**第一轮就 break 且不报错**——表现为"什么都没收集到"而非失败。已在 `probe12.ts` 咬过一次，写收集循环时必查。
+- **`isomorphic-git` 的 `listServerRefs` 必须 pin `protocolVersion: 1`**：默认 v2 下 GitHub 正常、**GitLab 报 422**，所以"跨主机可用"在默认值下是**假的**（probe14）。
+- **`isomorphic-git` 的 `listFiles({ oid })` 静默返回 `[]`**：它要的是 `ref`，而 `readBlob` 要的是 `oid`。传错**不报错**，只是结果为空，会让人误以为仓库是空的（probe15）。
+- **`codeload` 不接受 `.git` 后缀**（404），而 `source.url` 强制以 `.git` 结尾 ⇒ 任何从 url 派生的地址必须先剥后缀，收敛到唯一一处规范化函数（probe16）。
+- **`_` 不是合法 semver 预发布字符**：字符集是 `[0-9A-Za-z-]`。若允许下划线，任何 semver 库都用不了，必须自写比较器（probe17）。
+- **路径正则挡不住全部逃逸**：百分号编码（`%2e%2e`）、Windows 盘符（`C:/`）、UNC 正则都抓不到；`..` 的**尾随**形态也曾漏过。containment 必须**解析后再检查**，schema 校验不是保证（probe20）。
 
 ## 状态
 - ✅ 架构方案定稿（docs/，5 轮评审通过）

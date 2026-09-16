@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vrcx-k.dev/contracts/plugin-manifest/v1/plugin-manifest.schema.json",
+  "title": "VRCX-K Plugin Manifest",
+  "description": "Author-owned plugin declaration, read from <plugin-root>/.vrcxk/manifest.json. AUTHORITATIVE for version, dependencies, services and permissions. The marketplace index carries only a display cache of name/description; everything else is read from this file. See docs/plugin-source-and-index-design.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "author", "name"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor-only pointer for autocomplete/validation. IGNORED at load time (Claude Code precedent)."
+    },
+    "id": {
+      "$ref": "#/$defs/PluginId",
+      "description": "Stable plugin identifier. MUST match the id of the marketplace index entry that references this plugin."
+    },
+    "version": {
+      "$ref": "#/$defs/SemVer",
+      "description": "Authoritative semantic version. MUST equal the version segment of the release tag that points at this commit (tag `v1.2.0` or `{id}--v1.2.0`). Checked when installing that ONE version (O(1)), never per-tag."
+    },
+    "author": {
+      "$ref": "#/$defs/Author",
+      "description": "Required. Part of the identity tuple used to DETECT a change of owner (id + version + author). It is a change detector, not an authenticator: it is self-declared, and differences are reported to the user without blocking (design P2)."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Display name. Authoritative; the index copy is only a cache."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "repository": {
+      "$ref": "#/$defs/HttpsUrl",
+      "description": "Source repository. Doubles as an identity signal: if it changes for the same id, the user is told."
+    },
+    "homepage": { "$ref": "#/$defs/HttpsUrl" },
+    "license": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "SPDX identifier, e.g. MIT, Apache-2.0."
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/Platform" },
+      "description": "Host platforms on which this plugin's NATIVE part can load. Omit for pure JS/TS (the default, and by far the common case). Values are derived from Node semantics `process.platform + '-' + process.arch` — NOT from a Rust target triple and NOT from a bun compile target. This says nothing about clients: the phone runs no host, hence no plugin (docs/mobile-feasibility.md)."
+    },
+    "restartClass": {
+      "$ref": "#/$defs/RestartClass",
+      "description": "How a CHANGE to this plugin takes effect. Not a category label: without it the host would restart the whole sidecar even for a UI-only plugin. The two non-default values impose DUTIES on the author (see each description)."
+    },
+    "dependencies": {
+      "$ref": "#/$defs/Dependencies",
+      "description": "Plugin dependencies, npm model: a map of plugin id -> version range. NEVER names a source — the author cannot know which sources the user has configured. Sources resolve at install time from the user's current priority list."
+    },
+    "services": {
+      "$ref": "#/$defs/Services",
+      "description": "Service readiness and provision. `required` is a READINESS GATE and is the authority from which the host derives the cordis Entry `inject` (single direction, no drift)."
+    },
+    "permissions": {
+      "$ref": "#/$defs/Permissions",
+      "description": "Capability declaration for transparency: shown at install time and used for over-privilege WARNINGS. Never enforced (design P2; module-level interception is explicitly not promised)."
+    },
+    "frontend": {
+      "$ref": "#/$defs/Frontend",
+      "description": "Frontend extension point (M3). Omit for headless plugins."
+    }
+  },
+  "$defs": {
+    "PluginId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "SemVer": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "semver.org, verbatim regex. Prerelease identifiers admit only [0-9A-Za-z-]: an underscore is NOT legal semver, which is why the tag suffix charset excludes it (giving it up would mean writing our own comparator). Note prereleases sort BEFORE the release (1.2.0-rc < 1.2.0) and are excluded from ranges unless explicitly opted in. Our convention additionally caps the prerelease at 24 characters — enforced by the validator, not by this pattern, since it is a house rule rather than a spec rule."
+    },
+    "Author": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "HttpsUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^https://"
+    },
+    "VersionRange": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "A semver range, e.g. *, ^1.2, ~2.1.0, >=1.4 <2, =2.1.0. Prereleases are excluded unless the range opts in (^2.0.0-0)."
+    },
+    "Platform": {
+      "type": "string",
+      "enum": [
+        "win32-x64",
+        "win32-arm64",
+        "linux-x64",
+        "linux-arm64",
+        "darwin-x64",
+        "darwin-arm64"
+      ]
+    },
+    "RestartClass": {
+      "type": "string",
+      "enum": ["restartable", "frontend", "background"],
+      "description": "restartable (default): sidecar restart + auto-reconnect; no author duty. frontend: entry broadcast + WebView reload, no backend restart; the author must make frontend assets independently reloadable. background: plugin-level refresh on config change and rolling replacement on upgrade; the author MUST implement a refresh contract plus reconnect and state recovery. v0 accepts ONLY `restartable` and rejects the others (an error, never a silent downgrade); M3 opens `frontend`, M4 opens `background`. The schema already carries the full vocabulary so it need not change — only the accepted subset widens."
+    },
+    "Dependencies": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "$ref": "#/$defs/PluginId" },
+      "additionalProperties": { "$ref": "#/$defs/VersionRange" }
+    },
+    "ServiceName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z][a-zA-Z0-9]*$",
+      "description": "Service identity: a context key (`notify`) or a provisioned service name (`friendPresence`)."
+    },
+    "ServiceList": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/ServiceName" }
+    },
+    "Services": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "required": {
+          "$ref": "#/$defs/ServiceList",
+          "description": "Readiness gate: the plugin is not started until these are provided. The host derives the cordis Entry `inject` from this list."
+        },
+        "optional": {
+          "$ref": "#/$defs/ServiceList",
+          "description": "Used when present; the plugin degrades gracefully when absent."
+        },
+        "implements": {
+          "$ref": "#/$defs/ServiceList",
+          "description": "Services this plugin PROVIDES. Currently display-only metadata (no dependency resolution consumes it yet); retained because removing it later would be a schema change. Declaring it is what makes a 'library' plugin visible as such."
+        }
+      }
+    },
+    "PermissionGrant": {
+      "oneOf": [
+        {
+          "type": "boolean",
+          "description": "true = request the whole domain (coarse grant, permitted)."
+        },
+        {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "description": "A narrow grant: specific methods, or (for shell) sub-domains."
+        }
+      ]
+    },
+    "ShellSubdomain": {
+      "type": "string",
+      "description": "ctx.shell is the raw escape hatch and can only be granted at SUB-DOMAIN granularity — method-level narrowing is not implementable for it. Keys mirror RAW_SHELL in host/src/capability.ts.",
+      "enum": [
+        "notify",
+        "openUrl",
+        "openPath",
+        "reveal",
+        "dialog",
+        "window",
+        "shortcut",
+        "app",
+        "path",
+        "devWatchEvent",
+        "tray"
+      ]
+    },
+    "Permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Minimal privilege is ENCOURAGED, not enforced: a plugin may request a whole domain or list narrow entries. The key set is the runtime capability inventory; a contract test pins it to what the host actually provides so the two cannot drift.",
+      "properties": {
+        "shell": {
+          "oneOf": [
+            { "type": "boolean" },
+            {
+              "type": "array",
+              "maxItems": 11,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/ShellSubdomain" }
+            }
+          ],
+          "description": "Raw shell surface. Sub-domain granularity only."
+        },
+        "notify": { "$ref": "#/$defs/PermissionGrant" },
+        "dialog": { "$ref": "#/$defs/PermissionGrant" },
+        "window": { "$ref": "#/$defs/PermissionGrant" },
+        "os": { "$ref": "#/$defs/PermissionGrant" },
+        "tray": { "$ref": "#/$defs/PermissionGrant" },
+        "shortcut": { "$ref": "#/$defs/PermissionGrant" }
+      }
+    },
+    "Frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry"],
+      "properties": {
+        "entry": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$",
+          "description": "Path to the frontend entry, RELATIVE to the plugin root. Must not escape it: a `..` segment anywhere (including a trailing one, e.g. `ui/..`) is rejected, as is a leading `/`. Note a path regex cannot catch percent-encoding or Windows drive/UNC forms — the loader resolves the path and re-checks containment, which is what actually enforces this."
+        },
+        "slots": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "description": "Extension points this plugin registers into. The vocabulary lands with the M3 frontend contract."
+        }
+      }
+    }
+  }
+}
