@@ -491,6 +491,17 @@ nested(父)      entryId = "65b4ad00:nested"
 
 **若将来真需要注释**：严格 JSON 是 JSONC 的**子集** ⇒ **先严格后放宽是安全的方向**（反过来不行）。
 
+**⚠ 于是"给字段加说明"只有两条合法路径**（都实测过）：
+
+| 手段 | 说明 |
+|---|---|
+| ✅ **`$schema` 字段** | manifest 允许一个 `$schema`，指向契约的 `$id`。**仅供编辑器补全/校验，加载时忽略**（Claude Code 同款）。字段解释由 schema 的 `description` 提供 |
+| ✅ **文档逐字段解释** | 放在示例插件旁边的 `README.md` 里 |
+
+**❌ 不要用约定键绕过**：实测 `{"//": "注释"}` 与 `{"_comment": "x"}` **都会被 schema 拒绝**——契约是 `additionalProperties: false`，约定键就是非法字段。这看起来像"给 JSON 加注释的土办法"，但在这里它是**错误**。
+
+> 实测：`validatePluginManifest({...base, "$schema": "…"})` → `true`；同形下 `{"//": …}` 与 `{"_comment": …}` → `false`。
+
 ### 5.6 `restartClass`：变更如何生效（用户强调其重要性）
 
 | 值 | 宿主动作 | **作者义务（SDK 硬约束）** |
@@ -601,6 +612,49 @@ koishi 能用它，是因为**它的 manifest 在 npm 上**（有发布记录、
 
 ---
 
+## 7.5 TS 镜像与漂移闸门（决定 D3）
+
+**问题**：同一个「schema → TS」动作在仓库里曾有**两种做法**，且**都不完整**：
+
+| 契约 | TS 镜像 | 生成方式 | 校验 |
+|---|---|---|---|
+| `tray-menu` | `tray-contract.generated.ts` | ✅ json2ts（有脚本） | ✅ AJV 编译 |
+| `host-lifecycle` | `contracts/hostLifecycle.ts` | ❌ 无生成脚本 | ❌ 手写 guard |
+
+而**仓库里没有任何机制**能发现"镜像与 schema 不一致"——代价**已经发生**：`hostLifecycle.ts` 头部写着「Generated … Do not hand-edit」，却从来没有脚本或 CI 步骤生成过它。
+
+**决定**：**统一到 json2ts 生成 + AJV 校验**（tray 那套，因为它是**真的**在生成），并加**漂移闸门**。
+
+### 7.5.1 闸门（已落地）
+
+```
+scripts/check-contract-drift.ts
+  重新生成每个镜像 → 与仓库内的版本比对 → 有差异即失败
+
+接入：
+  · bun run check:contracts（已并入 bun run verify）
+  · .github/workflows/build.yml 的 desktop job（三平台）
+```
+
+**它必须真的能抓到漂移**——已双向验证：干净树通过；故意改坏一个枚举值后报 `DRIFT` 并给修复命令；还原后再次通过。
+
+**行尾归一化是有意的**：生成物不该依赖平台，但工作区会（Windows `core.autocrlf` 把 checkout 改写成 CRLF，而生成器输出 LF）。逐字节比对会把 checkout 副作用误报成漂移，那样的闸门噪音大到会被忽略——**比没有更糟**。
+
+### 7.5.2 为什么 `hostLifecycle.ts` **不在**闸门里
+
+它不是"标签说谎"，而是**两类内容混居**：
+
+```
+~31 行  生成得出（类型）
+~30 行  生成不出（isHostSnapshot / isHostExitSummary 手写运行时 guard）
+```
+
+⇒ 逐字节比对**永远会误报**。它在文件头与闸门里**双向写明了原因**，以免被当成遗漏。
+
+**它的 schema↔类型一致性**由 `host/tests/host-lifecycle-contract.test.ts` 在运行时读 schema 钉住。**若将来拆成「生成模块 + guard 模块」两个文件，应把它加进闸门。**
+
+---
+
 ## 9. 未决 / 待办（诚实清点）
 
 | # | 缺口 | 阻塞 | 状态 |
@@ -613,6 +667,8 @@ koishi 能用它，是因为**它的 manifest 在 npm 上**（有发布记录、
 | **6** | **本地缓存策略**（作者删库后仍可用） | 与 ADR §5.2「base 保留最近 N 个」是**同一个决定** | 需拍 |
 | **7** | **取件实现** | 本文定**规则**（§4），`isomorphic-git` 已验证（probe14）但**生产代码零引用** | #21 落地时做 |
 | **8** | **manifest 注册表接入装载路径** | 注册表**已实现且测试通过**，但**尚未接进 `host/src/index.ts`**（含 D2 的 `inject` 派生） | #18 实现尾段 |
+
+> **已关闭**（本轮补）：TS 镜像范式与漂移闸门 → §7.5（已实现 + CI 接入）；`$schema` 与"禁 `//` 约定键" → §5.5；索引条目 schema → `contracts/plugin-index/v1/`。
 
 ### 9.2 已交付（对照 #18 验收）
 

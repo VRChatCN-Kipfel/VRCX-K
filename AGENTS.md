@@ -11,7 +11,7 @@ VRCX-K/
 │   └── tauri.conf.json   窗口/打包配置
 ├── src/           ← 脸 · React UI (Vite 19)
 ├── host/          ← 大脑 · Cordis (bun) 宿主（业务/插件/服务）
-├── docs/          ← architecture-proposal.md (v4.2) + ROADMAP.md（概览）+ poc-m0.md（M0 PoC 报告）+ adr-plugin-layout.md（目录布局 ADR）+ plugin-source-and-index-design.md（插件源/索引/manifest 契约）+ cordis-runtime-findings.md（Cordis 运行时实测）+ probes/（可复跑探针）+ vrcxk-arch-final.html（架构图）
+├── docs/          ← architecture-proposal.md (v4.2) + ROADMAP.md（概览）+ poc-m0.md（M0 PoC 报告）+ adr-plugin-layout.md（目录布局 ADR）+ plugin-source-and-index-design.md（插件源/索引/manifest 契约）+ cordis-runtime-findings.md（Cordis 运行时实测）+ kkrpc-interop-findings.md（kkrpc Rust↔npm 协议互通，M1-4 依据）+ probes/（可复跑探针）+ vrcxk-arch-final.html（架构图）
 ├── Cargo.toml     ← cargo workspace 根（成员 src-tauri）
 ├── package.json   ← bun workspace 根（含 host）
 └── runtime-research.md / ecosystem-research.md（支撑调研）
@@ -94,6 +94,14 @@ VRCX-K/
 - **`_` 不是合法 semver 预发布字符**：字符集是 `[0-9A-Za-z-]`。若允许下划线，任何 semver 库都用不了，必须自写比较器（probe17）。
 - **路径正则挡不住全部逃逸**：百分号编码（`%2e%2e`）、Windows 盘符（`C:/`）、UNC 正则都抓不到；`..` 的**尾随**形态也曾漏过。containment 必须**解析后再检查**，schema 校验不是保证（probe20）。
 
+## 已知坑（测试基建，2026-09 实测）
+
+- **`host/tests/dev-watch-wiring.test.ts` 的 2 个用例是「负载敏感」的偶发失败**：
+  - 症状：全量 `bun test` 时 `dev watch hot-refreshes cordis.yml` 与 `a missing cordis.yml fails fast` 超时失败；**单独跑通过**。
+  - 根因：第一个用例内部有 **8 次 × 3s 的重试窗口**，机器同时在跑其余 23 个测试文件时可能不够（实测通过时耗时 3.4–11.2 s，失败时超时）。
+  - **排查要点（省得重查）**：先用 `git stash --include-untracked` 二分——若 stash 后**仍失败**，就不是你的改动造成的。本次即如此。
+  - **不要**为此改宽超时或删断言：它们是真实回归（Windows 路径 / 快速失败），只是预算偏紧。真要修，应当给这两个用例**更多时间预算**或**串行化**，而不是降低断言强度。
+
 ## 状态
 - ✅ 架构方案定稿（docs/，5 轮评审通过）
 - ✅ 项目骨架（三层结构 + cargo/bun workspace）
@@ -112,8 +120,8 @@ VRCX-K/
   - **⚠️ 易误读澄清（2026-09-11 取证）**：`tauri-winrt-notification` **不是**官方插件的替代方案，而是官方插件在 **Windows 的底层实现**——`tauri-plugin-notification 2.4` → `notify-rust 4.18` → `tauri-winrt-notification 0.7.3`（Cargo.lock 已证）。外壳注册与全部调用都走官方插件（`lib.rs` `.plugin(notification::init())`、`notify.rs::notify_simple`、`shell_sys.rs` 的 `shell.notify`）；`notify.rs::notify_windows_deep` 只是 `Ok(())` 空壳（`TODO(F3)`），**全仓库对 winrt crate 零 `use`**。
   - **F3 深度为何必须下沉**：桌面版官方插件 `desktop.rs::show()` **只转发 title/body/icon/sound 四个字段**，其余 builder 字段静默丢弃，且在 spawn 里丢掉 `NotificationHandle` → 桌面**结构上做不到**按钮/hero/进度条/点击回调。这些只有直连 winrt（`hero`/`add_button`/`progress`/`scenario`/`on_activated`）才有 → F3 真用到时再编码。
   - **版本策略（2026-09-11 用户决定）**：显式依赖**保持高版本 `0.8`**（开发期尽量往高版本靠），明知它与传递进来的 `0.7.3` 并存、多拉一棵 `windows 0.62` 树；**这是有意选择，不是遗漏**（若将来要减依赖，改成 `"0.7"` 可与其统一，能力不减）。
-- **D1 探针结论（M1-4 关键，见 .temp/D1-findings.md）**：crates.io `kkrpc` Rust crate 0.6.1 是 **JSON-mode 协议**（`{method,args,type,version:"json"}`），与 npm kkrpc 2.1.0 的 **compact 协议**（`{t:"q",op,p,a}`）**不互通**（实测 Rust Client 全 HANG；手写 compact 帧全通）。GitHub main 的 interop/rust 已改 compact 但未发版 → **M1-4 自研 ~100 行 compact 端点**（官方 skill 算法），不依赖 crates.io crate，等官方发版后可换
-- **E′ 探针（M1-4 桥形态定稿，.temp/d1probe/src/bin/e2.rs 全绿）**：Rust 不自研完整 Client，做"轻量喊话"——读循环分发 `q`(服务 host)+`cb`(回调表)，忽略 `r`；**Rust→host 即时信号=裸写 compact 命令帧**（host 事件驱动读循环立即执行，零轮询）；要返回值=带 kkrpc 回调参数→host `t:cb` 回推（实测 612µs）；回调值须 unwrap value-envelope（官方 interop skill 规则）
+- **D1 探针结论（M1-4 关键，见 [`docs/kkrpc-interop-findings.md`](docs/kkrpc-interop-findings.md)）**：crates.io `kkrpc` Rust crate 0.6.1 是 **JSON-mode 协议**（`{method,args,type,version:"json"}`），与 npm kkrpc 2.1.0 的 **compact 协议**（`{t:"q",op,p,a}`）**不互通**（实测 Rust Client 全 HANG；手写 compact 帧全通）。GitHub main 的 interop/rust 已改 compact 但未发版 → **M1-4 自研 ~100 行 compact 端点**（官方 skill 算法），不依赖 crates.io crate，等官方发版后可换
+- **E′ 探针（M1-4 桥形态定稿，见 [`docs/kkrpc-interop-findings.md`](docs/kkrpc-interop-findings.md) §5）**：Rust 不自研完整 Client，做"轻量喊话"——读循环分发 `q`(服务 host)+`cb`(回调表)，忽略 `r`；**Rust→host 即时信号=裸写 compact 命令帧**（host 事件驱动读循环立即执行，零轮询）；要返回值=带 kkrpc 回调参数→host `t:cb` 回推（实测 612µs）；回调值须 unwrap value-envelope（官方 interop skill 规则）。**原始探针 crate 已删除**，复现方法见该文档 §7
 - 锁定版本组合：**bun 1.4.2 + cordis 4.0.0-rc.9 + loader 1.0.0-rc.6 + include 1.0.5 + kkrpc 2.1.0**（源态与 compile 态均已实证）
 - 🔧 **M1 修复轮（2026-09，未提交；针对 `b60ebfe4` 复审）**：
   - **构建自愈**：`src-tauri/build.rs` 发现 `src-tauri/binaries/host-<triple>[.exe]` 缺失时自动执行 `bun run scripts/build-host.ts --target-triple <triple>`（Windows 下先直连 `bun`，失败再经 `cmd /C bun` 兼容 npm shim；可用 `VRCXK_BUN` 指定解释器）。**新克隆直接 `cargo check/test/tauri dev/build` 均可**，不再依赖手工先跑 `build:host`
