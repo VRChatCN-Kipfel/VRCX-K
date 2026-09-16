@@ -104,6 +104,7 @@
 - 架构方案：[`architecture-proposal.md`](architecture-proposal.md)（v4.2）
 - M0 PoC 报告：[`poc-m0.md`](poc-m0.md)
 - 目录布局 ADR：[`adr-plugin-layout.md`](adr-plugin-layout.md)（M1 packaged 收口 × M2-7）
+- 插件源/索引/manifest 设计：[`plugin-source-and-index-design.md`](plugin-source-and-index-design.md)（M2-2 × M2-5 共同底座；不托管红线）
 - Cordis 运行时实测：[`cordis-runtime-findings.md`](cordis-runtime-findings.md)（能力接口/session/manifest 的实证约束）
 - 移动端方向：[`mobile-feasibility.md`](mobile-feasibility.md)（第三端；脑不搬过去）
 - 会话与设备管理需求：[`host-sessions.md`](host-sessions.md)（#13，未排期）

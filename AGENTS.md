@@ -11,7 +11,7 @@ VRCX-K/
 │   └── tauri.conf.json   窗口/打包配置
 ├── src/           ← 脸 · React UI (Vite 19)
 ├── host/          ← 大脑 · Cordis (bun) 宿主（业务/插件/服务）
-├── docs/          ← architecture-proposal.md (v4.2) + ROADMAP.md（概览）+ poc-m0.md（M0 PoC 报告）+ adr-plugin-layout.md（目录布局 ADR）+ cordis-runtime-findings.md（Cordis 运行时实测）+ probes/（可复跑探针）+ vrcxk-arch-final.html（架构图）
+├── docs/          ← architecture-proposal.md (v4.2) + ROADMAP.md（概览）+ poc-m0.md（M0 PoC 报告）+ adr-plugin-layout.md（目录布局 ADR）+ plugin-source-and-index-design.md（插件源/索引/manifest 契约）+ cordis-runtime-findings.md（Cordis 运行时实测）+ probes/（可复跑探针）+ vrcxk-arch-final.html（架构图）
 ├── Cargo.toml     ← cargo workspace 根（成员 src-tauri）
 ├── package.json   ← bun workspace 根（含 host）
 └── runtime-research.md / ecosystem-research.md（支撑调研）
