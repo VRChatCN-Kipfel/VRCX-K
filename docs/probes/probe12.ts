@@ -17,6 +17,11 @@
 // So layer 1 alone is NOT the answer to "is refusing safe?" — the escalation in
 // layer 2 is what actually kills the host, and it is our code, not cordis.
 //
+// DECIDED SEMANTICS: every plugin is treated the same — base packages, their
+// sub-packages and plugins get NO special treatment. A failure is always
+// contained and must be attributable, so that a conflict between our plugin and
+// an external one never yields an unstartable app with no way to diagnose it.
+//
 // RUN: bun run docs/probes/probe12.ts
 //
 // It boots a cordis.yml with THREE entries —
