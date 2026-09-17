@@ -48,10 +48,18 @@
     "platforms": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 6,
+      "maxItems": 3,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/Platform" },
-      "description": "Host platforms on which this plugin's NATIVE part can load. Omit for pure JS/TS (the default, and by far the common case). Values are derived from Node semantics `process.platform + '-' + process.arch` — NOT from a Rust target triple and NOT from a bun compile target. This says nothing about clients: the phone runs no host, hence no plugin (docs/mobile-feasibility.md)."
+      "description": "Operating systems on which this plugin's NATIVE part can load. Omit for pure JS/TS (the default, and the common case) — a pure JS plugin is platform-independent. Pair with `arch` when the plugin bundles native code: the two fields together are what make an x64-only library correctly REJECTED on arm64 rather than installed and then failing at load. This says nothing about clients: the phone runs no host, hence no plugin (docs/mobile-feasibility.md)."
+    },
+    "arch": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/Arch" },
+      "description": "CPU architectures the plugin's native part supports. Only meaningful alongside `platforms`; omitting it means every architecture of those platforms. Required in practice for any plugin shipping a native library, because architecture is exactly the axis a single `platforms` value cannot express."
     },
     "restartClass": {
       "$ref": "#/$defs/RestartClass",
@@ -106,14 +114,13 @@
     },
     "Platform": {
       "type": "string",
-      "enum": [
-        "win32-x64",
-        "win32-arm64",
-        "linux-x64",
-        "linux-arm64",
-        "darwin-x64",
-        "darwin-arm64"
-      ]
+      "enum": ["windows", "linux", "macos"],
+      "description": "Operating system only, and deliberately coarse: the ARCHITECTURE is a separate axis (`arch`). A single `windows` value cannot distinguish x64 from arm64, so an x64-only native library would be judged compatible on arm64 — the two fields together express what six combined values would, without a value that mixes the axes."
+    },
+    "Arch": {
+      "type": "string",
+      "enum": ["x64", "arm64"],
+      "description": "CPU architecture. These are OUR names rather than `process.arch` values, so the schema does not inherit a Node rename; the host maps them when checking."
     },
     "RestartClass": {
       "type": "string",

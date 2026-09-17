@@ -1,0 +1,11 @@
+{
+  "name": "@vrcx-k/base-heartbeat",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "VRCX-K base plugin — the host's readiness probe. Kept as the smallest real base package so the packaging shape has a working example.",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "bun test"
+  }
+}

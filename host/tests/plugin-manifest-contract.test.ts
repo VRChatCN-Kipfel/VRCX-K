@@ -31,7 +31,8 @@ const fullManifest: VRCXKPluginManifest = {
   repository: "https://github.com/me/vrcxk-plugins",
   homepage: "https://github.com/me/vrcxk-plugins#readme",
   license: "MIT",
-  platforms: ["win32-x64", "linux-x64"],
+  platforms: ["windows", "linux"],
+  arch: ["x64", "arm64"],
   restartClass: "restartable",
   dependencies: { "audit-logger": "*", "secrets-vault": "~2.1.0" },
   services: { required: ["notify"], optional: ["dialog"], implements: ["friendPresence"] },
@@ -86,12 +87,32 @@ describe("plugin manifest contract (schema <-> TS mirror)", () => {
     expect(validatePluginManifest({ ...minimalManifest, id: "a-b-9" })).toBe(true)
   })
 
-  test("platforms is a closed enum in Node semantics, not Rust triples", () => {
-    expect(validatePluginManifest({ ...minimalManifest, platforms: ["win32-x64"] })).toBe(true)
-    // These spellings LOOK plausible and are exactly the trap: a bun compile
-    // target (`windows-x64`) or a Rust triple would never match process.platform.
-    for (const wrong of ["windows-x64", "x86_64-pc-windows-msvc", "win64", "macos-arm64"]) {
+  test("platforms is a closed enum of THREE coarse operating systems", () => {
+    for (const platform of ["windows", "linux", "macos"]) {
+      expect(validatePluginManifest({ ...minimalManifest, platforms: [platform] })).toBe(true)
+    }
+    // The trap this two-axis shape exists to close: a combined value like
+    // `windows-x64` looks natural, mixes the axes, and cannot distinguish x64
+    // from arm64. Neither a bun compile target nor a Rust triple is legal.
+    for (const wrong of [
+      "win32-x64",
+      "windows-x64",
+      "x86_64-pc-windows-msvc",
+      "darwin",
+      "macos-arm64",
+      "win32",
+    ]) {
       expect(validatePluginManifest({ ...minimalManifest, platforms: [wrong] })).toBe(false)
+    }
+  })
+
+  test("arch is a separate axis", () => {
+    expect(validatePluginManifest({ ...minimalManifest, arch: ["x64"] })).toBe(true)
+    expect(
+      validatePluginManifest({ ...minimalManifest, platforms: ["windows", "linux"], arch: ["x64", "arm64"] }),
+    ).toBe(true)
+    for (const wrong of ["ia32", "arm", "x86_64", "AMD64", "arm64-v8a"]) {
+      expect(validatePluginManifest({ ...minimalManifest, arch: [wrong] })).toBe(false)
     }
   })
 

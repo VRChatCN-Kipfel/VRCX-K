@@ -1,0 +1,13 @@
+{
+  "$schema": "https://vrcx-k.dev/contracts/plugin-manifest/v1/plugin-manifest.schema.json",
+  "id": "base-heartbeat",
+  "version": "0.0.1",
+  "author": "VRCX-K",
+  "name": "Heartbeat",
+  "description": "Provides the readiness probe the host asserts on startup.",
+  "license": "MIT",
+  "restartClass": "restartable",
+  "services": {
+    "implements": ["heartbeat"]
+  }
+}

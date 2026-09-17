@@ -18,6 +18,7 @@ import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "./fiber"
 import { TrayService } from "./tray"
 import { ShortcutService } from "./shortcut"
 import { createShellCapabilities, ShellHandle } from "./capability"
+import { loadManifests } from "./manifests"
 
 export { HOST_RESTART_EXIT as EXIT_RESTART } from "./api"
 
@@ -198,6 +199,18 @@ async function bootstrap() {
 
   // Wait for the include subtree + its plugin entries to settle.
   await waitForIncludeReady(ctx, includeEntry)
+
+  // ── Manifest registry (M2-2) ───────────────────────────────────────────
+  //
+  // Every user entry's declaration is read from `<plugin-dir>/.vrcxk/manifest.json`
+  // and indexed by the STABLE part of its entry id (probe11: the full id is
+  // `<random-prefix>:<yaml-id>` and the prefix changes every run).
+  //
+  // A missing or invalid manifest is NOT fatal here. Refusing to load is a
+  // separate, deliberate decision made before the entry is created; once a
+  // plugin is in the tree, an absent declaration simply means there is nothing
+  // to compare its capability usage against (design P2: show, never block).
+  await loadManifests(ctx, includeEntry)
 
   // ── Dev watcher (issue #11) — strictly opt-in ──────────────────────────
   let devWatch: DevWatch | undefined

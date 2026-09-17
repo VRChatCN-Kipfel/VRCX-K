@@ -6,7 +6,14 @@
  */
 
 export type HttpsUrl = string;
-export type Platform = "win32-x64" | "win32-arm64" | "linux-x64" | "linux-arm64" | "darwin-x64" | "darwin-arm64";
+/**
+ * Operating system only, and deliberately coarse: the ARCHITECTURE is a separate axis (`arch`). A single `windows` value cannot distinguish x64 from arm64, so an x64-only native library would be judged compatible on arm64 — the two fields together express what six combined values would, without a value that mixes the axes.
+ */
+export type Platform = "windows" | "linux" | "macos";
+/**
+ * CPU architecture. These are OUR names rather than `process.arch` values, so the schema does not inherit a Node rename; the host maps them when checking.
+ */
+export type Arch = "x64" | "arm64";
 /**
  * A semver range, e.g. *, ^1.2, ~2.1.0, >=1.4 <2, =2.1.0. Prereleases are excluded unless the range opts in (^2.0.0-0).
  */
@@ -79,18 +86,19 @@ export interface VRCXKPluginManifest {
    */
   license?: string;
   /**
-   * Host platforms on which this plugin's NATIVE part can load. Omit for pure JS/TS (the default, and by far the common case). Values are derived from Node semantics `process.platform + '-' + process.arch` — NOT from a Rust target triple and NOT from a bun compile target. This says nothing about clients: the phone runs no host, hence no plugin (docs/mobile-feasibility.md).
+   * Operating systems on which this plugin's NATIVE part can load. Omit for pure JS/TS (the default, and the common case) — a pure JS plugin is platform-independent. Pair with `arch` when the plugin bundles native code: the two fields together are what make an x64-only library correctly REJECTED on arm64 rather than installed and then failing at load. This says nothing about clients: the phone runs no host, hence no plugin (docs/mobile-feasibility.md).
    *
    * @minItems 1
-   * @maxItems 6
+   * @maxItems 3
    */
-  platforms?:
-    | [Platform]
-    | [Platform, Platform]
-    | [Platform, Platform, Platform]
-    | [Platform, Platform, Platform, Platform]
-    | [Platform, Platform, Platform, Platform, Platform]
-    | [Platform, Platform, Platform, Platform, Platform, Platform];
+  platforms?: [Platform] | [Platform, Platform] | [Platform, Platform, Platform];
+  /**
+   * CPU architectures the plugin's native part supports. Only meaningful alongside `platforms`; omitting it means every architecture of those platforms. Required in practice for any plugin shipping a native library, because architecture is exactly the axis a single `platforms` value cannot express.
+   *
+   * @minItems 1
+   * @maxItems 2
+   */
+  arch?: [Arch] | [Arch, Arch];
   /**
    * How a CHANGE to this plugin takes effect. Not a category label: without it the host would restart the whole sidecar even for a UI-only plugin. The two non-default values impose DUTIES on the author (see each description).
    */
