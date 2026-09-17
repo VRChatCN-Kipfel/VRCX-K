@@ -123,9 +123,15 @@
 | 项目 | 许可证 | 可借鉴边界 |
 |---|---|---|
 | **VRCX 官方**（vrcx-team/VRCX） | **MIT** | ✅ 功能复刻主参照：能力清单、数据模型思路、行为（我们的架构是独立设计，代码自研） |
-| **koishi / cordis** | MIT | ✅ 生态/插件机制参照（架构调研已借鉴） |
+| **`cordis` / `@cordisjs/*`**（cordiverse 组织） | **MIT** | ✅ 生态/插件机制参照 + **可直接依赖**（已实测：`plugin-timer` / `plugin-group` / `plugin-loader-webui` 均为 MIT 且已发布） |
+| ⛔ **`@koishijs/*`（console / WebUI 家族）** | **AGPL-3.0** | ⛔ **禁止任何形式的取用**（含复制/改写/照搬结构文件）。**仅可观察交互范式**，且不得进入本仓库 |
+| **`koishi` 核心** | MIT | ⚠ **不可复用**：与 satori 深度耦合（`Context extends satori.Context`，无条件启动 Satori），且锁 **cordis 3**（`@satorijs/core` peer `cordis ^3.18.1`）与本项目 rc.9 **不兼容**（实测混用抛 `Export named 'Schema' not found in cordis`）。**通用层已被上游抽到 `cordiverse`** ⇒ 需要什么去那里找 |
 | **kkrpc** | Apache-2.0 | ✅ 直接依赖（协议/传输） |
 | **vrcx-0**（Map1en 系） | **GPL** | ⚠ **禁止借鉴代码/结构**。仅可观察其"产品方向可行性"（证明 Tauri+React 重写路线有人走通），不做任何实现参照 |
+
+> ⚠ **`@koishijs/*` 是本次审查发现的许可证陷阱（2026-09，已独立复核）**：该 scope 下 **console/WebUI 家族**（`plugin-console` / `-logger` / `-config` / `-commands` / `-market` / `-admin` / `-auth` / `-insight` / `-notifier` / `client` / `components` …）**全部是 AGPL-3.0**，而 **MIT 的兄弟包也在同一 scope 下**（如 `@koishijs/utils`），**没有任何命名约定可区分**。
+> ⇒ **而它们恰好是 M2-4（EntryTree 管理面）/ M2-5（市场）最想参照的那批** ⇒ **取用前必须逐包查 `license`，不得按 scope 推断**。
+> **判据**：`npm view <pkg> license` —— 看到 `AGPL-3.0` 即视为禁区，**不做例外**。
 
 > 注：我们与 vrcx-0 同为「VRCX 能力 + Tauri 重写」是**需求同源**（都复刻 VRCX）导致的方向重合，非借鉴其设计；我们的宿主差异（Cordis 插件生态 + 分层热更新 + kkrpc 三通道）是独立架构决策（架构 v4.2）。
 > VRCX 官方为 MIT，因此功能复刻的合法参照以官方为主，vrcx-0 的 GPL 不构成必需。

@@ -29,8 +29,11 @@
       "name": "@vrcx-k/host",
       "version": "0.0.1",
       "dependencies": {
+        "@cordisjs/plugin-group": "1.0.0",
         "@cordisjs/plugin-include": "1.0.5",
         "@cordisjs/plugin-loader": "1.0.0-rc.6",
+        "@cordisjs/plugin-logger-console": "1.0.0",
+        "@cordisjs/plugin-timer": "1.1.3",
         "ajv": "^8.20.0",
         "chokidar": "4.0.3",
         "cordis": "4.0.0-rc.9",
@@ -50,9 +53,15 @@
   "packages": {
     "@apidevtools/json-schema-ref-parser": ["@apidevtools/json-schema-ref-parser@11.9.3", "", { "dependencies": { "@jsdevtools/ono": "^7.1.3", "@types/json-schema": "^7.0.15", "js-yaml": "^4.1.0" } }, "sha512-60vepv88RwcJtSHrD6MjIL6Ta3SOYbgfnkHb+ppAVK+o9mXprRtulx7VlRl3lN3bbvysAfCS7WMVfhUYemB0IQ=="],
 
+    "@cordisjs/plugin-group": ["@cordisjs/plugin-group@1.0.0", "", { "peerDependencies": { "@cordisjs/plugin-loader": "^1.0.0-beta.4" } }, "sha512-rzANH1wlDTU/bJWx6T2/RUDUsRvDvubvw5bKSO94MWmfhlW2gNzYtTm9pc7PaW18zHAUienZ0EgXoo6cPxvdKg=="],
+
     "@cordisjs/plugin-include": ["@cordisjs/plugin-include@1.0.5", "", { "dependencies": { "cosmokit": "^1.8.1", "js-yaml": "^4.1.0" }, "peerDependencies": { "@cordisjs/plugin-loader": "^1.0.0-rc.6", "cordis": "^4.0.0-rc.9" } }, "sha512-s4qNgQhHQpOL90sKppxSZBkJIjkzL9Ul/pp/vzAdapOoV6laVvC8INren6gHkJIJzVopgLSpFdUChyqQYgptAw=="],
 
     "@cordisjs/plugin-loader": ["@cordisjs/plugin-loader@1.0.0-rc.6", "", { "dependencies": { "cosmokit": "^1.8.1" }, "peerDependencies": { "cordis": "^4.0.0-rc.9", "node-addon-require-builtin": "^0.1.0" }, "optionalPeers": ["node-addon-require-builtin"] }, "sha512-WVdhzzoHr7YsotBZobhYsohSkviE/y2gHsC18gNGjv0amdwSCjGEdEsQrUcyjKc0CusAdsxjp2U3sprjb5xFDw=="],
+
+    "@cordisjs/plugin-logger-console": ["@cordisjs/plugin-logger-console@1.0.0", "", { "dependencies": { "cosmokit": "^1.8.1", "schemastery": "^3.18.0", "supports-color": "^9.4.0" }, "peerDependencies": { "cordis": "^4.0.0-rc.4" } }, "sha512-D+i/5+glLljGlLudmoQ1y4rfNpVhyjI4oNDOtEMI7Mtqg/JlAqBgW61NKm+ojDnxUqm5IrTH3NV6sHOa/r8QKw=="],
+
+    "@cordisjs/plugin-timer": ["@cordisjs/plugin-timer@1.1.3", "", { "dependencies": { "cosmokit": "^1.8.1" }, "peerDependencies": { "cordis": "^4.0.0-rc.9" } }, "sha512-7Erst7zmu/25L0Xp0a/fkKIW3kDAI4mXQVctLrfzLRCcCy9H4BxzhVWlnKN5xA0Byy/2CooHbpA48hRebezwog=="],
 
     "@jsdevtools/ono": ["@jsdevtools/ono@7.1.3", "", {}, "sha512-4JQNk+3mVzK3xh2rqd6RB4J46qUR19azEHBneZyTZM+c456qOrbbM/5xcR8huNCCcbVt7+UmizG6GuUvPvKUYg=="],
 
@@ -314,6 +323,8 @@
 
     "scheduler": ["scheduler@0.27.0", "", {}, "sha512-eNv+WrVbKu1f3vbYJT/xtiF5syA5HPIMtf9IgY/nKg0sWqzAUEvqY/xm7OcZc/qafLx/iO9FgOmeSAp4v5ti/Q=="],
 
+    "schemastery": ["schemastery@3.18.0", "", { "dependencies": { "@standard-schema/spec": "^1.1.0", "cosmokit": "^1.8.1" } }, "sha512-Jw2uxjoyyqc/yeurmChUEc/jbi8GsrdXV/KmqRUDZXJAXAmrJiPsz8vKa17l/VckyzljHZ9oGaul443CQiXxtA=="],
+
     "set-function-length": ["set-function-length@1.2.2", "", { "dependencies": { "define-data-property": "^1.1.4", "es-errors": "^1.3.0", "function-bind": "^1.1.2", "get-intrinsic": "^1.2.4", "gopd": "^1.0.1", "has-property-descriptors": "^1.0.2" } }, "sha512-pgRc4hJ4/sNjWCSS9AmnS40x3bNMDTknHgL5UaMBTMyJnU90EgWh1Rz+MC9eFu4BuN/UwZjKQuY/1v3rM7HMfg=="],
 
     "sha.js": ["sha.js@2.4.12", "", { "dependencies": { "inherits": "^2.0.4", "safe-buffer": "^5.2.1", "to-buffer": "^1.2.0" }, "bin": { "sha.js": "bin.js" } }, "sha512-8LzC5+bvI45BjpfXU8V5fdU2mfeKiQe1D1gIMn7XUlF3OTUrpdJpPPH4EMAnF0DsHHdSZqCdSss5qCmJKuiO3w=="],
@@ -329,6 +340,8 @@
     "string_decoder": ["string_decoder@1.3.0", "", { "dependencies": { "safe-buffer": "~5.2.0" } }, "sha512-hkRX8U1WjJFd8LsDJ2yQ/wWWxaopEsABU1XfkM8A+j0+85JAGppt16cr1Whg6KIbb4okU6Mql6BOj+uup/wKeA=="],
 
     "superjson": ["superjson@2.2.6", "", { "dependencies": { "copy-anything": "^4" } }, "sha512-H+ue8Zo4vJmV2nRjpx86P35lzwDT3nItnIsocgumgr0hHMQ+ZGq5vrERg9kJBo5AWGmxZDhzDo+WVIJqkB0cGA=="],
+
+    "supports-color": ["supports-color@9.4.0", "", {}, "sha512-VL+lNrEoIXww1coLPOmiEmK/0sGigko5COxI09KzHc2VJXJsQ37UaQ+8quuxjDeA7+KnLGTWRyOXSLLR2Wb4jw=="],
 
     "tinyglobby": ["tinyglobby@0.2.17", "", { "dependencies": { "fdir": "^6.5.0", "picomatch": "^4.0.4" } }, "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g=="],
 

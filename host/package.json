@@ -13,8 +13,11 @@
     "generate:plugin-contracts": "json2ts ../contracts/plugin-manifest/v1/plugin-manifest.schema.json -o src/contracts/pluginManifest.generated.ts && json2ts ../contracts/plugin-index/v1/plugin-index-entry.schema.json -o src/contracts/pluginIndexEntry.generated.ts"
   },
   "dependencies": {
+    "@cordisjs/plugin-group": "1.0.0",
     "@cordisjs/plugin-include": "1.0.5",
     "@cordisjs/plugin-loader": "1.0.0-rc.6",
+    "@cordisjs/plugin-logger-console": "1.0.0",
+    "@cordisjs/plugin-timer": "1.1.3",
 
     "ajv": "^8.20.0",
 
