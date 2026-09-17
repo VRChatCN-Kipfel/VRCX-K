@@ -10,6 +10,7 @@ import { join } from "node:path"
 import { Context } from "cordis"
 import Loader from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
+import Timer from "@cordisjs/plugin-timer"
 import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
 import { assertPluginManifest } from "../src/contracts/pluginContract"
 
@@ -34,8 +35,16 @@ describe("examples/hello-plugin", () => {
     await ctx.plugin(Loader)
     ctx.loader.builtins.include = Include
 
-    // Provide the one service the manifest declares as `required`, so the
-    // readiness gate is satisfied rather than parking the fiber in PENDING.
+    // Provide the services the example declares in `inject`, so its readiness gate
+    // is satisfied rather than parking the fiber in PENDING.
+    //
+    // `timer` is a real plugin, not a stub: the example now schedules through
+    // ctx.interval (which registers via ctx.effect) instead of hand-writing a
+    // setInterval and remembering the disposer. Installing the actual Timer
+    // plugin here keeps the test honest about what the host provides — a stub
+    // would not catch the inject-gated failure mode, which is a HARD failure
+    // (plugin never loads).
+    await ctx.plugin(Timer)
     ctx.provide("notify", { send: async () => true })
 
     const includeId = await ctx.loader.create({
