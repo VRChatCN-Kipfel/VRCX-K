@@ -137,7 +137,8 @@ VRCX-K/
 
 - **能力服务必须 `extends Service`**：`ctx.provide(name, 普通对象)` 提供的方法**完全没有调用者归因**（两个插件调用的结果无法区分），护栏/审计/`access` 声明全都失去落点。**方法一律写成类方法**——写成箭头函数属性会**静默**丢失归因（`caller: null`），命名空间的每个子对象也必须是 `Service` 实例，普通对象字面量同样丢。
 - **服务必须"先 provide、后 attach"**：`inject` 是**就绪门不是访问门**——未 inject 的插件照样能读服务，但注入尚未提供的服务的插件会卡在 `PENDING`，provide 后才 `ACTIVE`。（`host/src/index.ts` 的 tray/shortcut 即此模式。）
-- **落盘/清理必须写在插件 fiber 内的 `ctx.effect()`**：写在根 `ctx` 上的 effect 不进 `registry`、**不报错、disposer 永不执行**，症状是"数据偶尔少一截"。配套：`SIGTERM`/`SIGINT` 路径**绕过 dispose**，只有 stdin 断开 / stdio `stop` 这条路径会跑 disposer。
+- **持久性来自 `COMMIT`，不是来自 `ctx.effect()` 的 disposer**：已提交的行即使被**硬杀**也存活；只写在 disposer 里的数据被硬杀时**全丢**。⇒ 数据落盘走**写入路径**；`ctx.effect()` 里只放**非持久性清理**（句柄、临时文件、WS 关闭）。
+  配套两条硬事实：① 写在**根 `ctx`** 上的 effect 不进 `registry`、**不报错、disposer 永不执行**（只有插件 fiber 内的会被回收）；② **Windows 上 `SIGTERM`/`SIGINT` 根本不投递**（`kill()` 是硬 TerminateProcess，处理器不触发），那两个处理器在 Windows 是**死代码**。详见 [`docs/shutdown-strategy-review.md`](docs/shutdown-strategy-review.md)。
 
 ## 资料地图（唯一副本原则）
 
@@ -150,6 +151,7 @@ VRCX-K/
 | 架构方案全文（v4.2） | [`docs/architecture-proposal.md`](docs/architecture-proposal.md) |
 | **写插件 / 写服务 / 碰 Cordis 前必读** | [`docs/cordis-runtime-findings.md`](docs/cordis-runtime-findings.md) **§0 结论速查**（14 条实测，逐条给探针） |
 | 优雅停机与落盘（退出路径、`ctx.effect` 归属、`bun:sqlite`） | [`docs/shutdown-and-persistence-findings.md`](docs/shutdown-and-persistence-findings.md)（probe21–23） |
+| **持久化策略与信号处理（含独立审查结论）** | [`docs/shutdown-strategy-review.md`](docs/shutdown-strategy-review.md)（持久性来自 `COMMIT`、Windows 信号不投递、exit code 契约） |
 | 插件源 / 索引 / manifest / tag 版本方案 | [`docs/plugin-source-and-index-design.md`](docs/plugin-source-and-index-design.md)（probe14–20 已入档）；目录布局见 [`docs/adr-plugin-layout.md`](docs/adr-plugin-layout.md) |
 | kkrpc Rust↔npm 协议互通（M1-4 依据） | [`docs/kkrpc-interop-findings.md`](docs/kkrpc-interop-findings.md) |
 | **任务进度 / 里程碑状态 / 决策记录** | GitHub **#1 及其派生 issue**（见文件头；**最高权威**）；`docs/ROADMAP.md` 只是同步过来的概览镜像，冲突以 issue 为准 |
