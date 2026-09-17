@@ -882,13 +882,77 @@ ADR §5.2-2 把它指派给 M2-2，**现在明确由本文吸收**（而非退�
 }
 ```
 
-**三条约束**：
+**三条约束**（⚠ **第 2 条已被 §9.3.1 的实测推翻，见下**）：
 
 1. **键用 `manifest.id`，不用 `entry.id`** —— probe11 实测 entry id 带每次运行随机的随机前缀，持久化必然失效；而 `manifest.id` 是稳定身份。这与注册表"按后缀建键"是同一个理由的两个面。
-2. **只存覆盖，不存全量** —— 未列出的 base 包等同"启用 + 默认配置"，于是新增 base 包不需要迁移这个文件。
+2. ~~**只存覆盖，不存全量**~~ ⇒ **整条 `entries` 已删除**，理由见 §9.3.1：启停/配置是 cordis 原生能力，存两份即第二份真源。
 3. **写入时机**：版本切换**必须在拷贝完成后**才写（ADR §7 遗留第 7 条的原子性要求）。
 
-> **与替换机制的关系**：`entries.<id>.enabled = false` 就是「停用 base 那个实现」，配合第三方插件 provide 同名服务即完成替换（§3.6）。**这也是为什么它必须由本文定**——它是可替换性的落点。
+> **与替换机制的关系**（**修正**）：~~`entries.<id>.enabled = false` 就是停用 base 那个实现~~
+> ⇒ **落点改为主机装配时的 `ctx.plugin` 参数**（`disabled` / `config` 由 cordis 原生表达），而不是另存一个状态文件。可替换性本身不变（§3.6），**变的是"停用"这个动作的记录位置**。
+
+### 9.3.0 最终形状（`entries` 已删）
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "baseVersion": "0.0.1"      // 当前生效的 base 版本（决定拷哪个版本目录）
+}
+```
+
+**它不再是"启停/配置门户"**，只是**宿主装配 base 条目的输入**——因为 `cordis.yml` 里**根本没有 base 条目**（那正是 R3 要的干净）。
+
+### 9.3.1 ⚠ `cordis.patch.yml` 方案：实测否决（probe24/26/28）
+
+**设想**：宿主自带一份 patch，用户也编辑 patch，让 `cordis.yml` **永远干净**。
+
+**机制上可行，但有一个硬阻塞**：**`write()` 会把 patch 结果烘焙进 `cordis.yml`。**
+
+```js
+// plugin-include/lib/index.js
+async *[Service.init]() {
+  const data = this.applyPatches([...this.data])   // 补丁应用到【浅拷贝】
+  await this.root.update(data)                      // tree 接管这个数组
+}
+write() {
+  return this.writeFile(this.root.data)             // ← 写的是含补丁结果的树
+}
+```
+
+**三次独立复现**（probe26 / probe28）：
+
+```
+写之前：  "[]"                                        ← 空
+写之后：  "- id: base\n  name: ./plugins/base.ts"     ← 注入的 base 条目落进去了
+```
+
+**而且 `write()` 几乎必然发生** —— Loader 在 fiber dispose 时会把 entry 翻成 `disabled` **并写回**（`host/src/lifecycle.ts` 的 write-suppression 注释即为此而写）。
+
+**实测出的其它语义**：
+
+| 发现 | 证据 |
+|---|---|
+| `patches` **是数组**，**按顺序应用**（后者覆盖前者） | 源码 `for (const patch of patches)` |
+| `insert` 支持**根级**（不带 `id`）与 **group 级**（带 `id`，目标必须是 group） | probe26 / probe30 |
+| **`name` 不是可覆盖字段**，而是**断言字段**（mismatch 则 skip） | 源码 `if (name && name !== target.name)` —— **防 patch 把条目劫持到别的模块**的安全设计 |
+| **`entryMap` 只在循环前建一次** ⇒ **同批 patch 里 `insert` 进去的条目，后续 patch 覆盖不到** | 源码 L83-93 + probe28 |
+| **烘焙是幂等的** —— 重启后条目不重复 | probe28 |
+
+**⇒ 结论：base 条目必须"根本不进 Include 的树"**，即 **R3 的宿主装配**（`ctx.plugin()`）。**这样 `cordis.yml` 才真的永远只有用户条目。**
+
+### 9.3.2 两条状态文件**不重复**（消除先前的混乱）
+
+先前我一度认为二者是"两份真源"。**实测后修正**：
+
+| | `cordis.yml` | `base-state.json` |
+|---|---|---|
+| 管谁 | **用户的插件** | **宿主的 base**（`baseVersion`） |
+| 谁写 | Include（cordis 原生） | 宿主代码 |
+| 条目来源 | 用户编辑 | **不在 yml 里**（R3） |
+
+⇒ **两者管的是两拨不同的东西，没有重叠 ⇒ 不是重复。** 真源冲突只在**同一批条目有两处状态**时发生，而 base 条目**只在宿主装配时存在**。
+
+**这也是 `entries` 该删的根据**：覆盖应落在 **cordis 的 entry 上**（装配时传入），而不是另存一个文件。
 
 ### 9.4 多源：**现在开放**（含风险敞口）
 
