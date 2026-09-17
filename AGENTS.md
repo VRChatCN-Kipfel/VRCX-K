@@ -154,6 +154,7 @@ VRCX-K/
 | **持久化策略与信号处理（含独立审查结论）** | [`docs/shutdown-strategy-review.md`](docs/shutdown-strategy-review.md)（持久性来自 `COMMIT`、Windows 信号不投递、exit code 契约） |
 | 插件源 / 索引 / manifest / tag 版本方案 | [`docs/plugin-source-and-index-design.md`](docs/plugin-source-and-index-design.md)（probe14–20 已入档）；目录布局见 [`docs/adr-plugin-layout.md`](docs/adr-plugin-layout.md) |
 | kkrpc Rust↔npm 协议互通（M1-4 依据） | [`docs/kkrpc-interop-findings.md`](docs/kkrpc-interop-findings.md) |
+| **旧工程勘察（血统 / 可复制性 / 经验点）** | [`docs/legacy-recon/`](docs/legacy-recon/) —— **先读其 [README](docs/legacy-recon/README.md) 的两条红线**：`old/main` 是 MIT fork 链（大部分非本 org 所写），且与 `rewrite` **无共同祖先**（取用必然是显式复制） |
 | **任务进度 / 里程碑状态 / 决策记录** | GitHub **#1 及其派生 issue**（见文件头；**最高权威**）；`docs/ROADMAP.md` 只是同步过来的概览镜像，冲突以 issue 为准 |
 | 可复跑探针（实测证据） | [`docs/probes/`](docs/probes/)（`bun run docs/probes/probeN.ts`）；写/跑探针自身的坑见其 [README](docs/probes/README.md) |
 
