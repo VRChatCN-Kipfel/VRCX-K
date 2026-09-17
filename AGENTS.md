@@ -11,7 +11,7 @@ VRCX-K/
 │   └── tauri.conf.json   窗口/打包配置
 ├── src/           ← 脸 · React UI (Vite 19)
 ├── host/          ← 大脑 · Cordis (bun) 宿主（业务/插件/服务）
-├── docs/          ← architecture-proposal.md (v4.2) + ROADMAP.md（概览）+ poc-m0.md（M0 PoC 报告）+ adr-plugin-layout.md（目录布局 ADR）+ plugin-source-and-index-design.md（插件源/索引/manifest 契约）+ cordis-runtime-findings.md（Cordis 运行时实测）+ kkrpc-interop-findings.md（kkrpc Rust↔npm 协议互通，M1-4 依据）+ probes/（可复跑探针）+ vrcxk-arch-final.html（架构图）
+├── docs/          ← architecture-proposal.md (v4.2) + ROADMAP.md（概览）+ poc-m0.md（M0 PoC 报告）+ adr-plugin-layout.md（目录布局 ADR）+ plugin-source-and-index-design.md（插件源/索引/manifest 契约）+ cordis-runtime-findings.md（Cordis 运行时实测）+ kkrpc-interop-findings.md（kkrpc Rust↔npm 协议互通，M1-4 依据）+ shutdown-and-persistence-findings.md（停机与落盘，F1.1 前置）+ probes/（可复跑探针）+ vrcxk-arch-final.html（架构图）
 ├── Cargo.toml     ← cargo workspace 根（成员 src-tauri）
 ├── package.json   ← bun workspace 根（含 host）
 └── runtime-research.md / ecosystem-research.md（支撑调研）
@@ -93,6 +93,9 @@ VRCX-K/
 - **`codeload` 不接受 `.git` 后缀**（404），而 `source.url` 强制以 `.git` 结尾 ⇒ 任何从 url 派生的地址必须先剥后缀，收敛到唯一一处规范化函数（probe16）。
 - **`_` 不是合法 semver 预发布字符**：字符集是 `[0-9A-Za-z-]`。若允许下划线，任何 semver 库都用不了，必须自写比较器（probe17）。
 - **路径正则挡不住全部逃逸**：百分号编码（`%2e%2e`）、Windows 盘符（`C:/`）、UNC 正则都抓不到；`..` 的**尾随**形态也曾漏过。containment 必须**解析后再检查**，schema 校验不是保证（probe20）。
+- **`ctx.effect()` 写在根 ctx 上不会被执行**：`gracefulStop` 只遍历 `ctx.registry` 里的 fiber ⇒ **只有插件 fiber 内的 effect 会被回收**。写在裸 `ctx` 上**不进 registry、不报错、disposer 永不执行**——症状是"数据偶尔少一截"（probe23）。
+- **`SIGTERM`/`SIGINT` 绕过 dispose**：`host/src/index.ts:310` 是裸 `process.exit(0)`，**不跑 disposer**（实测退出码 143）。壳走的是 stdin 路径（安全），但 **Unix supervisor 和 Ctrl-C 用的是信号** ⇒ 靠 disposer 落盘的数据会丢（probe22）。
+- **`bun:sqlite` 在 compile 态可用**：内存/磁盘/WAL/事务四样均实证通过（probe21，产物 82MB）。数据层无需原生模块。
 
 ## 已知坑（测试基建，2026-09 实测）
 
