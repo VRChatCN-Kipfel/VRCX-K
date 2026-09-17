@@ -276,6 +276,7 @@ EXITCODE=1
 
 > 相关文档：[`adr-plugin-layout.md`](adr-plugin-layout.md)（目录布局 ADR，其 §1.5 的三条实测由 `probe6.ts` 提供）、[`poc-m0.md`](poc-m0.md)（M0 PoC）。
 
+
 ---
 
 ## 3. 未验证 / 遗留
@@ -284,3 +285,15 @@ EXITCODE=1
 2. **kkrpc 异步链路上的归因**：只测同进程调用；跨 stdio RPC 往返后再读 `symbols.caller` 未测（§1.6 的 await 存活结果使其低风险，但未实测）。
 3. **`entry.options.config` 能否承载 manifest**：`config` 是插件自己的配置，塞 manifest 属滥用；按 §1.12 的建议走独立注册表，但**未实现验证**。
 4. **Entry 的 `group` / 子树的 identity 语义**：M2-4 管理插件组时需要，本轮未测。
+
+---
+
+## 4. 上游可用性复核（别信 master 文档）
+
+- ⚠ **上游 `access` 特性在任何已发布版本都不存在**：`cordis` latest `rc.10` 的 `Context` 与锁定的 `rc.9` **逐字相同**；`loader` latest `rc.7` 的 `EntryOptions` 亦无 `access`。**官方文档写的是 master 分支，"升级即可得"不成立**。⇒ M2-8 的 access 声明与 warn **必须自建**（落点见 §1.12 的 `caller.fiber.entry`），不能等上游。
+
+## 相关
+
+- 本文件是 **AGENTS.md「架构规则」三条**（`extends Service` / 先 provide 后 attach / `ctx.effect` 在插件 fiber 内）的**唯一详细副本**。AGENTS.md 只留规则本身，依据在这里。
+- [`shutdown-and-persistence-findings.md`](shutdown-and-persistence-findings.md) — 退出路径与落盘（probe21–23），§1.15 的"坏插件杀死宿主"与它同源。
+- [`probes/README.md`](probes/README.md) — 写/跑探针本身的坑（async `ctx.plugin`、`fn.name` 只读、`[].every()` 恒真等）。

@@ -9,6 +9,16 @@
 //   B. a missing cordis.yml used to spin the full 15s include-settle timeout
 //      instead of failing fast with the original cause.
 //
+//   C. These two cases are LOAD-SENSITIVE and can flake in a full `bun test`
+//      run (`dev watch hot-refreshes cordis.yml` / `a missing cordis.yml fails
+//      fast` time out; they pass in isolation). The first case has an internal
+//      8 x 3s retry budget, which is tight when 20+ other test files run
+//      concurrently (observed 3.4-11.2s when passing).
+//      Triage: `git stash --include-untracked` and re-run — if it STILL fails,
+//      it is not your change. Do NOT widen the timeout or drop assertions:
+//      these are real regressions (Windows paths / fail-fast) on a tight
+//      budget. The real fix is a larger budget or serialization.
+//
 // The host runs with cwd = a temp directory, so no repository file is touched.
 import { afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"

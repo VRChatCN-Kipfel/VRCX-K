@@ -358,6 +358,17 @@ protocolVersion: 1:
 
 **⇒ 必须显式 pin `protocolVersion: 1`。** 否则 GitHub 上测试全绿、一上 GitLab 就炸——典型的"只在部分主机暴露"的坑。
 
+### 4.5.1 ⚠ `isomorphic-git` 的其余静默陷阱（probe15 / probe16 / probe17）
+
+同一类错误：**传错参数不报错，只是结果为空或语义变了**。
+
+| 陷阱 | 症状 | 正确做法 |
+|---|---|---|
+| `listFiles({ oid })` | **静默返回 `[]`** ——让人误以为仓库是空的 | `listFiles` 要的是 **`ref`**；`readBlob` 要的才是 **`oid`**（probe15） |
+| `codeload` 地址 | **404** | codeload **不接受 `.git` 后缀**，而 `source.url` 强制以 `.git` 结尾 ⇒ 任何从 url 派生的地址必须先剥后缀，**收敛到唯一一处规范化函数**（probe16） |
+| `_` 作 semver 预发布字符 | 任意 semver 库都用不了 | **`_` 不是合法 semver 字符**，字符集是 `[0-9A-Za-z-]`。若允许下划线就必须自写比较器（probe17） |
+
+
 ### 4.6 取件与落盘（摘要）
 
 | 场景 | 手段 |

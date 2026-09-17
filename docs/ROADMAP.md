@@ -94,6 +94,7 @@
 ## 5. 协作约定
 
 - **概览 ↔ 细化的分工**：本文件只回答「现在到哪个 M/F、base 包往哪个方向」；「这个阶段具体做哪几个任务、验收什么」在 GitHub M/F 总览 issue，开工即细化并派生 subissue。
+- **决策权威**：[#1 开发路线图](https://github.com/VRChatCN-Kipfel/VRCX-K/issues/1) 及其派生 issue 是**最高权威**；本文件是同步过来的概览镜像——**冲突以 issue 为准**，但 issue 出新决定后本文件必须跟着改。
 - **每阶段开工动作**：新建 M/F 总览 issue → 拆任务 subissue（含验收/依赖）→ 实现 → 勾选回填（GitHub task list 引用）。
 - **「做不做」纪律**：新能力先按 §2.1 归类（做/观望/社区/禁区），再进 F 范围；不归类的功能不承诺。
 - **保持预演**：功能线分类与粒度是方向，进开发阶段按当时架构/生态重估，不教条。
@@ -110,7 +111,8 @@
 - 移动端方向：[`mobile-feasibility.md`](mobile-feasibility.md)（第三端；脑不搬过去）
 - 会话与设备管理需求：[`host-sessions.md`](host-sessions.md)（#13，未排期）
 - 复跑探针：[`probes/`](probes/)（本轮实测证据，可直接 `bun run`）
-- 开发约定（工具链/git/.temp）：根 [`AGENTS.md`](../AGENTS.md)
+- 开发约定（工具链/git/.temp/架构规则/**开工前同步 GitHub #1**）：根 [`AGENTS.md`](../AGENTS.md)
+- 探针自身开发坑：[`probes/README.md`](probes/README.md)
 
 ## 参照与许可证卫生（红线）
 
