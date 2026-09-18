@@ -262,7 +262,26 @@ async function bootstrap() {
 
   if (process.env.VRCXK_SHELL === "1") {
     const shell = connectShellStdio(ctx)
-    await shell.ready(ready)
+    // Announcing `ready` is a fire-and-observe call, not a startup gate.
+    //
+    // Under the official stdio transport, a shell that goes away while this RPC
+    // is in flight makes kkrpc reject the pending request
+    // (`RPCTransportClosedError`). Letting that propagate would reach the fatal
+    // handler below and exit 1 — but "the shell died mid-handshake" is exactly
+    // the #33 case, which `stopOnStdinLoss` already handles with a graceful
+    // exit 0. The two would race, and the loser would decide the exit code.
+    //
+    // So: swallow the rejection here. Every genuine startup failure still
+    // throws from its own await above this point, and a dead shell is reported
+    // by the stdin-loss path instead.
+    try {
+      await shell.ready(ready)
+    } catch (error) {
+      log(`shell.ready not delivered (${describeError(error)}) — the shell is likely gone`)
+      // Give the stdin-loss path its chance to stop us cleanly. If it does not
+      // fire (no peer channel), keep bootstrapping: the ws surface is up and a
+      // later shell may still attach.
+    }
     // Tray ingress: push snapshots to the shell and fan shell `tray.action`
     // notifications back out to host/plugin handlers. Only wired when a shell
     // is attached — without VRCXK_SHELL the service stays in "no shell" mode.

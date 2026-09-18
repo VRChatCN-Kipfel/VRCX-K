@@ -1,9 +1,5 @@
 import { RPCChannel, type RPCMessage, type Transport } from "kkrpc"
-import {
-  stdioJsonTransport,
-  type ReadableLike,
-  type WritableLike,
-} from "kkrpc/stdio"
+import { nodeStdioTransport } from "kkrpc/stdio"
 import { HOST_RESTART_EXIT, hostWsAPI } from "./api"
 import { gracefulStopWithTimeout, stopOnStdinLoss } from "./lifecycle"
 import { stdinIsPeerChannel } from "./stdin-watch"
@@ -223,70 +219,63 @@ function fanout<T>(label: string) {
 }
 
 /**
- * Wrap a Web ReadableStream in the Node-style `ReadableLike` the kkrpc stdio
- * transport consumes.
+ * The host's stdio transport.
  *
- * `onDone` is the EOF signal, and this pump's own reader is the ONLY place in
- * the process that can observe stdin ending: `getReader()` locks the stream,
- * so `process.stdin`'s `end`/`close` events never fire and a second reader is
- * rejected with ERR_INVALID_STATE (measured, docs/probes/probe9.ts). Until
- * #33 the done branch returned silently, which left "the peer holding our
- * write end is gone" unobservable.
+ * Two peer-death channels exist and they are deliberately BOTH wired, because
+ * they have different side effects:
+ *
+ *   `onDone` (this pump)  — fires on stdin EOF. Does NOT touch kkrpc's channel
+ *                           state, so an in-flight `shell.ready(...)` survives
+ *                           it. This is the one that stops the host.
+ *   `onClose` (kkrpc)     — fires from the transport's lifecycle and DELIVERS a
+ *                           `reason`, distinguishing a clean peer exit
+ *                           (`undefined`) from a broken pipe. But kkrpc's
+ *                           `handleTransportClose` first REJECTS every pending
+ *                           request — including a `shell.ready` still in flight
+ *                           during bootstrap, which would escape to the fatal
+ *                           handler and exit 1. So this one only observes.
+ *
+ * Why the old shape could not deliver `onClose` at all (measured exhaustively in
+ * `.temp/recon-stdio/probes-h6/FINDINGS.md`):
+ *
+ *   1. `lifecycle` alone never unpauses stdin. `process.stdin` is a paused
+ *      `ReadStream`; `on("end")`/`on("close")`/`on("error")` — exactly what
+ *      kkrpc's `lifecycle` attaches — leave `readableFlowing === null`. Only
+ *      `on("data")` resumes it, and a paused stdin never emits end/close.
+ *   2. Holding `Bun.stdin.stream().getReader()` locks the SAME native readable
+ *      (`process.stdin !== Bun.stdin.stream()`, but coupled natively), so every
+ *      rescue route — including `process.stdin.resume()` — THROWS
+ *      `ERR_INVALID_STATE: ReadableStream is locked`.
+ *
+ * `nodeStdioTransport()` avoids both (it uses `process.stdin` directly, and
+ * `RPCChannel` subscribes internally, which is what resumes it). We keep the
+ * bare-`process.stdin` readable and re-add the pump only as an EOF observer,
+ * which cannot lock the native stream.
+ *
+ * Do NOT reintroduce a `Bun.stdin.stream()` reader here. `watchStdinClose()` in
+ * stdin-watch.ts takes that reader for the shell-less case, and the two are
+ * mutually exclusive in BOTH orderings (measured).
  */
-class ReadableStreamLike implements ReadableLike {
-  private listeners = new Set<(chunk: Uint8Array | string) => void>()
-
-  constructor(
-    stream: ReadableStream<Uint8Array>,
-    private readonly onDone?: () => void,
-  ) {
-    void this.pump(stream)
-  }
-
-  on(event: "data", listener: (chunk: Uint8Array | string) => void) {
-    if (event === "data") this.listeners.add(listener)
-    return this
-  }
-
-  off(event: "data", listener: (chunk: Uint8Array | string) => void) {
-    if (event === "data") this.listeners.delete(listener)
-    return this
-  }
-
-  private async pump(stream: ReadableStream<Uint8Array>) {
-    const reader = stream.getReader()
-    try {
-      while (true) {
-        const result = await reader.read()
-        if (result.done) {
-          this.onDone?.()
-          return
-        }
-        for (const listener of this.listeners) listener(result.value)
-      }
-    } finally {
-      reader.releaseLock()
-    }
-  }
-}
-
-function bunWritable(): WritableLike {
-  return {
-    write(chunk, callback) {
-      void Bun.write(Bun.stdout, chunk).then(
-        () => callback?.(),
-        (error) => callback?.(error instanceof Error ? error : new Error(String(error))),
-      )
-    },
-  }
-}
-
 function bunStdioTransport(onDone?: () => void) {
-  return stdioJsonTransport({
-    readable: new ReadableStreamLike(Bun.stdin.stream(), onDone),
-    writable: bunWritable(),
-    lifecycle: process.stdin,
-  })
+  const base = nodeStdioTransport()
+  if (!onDone) return base
+  // Observe EOF without taking a reader: `process.stdin` is already resumed by
+  // the channel's own `subscribe()` (an `on("data")` attach), so plain event
+  // listeners are enough and cost us nothing.
+  //
+  // `end` and `close` BOTH fire for one teardown (bun emits end, then close),
+  // and the two are not distinguishable here. Latch so a single peer death
+  // produces exactly one stop, matching what the old pump delivered.
+  let fired = false
+  const mark = () => {
+    if (fired) return
+    fired = true
+    onDone()
+  }
+  process.stdin.on("end", mark)
+  process.stdin.on("close", mark)
+  process.stdin.on("error", mark)
+  return base
 }
 
 /**
@@ -311,10 +300,35 @@ export function connectShellStdio(ctx: Context, options: { transport?: Transport
   // ProcessTree Job Object would hard-reap us anyway — this turns that into the
   // same graceful teardown the stop RPC uses. Only a peer channel (pipe on
   // Windows, socketpair on POSIX — see stdin-watch.ts) carries that meaning; a
-  // test-supplied transport owns other streams, so the callback is wired for
-  // the default transport only.
-  const onStdinLost = stdinIsPeerChannel() ? () => void stopOnStdinLoss(ctx, "shell") : undefined
+  // test-supplied transport owns unrelated streams, so both hooks below are
+  // wired for the default transport only.
+  //
+  // Two hooks, deliberately: `onDone` (inside `bunStdioTransport`) STOPS the
+  // host and `onClose` REPORTS the reason. See `bunStdioTransport`'s doc for why
+  // they are split rather than both wired to `stopOnStdinLoss`.
+  const usesDefaultTransport = options.transport === undefined
+  const watchStdinLoss = usesDefaultTransport && stdinIsPeerChannel()
+  const onStdinLost = watchStdinLoss ? () => void stopOnStdinLoss(ctx, "shell") : undefined
   const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(onStdinLost), {
+    onClose: watchStdinLoss
+      ? (reason) => {
+          // Observability only. `reason === undefined` is a clean peer exit;
+          // an Error means the pipe broke. Both are already handled by the stop
+          // path — this exists so a crash is distinguishable from a normal quit
+          // in the logs, which the old `onDone` (a bare `() => void`) could not
+          // express.
+          //
+          // ⚠ Do NOT call `stopOnStdinLoss` here: kkrpc rejects every pending
+          // request immediately before invoking `onClose`, so a
+          // bootstrap-time `shell.ready` rejection would race the stop path and
+          // could decide the exit code (measured: exit 1 instead of 0).
+          console.error(
+            reason
+              ? `[host] shell stdio broke (${reason.name}: ${reason.message})`
+              : "[host] shell closed its stdio cleanly",
+          )
+        }
+      : undefined,
     expose: {
       ping: () => hostWsAPI.ping(),
       stop: async () => {
