@@ -159,12 +159,12 @@ test("shell dying mid-handshake is a clean stop, not a fatal bootstrap error", a
 
   expect(stderr).not.toContain("fatal bootstrap error")
   expect(code).toBe(0)
-  // The `onClose` observer reports why the peer went away. Both channels are
-  // expected: `onClose` for the reason, the stdin-loss path for the stop.
-  expect(stderr).toMatch(/\[host\] shell (closed its stdio cleanly|stdio broke \()/)
+  // The `onClose` hook is the sole stop trigger on this path, and it reports
+  // why the peer went away.
+  expect(stderr).toMatch(/\[host\] shell (closed its stdio|stdio broke \()/)
   expect(stderr).toContain("stdin closed (shell is gone)")
-  // One peer death must produce exactly one stop, not one per stdin event
-  // (`end` and `close` both fire for a single teardown).
+  // One peer death must produce exactly one stop: kkrpc fires `onClose` once,
+  // but a regression that also re-armed a stdin listener would double it.
   expect(stderr.match(/stdin closed \(shell is gone\)/g)).toHaveLength(1)
 }, 40_000)
 

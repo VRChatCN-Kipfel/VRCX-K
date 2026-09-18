@@ -219,24 +219,15 @@ function fanout<T>(label: string) {
 }
 
 /**
- * The host's stdio transport.
+ * The host's stdio transport — the upstream one, unmodified.
  *
- * Two peer-death channels exist and they are deliberately BOTH wired, because
- * they have different side effects:
+ * kkrpc's `nodeStdioTransport()` uses `process.stdin` directly as the readable
+ * and auto-wires `lifecycle` to it. That is the whole point: `RPCChannel`
+ * subscribes internally (`readable.on("data")`), which is what resumes stdin,
+ * and only a flowing stdin emits `end`/`close` — so `onClose` actually fires.
  *
- *   `onDone` (this pump)  — fires on stdin EOF. Does NOT touch kkrpc's channel
- *                           state, so an in-flight `shell.ready(...)` survives
- *                           it. This is the one that stops the host.
- *   `onClose` (kkrpc)     — fires from the transport's lifecycle and DELIVERS a
- *                           `reason`, distinguishing a clean peer exit
- *                           (`undefined`) from a broken pipe. But kkrpc's
- *                           `handleTransportClose` first REJECTS every pending
- *                           request — including a `shell.ready` still in flight
- *                           during bootstrap, which would escape to the fatal
- *                           handler and exit 1. So this one only observes.
- *
- * Why the old shape could not deliver `onClose` at all (measured exhaustively in
- * `.temp/recon-stdio/probes-h6/FINDINGS.md`):
+ * Why the previous hand-rolled shape could never deliver `onClose` (measured
+ * exhaustively; see `docs/probes/stdio-lifecycle/FINDINGS.md`):
  *
  *   1. `lifecycle` alone never unpauses stdin. `process.stdin` is a paused
  *      `ReadStream`; `on("end")`/`on("close")`/`on("error")` — exactly what
@@ -247,35 +238,17 @@ function fanout<T>(label: string) {
  *      rescue route — including `process.stdin.resume()` — THROWS
  *      `ERR_INVALID_STATE: ReadableStream is locked`.
  *
- * `nodeStdioTransport()` avoids both (it uses `process.stdin` directly, and
- * `RPCChannel` subscribes internally, which is what resumes it). We keep the
- * bare-`process.stdin` readable and re-add the pump only as an EOF observer,
- * which cannot lock the native stream.
- *
  * Do NOT reintroduce a `Bun.stdin.stream()` reader here. `watchStdinClose()` in
  * stdin-watch.ts takes that reader for the shell-less case, and the two are
  * mutually exclusive in BOTH orderings (measured).
+ *
+ * The transport's `onClose` is wired to the stop path in `connectShellStdio`.
+ * It first REJECTS every pending request (`handleTransportClose`), which is why
+ * `bootstrap` treats a failed `shell.ready` as an expected outcome rather than a
+ * fatal error — see the comment there.
  */
-function bunStdioTransport(onDone?: () => void) {
-  const base = nodeStdioTransport()
-  if (!onDone) return base
-  // Observe EOF without taking a reader: `process.stdin` is already resumed by
-  // the channel's own `subscribe()` (an `on("data")` attach), so plain event
-  // listeners are enough and cost us nothing.
-  //
-  // `end` and `close` BOTH fire for one teardown (bun emits end, then close),
-  // and the two are not distinguishable here. Latch so a single peer death
-  // produces exactly one stop, matching what the old pump delivered.
-  let fired = false
-  const mark = () => {
-    if (fired) return
-    fired = true
-    onDone()
-  }
-  process.stdin.on("end", mark)
-  process.stdin.on("close", mark)
-  process.stdin.on("error", mark)
-  return base
+function bunStdioTransport() {
+  return nodeStdioTransport()
 }
 
 /**
@@ -300,33 +273,23 @@ export function connectShellStdio(ctx: Context, options: { transport?: Transport
   // ProcessTree Job Object would hard-reap us anyway — this turns that into the
   // same graceful teardown the stop RPC uses. Only a peer channel (pipe on
   // Windows, socketpair on POSIX — see stdin-watch.ts) carries that meaning; a
-  // test-supplied transport owns unrelated streams, so both hooks below are
-  // wired for the default transport only.
+  // test-supplied transport owns unrelated streams.
   //
-  // Two hooks, deliberately: `onDone` (inside `bunStdioTransport`) STOPS the
-  // host and `onClose` REPORTS the reason. See `bunStdioTransport`'s doc for why
-  // they are split rather than both wired to `stopOnStdinLoss`.
+  // `onClose` is the sole peer-death trigger for the shell-attached path, and it
+  // delivers a `reason`: `undefined` for a clean peer exit, an Error for a
+  // broken pipe. That distinction is logged, and is the reason we do not need a
+  // separate one-argument-lost callback anymore.
   const usesDefaultTransport = options.transport === undefined
   const watchStdinLoss = usesDefaultTransport && stdinIsPeerChannel()
-  const onStdinLost = watchStdinLoss ? () => void stopOnStdinLoss(ctx, "shell") : undefined
-  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(onStdinLost), {
+  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(), {
     onClose: watchStdinLoss
       ? (reason) => {
-          // Observability only. `reason === undefined` is a clean peer exit;
-          // an Error means the pipe broke. Both are already handled by the stop
-          // path — this exists so a crash is distinguishable from a normal quit
-          // in the logs, which the old `onDone` (a bare `() => void`) could not
-          // express.
-          //
-          // ⚠ Do NOT call `stopOnStdinLoss` here: kkrpc rejects every pending
-          // request immediately before invoking `onClose`, so a
-          // bootstrap-time `shell.ready` rejection would race the stop path and
-          // could decide the exit code (measured: exit 1 instead of 0).
           console.error(
             reason
-              ? `[host] shell stdio broke (${reason.name}: ${reason.message})`
-              : "[host] shell closed its stdio cleanly",
+              ? `[host] shell stdio broke (${reason.name}: ${reason.message}) — graceful shutdown`
+              : "[host] shell closed its stdio — graceful shutdown",
           )
+          void stopOnStdinLoss(ctx, "shell")
         }
       : undefined,
     expose: {
