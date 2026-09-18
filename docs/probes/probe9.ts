@@ -10,12 +10,31 @@
 // `process.stdin`. So the question this probe answers is: can `process.stdin`
 // actually report EOF in the host's setup?
 //
-// Answer (measured below): no. `process.stdin` and `Bun.stdin.stream()` are the
-// SAME ReadableStream, and the transport locks it at `stdio.ts:268` with
-// `getReader()`. After that, every EOF observation route throws
-// `ERR_INVALID_STATE: ReadableStream is locked` or silently never fires. The one
-// place that does see EOF is the transport's own reader, and
-// `ReadableStreamLike.pump()` (stdio.ts:241-252) discards it at `result.done`.
+// Answer (measured below): no — but the REASON stated here originally was wrong,
+// and the correction matters for anyone reading this as precedent.
+//
+// ✗ "`process.stdin` and `Bun.stdin.stream()` are the SAME ReadableStream"
+//   Measured false: `process.stdin` is a Node-style `ReadStream`,
+//   `Bun.stdin.stream()` is a web `ReadableStream`, and they are not identical
+//   objects. They ARE coupled — bun's `ReadStream` shim lazily acquires the same
+//   native readable — which is why the two still contend. Coupling at the native
+//   layer, not object identity.
+//
+// ✓ The operative cause is FLOWING MODE. `process.stdin` starts paused
+//   (`readableFlowing === null`) and stays paused under `on('end')`,
+//   `on('close')` and `on('error')` — precisely the three events kkrpc's
+//   `lifecycle` subscribes to. Only `on('data')` resumes it (measured). So a
+//   paused stdin never emits end/close and `onClose` never fires.
+//
+//   The lock is a SECOND, independent defect on top of that: with
+//   `Bun.stdin.stream().getReader()` held, every rescue route throws
+//   `ERR_INVALID_STATE: ReadableStream is locked`, including `.resume()`. The
+//   old `ReadableStreamLike.pump()` discarded EOF at `result.done` and signalled
+//   through its own `onDone` callback instead.
+//
+// Full measurement: `.temp/recon-stdio/probes-h6/FINDINGS.md`. The operational
+// conclusion below (you cannot just read stdin to detect the parent dying)
+// stands; only the stated mechanism was wrong.
 //
 // This matters beyond tidiness: it rules out "just read stdin to detect the
 // parent dying" as a fix, which is the obvious first idea.
