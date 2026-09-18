@@ -157,6 +157,7 @@ VRCX-K/
 | **写插件 / 写服务 / 碰 Cordis 前必读** | [`docs/cordis-runtime-findings.md`](docs/cordis-runtime-findings.md) **§0 结论速查**（14 条实测，逐条给探针） |
 | 优雅停机与落盘（退出路径、`ctx.effect` 归属、`bun:sqlite`） | [`docs/shutdown-and-persistence-findings.md`](docs/shutdown-and-persistence-findings.md)（probe21–23） |
 | **持久化策略与信号处理（含独立审查结论）** | [`docs/shutdown-strategy-review.md`](docs/shutdown-strategy-review.md)（持久性来自 `COMMIT`、Windows 信号不投递、exit code 契约） |
+| **写数据引擎 / 事务前必读（故障病历 + 跨引擎契约）** | [`docs/data-engine-fault-history.md`](docs/data-engine-fault-history.md)（旧工程五个真实故障 + 6 组跨引擎不变量 + DDL 回滚例外） |
 | 插件源 / 索引 / manifest / tag 版本方案 | [`docs/plugin-source-and-index-design.md`](docs/plugin-source-and-index-design.md)（probe14–20 已入档）；目录布局见 [`docs/adr-plugin-layout.md`](docs/adr-plugin-layout.md) |
 | kkrpc Rust↔npm 协议互通（M1-4 依据） | [`docs/kkrpc-interop-findings.md`](docs/kkrpc-interop-findings.md) |
 | **旧工程勘察（血统 / 可复制性 / 经验点）** | [`docs/legacy-recon/`](docs/legacy-recon/) —— **先读其 [README](docs/legacy-recon/README.md) 的两条红线**：`old/main` 是 MIT fork 链（大部分非本 org 所写），且与 `rewrite` **无共同祖先**（取用必然是显式复制） |
