@@ -19,6 +19,7 @@ Five of its 23 probes were promoted; the rest stayed in `.temp/` and are gone.
 
 ```
 bun run docs/probes/stdio-lifecycle/13-final-matrix.ts   # the consolidated matrix, ~50s
+bun run docs/probes/stdio-lifecycle/15-ready-rejection-taxonomy.ts   # shell.ready error shapes
 $env:N="3"; bun run docs/probes/stdio-lifecycle/12-rpcchannel-repeat.ts
 ```
 

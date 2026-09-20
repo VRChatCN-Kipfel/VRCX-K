@@ -13,9 +13,11 @@
 // silently disarms the watch there (this suite caught exactly that on CI).
 
 import { afterEach, beforeAll, expect, test } from "bun:test"
+import { spawn } from "node:child_process"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { dispose, wrap } from "kkrpc"
+import { dispose, RPCChannel, wrap } from "kkrpc"
+import { stdioJsonTransport } from "kkrpc/stdio"
 import { webSocketClientTransport } from "kkrpc/ws"
 import type { HostWsAPI } from "../src/api"
 import { HOST_SPAWN_DETACHED, killTree, readReady, resolveBun, warmBun } from "./helpers"
@@ -166,6 +168,51 @@ test("shell dying mid-handshake is a clean stop, not a fatal bootstrap error", a
   // One peer death must produce exactly one stop: kkrpc fires `onClose` once,
   // but a regression that also re-armed a stdin listener would double it.
   expect(stderr.match(/stdin closed \(shell is gone\)/g)).toHaveLength(1)
+}, 40_000)
+
+test("a genuine startup failure still exits loudly instead of being swallowed", async () => {
+  // The shell here is a peer that does NOT expose `ready` — a version-skewed or
+  // otherwise broken sidecar. kkrpc turns that call into an error rejection that
+  // is NOT `RPCTransportClosedError`, so bootstrap must rethrow it and exit 1.
+  //
+  // This is the counterweight to the case above: absorbing the shell-death
+  // rejection must not also absorb failures that mean "startup is broken". The
+  // blanket catch this replaced exited 0 here with only a log line, leaving the
+  // UI waiting for a `ready` that had already failed.
+  //
+  // Uses node's `spawn` (not `Bun.spawn`) because kkrpc's stdio transport needs
+  // Node-style streams: it calls `.on`/`.off` on the lifecycle object.
+  const child = spawn(bun, ["src/index.ts"], {
+    cwd: hostDir,
+    env: { ...process.env, VRCXK_SHELL: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  })
+  const stderrChunks: string[] = []
+  child.stderr!.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()))
+
+  try {
+    // Attach as the shell, but expose nothing — `ready` is therefore unknown,
+    // and the peer answers the call with an error frame.
+    const transport = stdioJsonTransport({
+      readable: child.stdout!,
+      writable: child.stdin!,
+      lifecycle: child.stdout!,
+    })
+    const channel = new RPCChannel(transport, { expose: {} })
+
+    const code = await withDeadline(
+      new Promise<number | null>((resolve) => child.once("exit", resolve)),
+      20_000,
+      "host did not exit on a broken ready handshake",
+    )
+
+    expect(stderrChunks.join("")).toContain("fatal bootstrap error")
+    expect(code).toBe(1)
+    channel.destroy()
+  } finally {
+    killTree(child.pid!)
+  }
 }, 40_000)
 
 test("stdinIsPeerChannel classifies the real fd 0 (pipe vs ignore)", async () => {

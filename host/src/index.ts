@@ -2,6 +2,7 @@ import "./log"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { readFile } from "node:fs/promises"
 import { Context } from "cordis"
+import { RPCTransportClosedError } from "kkrpc"
 import type { Entry } from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
 import Loader from "@cordisjs/plugin-loader"
@@ -266,21 +267,29 @@ async function bootstrap() {
     //
     // Under the official stdio transport, a shell that goes away while this RPC
     // is in flight makes kkrpc reject the pending request
-    // (`RPCTransportClosedError`). Letting that propagate would reach the fatal
-    // handler below and exit 1 — but "the shell died mid-handshake" is exactly
-    // the #33 case, which `stopOnStdinLoss` already handles with a graceful
-    // exit 0. The two would race, and the loser would decide the exit code.
+    // (`RPCTransportClosedError`). That rejection is EXPECTED, not a failure:
+    // "the shell died mid-handshake" is exactly the #33 case, and
+    // `stopOnStdinLoss` handles it with a graceful exit 0. Letting it propagate
+    // to the fatal handler below would race that path for the exit code, so it
+    // is absorbed here.
     //
-    // So: swallow the rejection here. Every genuine startup failure still
-    // throws from its own await above this point, and a dead shell is reported
-    // by the stdin-loss path instead.
+    // Absorb ONLY that cause. The catch used to swallow every rejection, which
+    // silently converted real startup failures — a shell that does not know this
+    // method (version-skewed sidecar), a handler that throws, a channel torn
+    // down locally — into "keep bootstrapping" while the UI waited for a `ready`
+    // that already failed. Those now reach the fatal handler and exit 1 loudly.
+    // The reachable rejections are enumerated and discriminated in
+    // `docs/probes/stdio-lifecycle/15-ready-rejection-taxonomy.ts`; that probe
+    // also asserts `instanceof` still matches across kkrpc's bundle chunks, since
+    // a split there would silently turn this narrowing into a rethrow-everything.
     try {
       await shell.ready(ready)
     } catch (error) {
-      log(`shell.ready not delivered (${describeError(error)}) — the shell is likely gone`)
-      // Give the stdin-loss path its chance to stop us cleanly. If it does not
-      // fire (no peer channel), keep bootstrapping: the ws surface is up and a
-      // later shell may still attach.
+      if (!(error instanceof RPCTransportClosedError)) throw error
+      log(`shell.ready not delivered (${describeError(error)}) — the shell is gone`)
+      // The stdin-loss path now stops us cleanly. If it does not fire (no peer
+      // channel), keep bootstrapping: the ws surface is up and a later shell may
+      // still attach.
     }
     // Tray ingress: push snapshots to the shell and fan shell `tray.action`
     // notifications back out to host/plugin handlers. Only wired when a shell
