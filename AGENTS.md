@@ -112,7 +112,17 @@ VRCX-K/
 
 ## Git 约定
 
-- **条件 `commit.gpgsign=true`**：在有条件的情况下尽量对所有提交进行GPG签名，如果当前环境不存在GPG签名应当先询问并指引签名方式（签名错误例外）。
+### 提交信息（默认结构）
+
+如用户无特殊说明，头部写成 `Type(Scope): 中文描述`；正文写中文三段（改了什么 / 为什么 / 怎么验证的）。
+
+- **Type**：`feat` / `fix` / `docs` / `refactor` / `test` / `chore` / `ci`（对照 `git log` 实际取值，不新造）。
+- **Scope**：`host` / `ui` / `shell`（= `src-tauri`）/ `build` / `docs` / `probes` / `m2` / `agents`（后续里程碑同理）；**可选**，跨面时用 `feat(host,ui): …` 或省掉括号。
+- 冒号后用一个空格；描述写"改了什么/为什么"，不写"修改了文件"。
+- **保留既有标记**：`[ci skip]`、`(#NN)` 放头部描述末尾，不占正文；不写 `Co-Authored-By` 之类署名 trailer，除非当轮明确要求。
+- ⚠ 本文件生效前的英文提交头部**不回改**；**仅当用户明确要求时**才改用英文（或其他）描述——用户的当场措辞**优先于本条默认**。
+
+示例：`feat(host): 接入上游 plugin-timer，去掉手写定时器`
 - `.gitignore` 只放通用忽略（node_modules/dist//target/ 等）。
 
 ## 临时工作区（agent 专用）
@@ -125,8 +135,15 @@ VRCX-K/
 ## 许可证红线（抄代码禁令）
 
 - **严禁抄 `vrcx-0`（Map1en 系）的任何代码/结构/文件**——它是 **GPL** 协议，复制/改写/照搬其文件会污染本仓库。仅可观察其"产品方向可行性"（界面长什么样、功能有哪些），且须在文档记录为独立设计。我们与它同为"VRCX 能力 + Tauri 重写"是需求同源，架构是独立决策（见 docs/ROADMAP.md §参照）。
-- 可安全借鉴（MIT/Apache）：**VRCX 官方**（MIT，功能复刻主参照，能力清单/数据模型思路）、**koishi/cordis**（MIT）、**kkrpc**（Apache-2.0）。
+- 可安全借鉴（MIT/Apache）：**VRCX 官方**（MIT，功能复刻主参照，能力清单/数据模型思路）、**`cordis` / `@cordisjs/*`**（MIT，可直接依赖）、**kkrpc**（⚠ 见下条，上游许可证声明不一致）。
+- ⛔ **`@koishijs/*` 的 console / WebUI 家族是 AGPL-3.0**（`plugin-console` / `-market` / `-config` / `-commands` / `-admin` / `client` …），**与 MIT 的兄弟包同在一个 npm scope 下，没有任何命名约定可区分** —— 而它们恰是 M2-4/M2-5 最想参照的那批。**取用前必须逐包查 `license`，不得按 scope 推断**（判据：`npm view <pkg> license`，见 `AGPL-3.0` 即禁区，不做例外）。
+- ⚠ **`koishi` 核心不可复用**（虽然也是 MIT）：与 satori 深度耦合（`Context extends satori.Context`），且锁 **cordis 3**（我们 rc.9），实测混用抛 `Export named 'Schema' not found in cordis`。**通用层已被上游抽到 `cordiverse`** ⇒ 需要什么去那里找。
 - 任何**GPL/AGPL 项目**的代码/文件一律不得进入本仓库（含引用/复制/改写其结构文件）；只允许行为/能力层面观察参照。
+- ⚠ **AGPL 的精确边界 = 仅 `@koishijs/*`**，**不是**"console / WebUI 家族"这种按功能描述的说法。两个 scope 名字相近，**必须逐包实测**：
+  - `@koishijs/client`、`@koishijs/plugin-market` → **AGPL-3.0**（禁区）
+  - `@cordisjs/client`、`@cordisjs/components`、`@cordisjs/plugin-webui` → **MIT**（**可用**）
+  早先的表述把这批统称为"console/WebUI 家族是 AGPL"，**连带把 `@cordisjs/*` 那半边也说成了禁区** —— 那是错的（2026-09 逐包实测修正）。**判据不变**：`npm view <pkg> license`，见 `AGPL-3.0` 即禁区，**不做例外，也不按 scope 推断**。
+- ⚠ **kkrpc 的许可证靠推断，不是实测**：`npm view kkrpc@2.1.0 license` **返回空**（摘要页显示 `Proprietary`），发布 tarball 内无 LICENSE 文件；GitHub 仓库 LICENSE 为 **Apache-2.0**，README 却写 **MIT** —— **三处声明互相矛盾**。**不构成 AGPL 红线**，但如果要做严格合规审查或再分发，**这是"上游未把话说清"，不能当成已确认的 Apache-2.0**。
 - **进程注入/读游戏内存/Unity 内 UI** 类能力是禁区（官方不背书，ToS 风险），agent 不得实现或建议实现。
 - 本仓库自身许可证**待定**（倾向 MIT），决定后补 LICENSE；决定前按宽松许可方向管理借鉴边界。
 - 详表见 `docs/ROADMAP.md` §参照与许可证卫生。
@@ -139,6 +156,23 @@ VRCX-K/
 - **服务必须"先 provide、后 attach"**：`inject` 是**就绪门不是访问门**——未 inject 的插件照样能读服务，但注入尚未提供的服务的插件会卡在 `PENDING`，provide 后才 `ACTIVE`。（`host/src/index.ts` 的 tray/shortcut 即此模式。）
 - **持久性来自 `COMMIT`，不是来自 `ctx.effect()` 的 disposer**：已提交的行即使被**硬杀**也存活；只写在 disposer 里的数据被硬杀时**全丢**。⇒ 数据落盘走**写入路径**；`ctx.effect()` 里只放**非持久性清理**（句柄、临时文件、WS 关闭）。
   配套两条硬事实：① 写在**根 `ctx`** 上的 effect 不进 `registry`、**不报错、disposer 永不执行**（只有插件 fiber 内的会被回收）；② **Windows 上 `SIGTERM`/`SIGINT` 根本不投递**（`kill()` 是硬 TerminateProcess，处理器不触发），那两个处理器在 Windows 是**死代码**。详见 [`docs/shutdown-strategy-review.md`](docs/shutdown-strategy-review.md)。
+- **`ctx.*` 是 inject 门控的，缺 `inject` 是硬失败**：插件里碰 `ctx.interval` / `ctx.notify` 等而**没在 `inject` 数组里声明** ⇒ fiber **FAILED，插件永不加载**（零警告）。⚠ 写测试时**别把调用包在 try/catch 里**——那样 fiber 会保持 ACTIVE，读数会说"能用"而实际不能（实测踩过）。`host/tests/upstream-plugins.test.ts` 钉了两侧。
+
+## ⚠ 动机制之前先查上游（四次里错四次换来的规矩）
+
+> **cordis 的插件生态里已经有大量现成件。** 我们已四次准备自己造，结果每次都发现上游有：
+>
+> | 我们准备造的 | 上游已有 |
+> |---|---|
+> | #19「effect 纪律 + lint 拦裸定时器」 | **`@cordisjs/plugin-timer`**（`ctx.timeout/interval/...` 全部经 `ctx.effect`） |
+> | base 分组命名空间（`base@storage`） | **`@cordisjs/plugin-group`**（cordis 原生 group，子项独立启停/配置） |
+> | 手写 `log()` | **`@cordisjs/plugin-logger-console`** |
+> | `base-state.json` 的 `entries`（启停/配置） | **`EntryOptions.disabled` / `.config`** |
+>
+> ⇒ **动手前先查**：`cordis` / `cordiverse` 组织的仓库（约 26 个），以及 `npm view <pkg>` 确认**是否已发布**（源码在 main ≠ 能用）。
+>
+> **判据**：**如果某能力听起来"框架应该自带"，先去上游找，再决定造不造。**
+> **反例警告**：`base-state.json` 的 `entries` 已经写进文档与两条 issue 评论，才发现是第二份真源；`Dotnet/` 曾被预判"用不上"而跳过整块勘察，结果里面**有本 org 66 次提交的原创**。**两次都是"没查就下结论"。**
 
 ## 资料地图（唯一副本原则）
 
@@ -152,6 +186,7 @@ VRCX-K/
 | **写插件 / 写服务 / 碰 Cordis 前必读** | [`docs/cordis-runtime-findings.md`](docs/cordis-runtime-findings.md) **§0 结论速查**（14 条实测，逐条给探针） |
 | 优雅停机与落盘（退出路径、`ctx.effect` 归属、`bun:sqlite`） | [`docs/shutdown-and-persistence-findings.md`](docs/shutdown-and-persistence-findings.md)（probe21–23） |
 | **持久化策略与信号处理（含独立审查结论）** | [`docs/shutdown-strategy-review.md`](docs/shutdown-strategy-review.md)（持久性来自 `COMMIT`、Windows 信号不投递、exit code 契约） |
+| **写数据引擎 / 事务前必读（故障病历 + 跨引擎契约）** | [`docs/data-engine-fault-history.md`](docs/data-engine-fault-history.md)（旧工程五个真实故障 + 6 组跨引擎不变量 + DDL 回滚例外） |
 | 插件源 / 索引 / manifest / tag 版本方案 | [`docs/plugin-source-and-index-design.md`](docs/plugin-source-and-index-design.md)（probe14–20 已入档）；目录布局见 [`docs/adr-plugin-layout.md`](docs/adr-plugin-layout.md) |
 | kkrpc Rust↔npm 协议互通（M1-4 依据） | [`docs/kkrpc-interop-findings.md`](docs/kkrpc-interop-findings.md) |
 | **旧工程勘察（血统 / 可复制性 / 经验点）** | [`docs/legacy-recon/`](docs/legacy-recon/) —— **先读其 [README](docs/legacy-recon/README.md) 的两条红线**：`old/main` 是 MIT fork 链（大部分非本 org 所写），且与 `rewrite` **无共同祖先**（取用必然是显式复制） |

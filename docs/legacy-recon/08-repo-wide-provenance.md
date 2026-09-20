@@ -5,6 +5,19 @@
 > **本台账只上报事实，不做可用性判断** —— 「可不可以复制」由 captain / 用户裁定。
 > 先前结论交叉印证：`05-provenance.md`（t5，数据库层）、`00-SUMMARY.md`（t6，含 cap-3「old/main 与 rewrite 无共同祖先」）。
 
+> ## ⚠ 修正（2026-09 复核）：`docs/` 的 A 类判定有硬错误
+>
+> 本文件原判 **`docs/` 31 个全部 A 类（org 从零创建）**，**实测不成立**：
+>
+> - 实际为 **19 纯净 A + 12 rename/copy 自上游**
+> - 成因：`d10b0cc0`（2026-08-08「仓库转移收尾」巨型提交）把**上游创建的文件**搬运进 `docs/`
+> - 最强反例：`docs/features/LUO_FEATURES.md` 是 `README.md` 的 **COPY**，血统直达 pypy 2019
+>
+> ⇒ **全仓 A 类总数应为 87 − 12 = 75**（下文 §1 的 87 是**修正前**的数字，保留以见修正幅度）。
+> ⇒ **根因是方法学缺口**：本普查只做「路径级存在性」，**对 rename/copy 掩盖的血统会漏**（§0 口径说明 L15 已标此风险，且 §5 已列 `configRepository`/`SQLiteAdapter` 两个已知例外 —— `docs/` 这 12 个是**同一缺口的更大一批**）。
+> ⇒ **凡遇「一次性大规模目录/品牌重组」提交，必须补 `git show --find-copies-harder -C50% <commit>`**。
+> 详见 §3.3（已改写）。
+
 ---
 
 ## 0. 方法（事实）
@@ -39,7 +52,7 @@
 |---|---|---|---|---|---|---|
 | `src/` | 1192 | 34 | 1 | 0 | 1157 | A 全部集中在 `src/services/database/`（34 个） |
 | `Dotnet/` | 118 | 17 | 0 | 0 | 101 | A = 三引擎 + VRCX.Tests 全套 |
-| `docs/` | 31 | 31 | 0 | 0 | 0 | **全部 A**：org 自建架构文档 |
+| `docs/` | 31 | ~~31~~ **19** | 0 | 0 | ~~0~~ **12** | ⚠ **原判"全部 A"有误**，见 §3.3 修正 |
 | `build-scripts/` | 11 | 0 | 0 | 0 | 11 | — |
 | `src-electron/` | 12 | 0 | 0 | 0 | 12 | — |
 | `Installer/` | 7 | 0 | 0 | 0 | 7 | — |
@@ -143,10 +156,35 @@ src/services/database/pushEngine.js
 src/services/database/pushEngine.test.js
 ```
 
-### 3.3 `docs/` org 原创（31 个）
+### 3.3 `docs/` org 原创（~~31 个~~ → **19 个**）⚠ 本节已于 2026-09 修正
 
-`docs/README.md`、`docs/SKILL.md` + `docs/architecture/` 全部 11 个（ADAPTER_API / ADAPTER_GUIDE / CONFIG_REFACTOR / DATA_REFRESH / ENGINE_CONTRIBUTOR_GUIDE / ENGINE_MIGRATION_GUIDE / MULTI_ACCOUNT_V4_DETAIL_DESIGN / PGSQL_DESIGN / SECURITY_NOTES / TRANSACTION_DESIGN）+ `docs/architecture/models/` 全部 17 个（vrcx_erd / vrcx_mcd / vrcx_sr 各 DDL/MLD/MMD/SVG/gv/geo.json）+ `docs/features/JIRAI_FEATURES.md` + `docs/features/LUO_FEATURES.md`。
-作者全部为 XChen446（TRANSACTION_DESIGN.md 还有 1zyao）。
+> **原判错误（已更正）**：本节原先称 `docs/` **31 个全部 A 类（org 自建）**。**实测不成立。**
+>
+> `d10b0cc0`（2026-08-08「仓库转移收尾」大提交）**把 12 个文件 rename/copy 进 `docs/`，而它们由上游作者创建**。用 `git show --find-copies-harder -C50% d10b0cc0` 可复现 **11 条 `=>` 记录**：
+>
+> ```
+> docs/{ => architecture}/CONFIG_REFACTOR.md
+> docs/{ => architecture}/DATA_REFRESH.md
+> docs/{ => architecture}/TRANSACTION_DESIGN.md
+> docs/{ => architecture/models}/vrcx_erd.dbml
+> docs/{ => architecture/models}/vrcx_erd.mmd
+> docs/{ => architecture/models}/vrcx_mcd.mcd
+> docs/{ => architecture/models}/vrcx_mcd_erd_crow.gv
+> docs/{ => architecture/models}/vrcx_mcd_mld.md
+> docs/{ => architecture/models}/vrcx_sr.mcd
+> docs/{ => features}/JIRAI_FEATURES.md
+> README.md => docs/features/LUO_FEATURES.md        ← 最强反例
+> ```
+>
+> **最强反例 `LUO_FEATURES.md` 是 `README.md` 的 `C050` COPY** —— 血统直达 **pypy 2019-08-16 Initial commit** 与 24 位上游作者。**copy 与 rename 同样搬运上游内容，而且更隐蔽**（比 `configRepository.js` 那条 rename 链更难发现）。
+>
+> 另：由 ERD 源（`.dbml` / `.mcd`）派生的图与 DDL（`svg` / `ddl` / `mld` / `geo`）**同源**，不能算 org 原创。
+>
+> **⇒ 修正后的构成：19 纯净 A + 12 rename/copy 自上游。**
+
+**19 个纯净 A**：`docs/README.md`、`docs/SKILL.md`，加 `docs/architecture/` 中与上表 `=>` 清单**不相交**的文档（`ADAPTER_API` / `ADAPTER_GUIDE` / `ENGINE_CONTRIBUTOR_GUIDE` / `ENGINE_MIGRATION_GUIDE` / `MULTI_ACCOUNT_V4_DETAIL_DESIGN` / `PGSQL_DESIGN` / `SECURITY_NOTES`，以及 `models/` 中未被搬运的派生件）。
+
+**⚠ 方法学教训（本节的真正价值）**：「路径由 org 创建」**不等于**「内容由 org 创作」。`d10b0cc0` 这类**一次性大规模品牌/目录重组提交**最容易掩盖 rename 与 copy，**只看路径级分类会系统性高估 A 类**。凡遇到此类"巨型提交"，必须补一次 `--find-copies-harder` 扫描。
 
 ### 3.4 其他 org 原创（5 个）
 
