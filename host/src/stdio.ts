@@ -242,6 +242,17 @@ function fanout<T>(label: string) {
  * stdin-watch.ts takes that reader for the shell-less case, and the two are
  * mutually exclusive in BOTH orderings (measured).
  *
+ * ASYMMETRY worth knowing before reading `connectShellStdio`: this transport
+ * takes stdin's reader UNCONDITIONALLY once constructed — `RPCChannel`
+ * subscribes on construction, and that subscription (`readable.on("data")`) is
+ * precisely what puts stdin into flowing mode at all. Only the STOP is gated, on
+ * `stdinIsPeerChannel()`. So a `VRCXK_SHELL=1` host whose fd 0 is not a pipe
+ * (the null device, a TTY, a redirected file) still has no self-stop path: the
+ * transport holds the reader and nothing acts on the close. That is unchanged
+ * from before this transport swap — the old pump's `onDone` sat behind the
+ * identical guard — so it is a pre-existing limitation, not a regression. It is
+ * simply sharper now that the reader is always taken.
+ *
  * The transport's `onClose` is wired to the stop path in `connectShellStdio`.
  * It first REJECTS every pending request (`handleTransportClose`), which is why
  * `bootstrap` treats a failed `shell.ready` as an expected outcome rather than a
