@@ -27,7 +27,7 @@
 // difference between them is flow mode, then flow mode — not the lock — is what
 // the official shape is missing.
 
-import { stdioJsonTransport, type ReadableLike, type WritableLike } from "kkrpc/stdio"
+import { stdioJsonTransport, type ReadableLike, type WritableLike } from "../../../host/node_modules/kkrpc/dist/stdio.js"
 import { EventEmitter } from "node:events"
 import { fstatSync } from "node:fs"
 

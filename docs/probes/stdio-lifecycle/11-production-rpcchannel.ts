@@ -19,8 +19,8 @@
 //
 // MODE = production | official
 
-import { RPCChannel } from "kkrpc"
-import { stdioJsonTransport, nodeStdioTransport, type ReadableLike, type WritableLike } from "kkrpc/stdio"
+import { RPCChannel } from "../../../host/node_modules/kkrpc/dist/mod.js"
+import { stdioJsonTransport, nodeStdioTransport, type ReadableLike, type WritableLike } from "../../../host/node_modules/kkrpc/dist/stdio.js"
 import { fstatSync } from "node:fs"
 
 const shape = process.env.MODE ?? "production"

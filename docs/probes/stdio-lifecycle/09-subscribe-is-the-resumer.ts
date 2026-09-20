@@ -18,7 +18,7 @@
 // MODE = official | production
 // SUBSCRIBE = 0 | 1
 
-import { stdioJsonTransport, type ReadableLike, type WritableLike } from "kkrpc/stdio"
+import { stdioJsonTransport, type ReadableLike, type WritableLike } from "../../../host/node_modules/kkrpc/dist/stdio.js"
 import { fstatSync } from "node:fs"
 
 const shape = process.env.MODE ?? "official"

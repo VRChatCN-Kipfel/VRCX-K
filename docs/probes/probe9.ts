@@ -1,13 +1,16 @@
 // Can the host notice that its parent went away? (orphaned dev-host follow-up)
 //
-// The host never exits on its own (`host/src/index.ts:296`), so every teardown
-// path is external: the stdio `stop` RPC, SIGTERM (Unix-only), SIGINT, or exit
-// 51 for the shell's supervisor. A host started WITHOUT a shell has none of
-// them, and the only remaining signal would be its stdin reaching EOF.
+// The host never exits on its own (host/src/index.ts installs no self-exit path;
+// its only handlers are the SIGTERM/SIGINT pair at the bottom that just call
+// process.exit, and SIGTERM is Unix-only), so every teardown path is external:
+// the stdio `stop` RPC, SIGTERM, SIGINT, or exit 51 for the shell's supervisor. A
+// host started WITHOUT a shell has none of them, and the only remaining signal
+// would be its stdin reaching EOF.
 //
 // kkrpc's stdio transport DOES listen for that: it takes a `lifecycle` object and
-// subscribes to its 'end'/'close'/'error'. `host/src/stdio.ts:270` passes
-// `process.stdin`. So the question this probe answers is: can `process.stdin`
+// subscribes to its 'end'/'close'/'error'. `nodeStdioTransport()` wires
+// `lifecycle` to `process.stdin` automatically — see its doc comment in
+// host/src/stdio.ts. So the question this probe answers is: can `process.stdin`
 // actually report EOF in the host's setup?
 //
 // Answer (measured below): no — but the REASON stated here originally was wrong,
@@ -32,7 +35,7 @@
 //   old `ReadableStreamLike.pump()` discarded EOF at `result.done` and signalled
 //   through its own `onDone` callback instead.
 //
-// Full measurement: `.temp/recon-stdio/probes-h6/FINDINGS.md`. The operational
+// Full measurement: `docs/probes/stdio-lifecycle/FINDINGS.md`. The operational
 // conclusion below (you cannot just read stdin to detect the parent dying)
 // stands; only the stated mechanism was wrong.
 //
@@ -44,9 +47,9 @@
 //
 // Four configurations, same stimulus (parent writes 3 frames, then closes the
 // pipe while staying alive so nothing can be blamed on the parent's death):
-//   transport — Bun.stdin.stream()            (what stdio.ts:268 reads)
+//   transport — Bun.stdin.stream()            (what the old stdio.ts pump read)
 //   resumed   — process.stdin.resume() + data (the obvious fix attempt)
-//   locked    — transport FIRST, then resume  (the host's real ordering)
+//   locked    — transport FIRST, then resume  (the old host's real ordering)
 //   double    — transport reader + resume together
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -73,7 +76,8 @@ const config = process.env.CHILD_CONFIG
 const rec = (s) => { try { appendFileSync(logPath, s + "\\n") } catch {} }
 
 if (config === "transport" || config === "locked" || config === "double") {
-  // Exactly what host/src/stdio.ts:268 does.
+  // The shape the pre-#38 host/src/stdio.ts used, and the reason it could not
+  // deliver onClose (see the mechanism note above).
   const reader = Bun.stdin.stream().getReader()
   const dec = new TextDecoder()
   void (async () => {

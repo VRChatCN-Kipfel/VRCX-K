@@ -19,10 +19,26 @@
 import { spawn } from "node:child_process"
 import { resolve } from "node:path"
 import { writeFileSync } from "node:fs"
+import { pathToFileURL } from "node:url"
+
+// Resolved HERE, in the parent, and injected into the `-e` child as absolute
+// file: URLs. The child must NOT use bare "kkrpc" specifiers: `bun -e` resolves
+// those against its CWD rather than against this file, so running this probe
+// from any other directory made every child die on import. That failure was
+// silent — a child that cannot import prints nothing, so the matrix reported ten
+// rows of `undefined` and still exited 0, which reads as "measured, nothing
+// fired" instead of "never ran". The guard at the bottom now turns that class of
+// failure loud.
+const KKRPC_MODULE = pathToFileURL(
+  resolve(import.meta.dir, "../../../host/node_modules/kkrpc/dist/mod.js"),
+).href
+const KKRPC_STDIO = pathToFileURL(
+  resolve(import.meta.dir, "../../../host/node_modules/kkrpc/dist/stdio.js"),
+).href
 
 const CHILD = `
-import { RPCChannel } from "kkrpc"
-import { stdioJsonTransport, nodeStdioTransport, type ReadableLike, type WritableLike } from "kkrpc/stdio"
+import { RPCChannel } from ${JSON.stringify(KKRPC_MODULE)}
+import { stdioJsonTransport, nodeStdioTransport } from ${JSON.stringify(KKRPC_STDIO)}
 import { fstatSync } from "node:fs"
 
 const shape = process.env.SHAPE
@@ -167,6 +183,23 @@ for (const r of results) {
     ].join(" | "),
   )
 }
+// Refuse to report a matrix that did not actually run. A child that fails to
+// import (or to honor SHAPE) yields a row of `undefined`s, which is
+// indistinguishable from "measured: nothing fired" unless it is treated as
+// failure. This is the guard that makes the CWD bug above loud instead of silent.
+const broken = results.filter((r) => !r._shapeHonored)
+if (broken.length > 0) {
+  console.error(
+    `\n=== ${broken.length}/${results.length} rows did not honor SHAPE — the matrix is NOT valid ===\n` +
+      broken
+        .map((r) => `  ${r._scenario}: exit=${r._exitCode} raw=${JSON.stringify(r).slice(0, 200)}`)
+        .join("\n") +
+      "\n\nA row of undefined values means the child never imported (check the" +
+      "\nkkrpc file: URLs above) — it does NOT mean onClose did not fire.\n",
+  )
+  process.exit(1)
+}
+
 // Optional dump path, matching 12-rpcchannel-repeat.ts: this probe is
 // self-contained and must run on a clean clone, so nothing is written unless the
 // caller asks (`bun run <this> out.json`). The path used to be hardcoded to the
