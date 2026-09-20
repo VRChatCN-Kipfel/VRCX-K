@@ -112,7 +112,17 @@ VRCX-K/
 
 ## Git 约定
 
-- **条件 `commit.gpgsign=true`**：在有条件的情况下尽量对所有提交进行GPG签名，如果当前环境不存在GPG签名应当先询问并指引签名方式（签名错误例外）。
+### 提交信息（默认结构）
+
+如用户无特殊说明，头部写成 `Type(Scope): 中文描述`；正文写中文三段（改了什么 / 为什么 / 怎么验证的）。
+
+- **Type**：`feat` / `fix` / `docs` / `refactor` / `test` / `chore` / `ci`（对照 `git log` 实际取值，不新造）。
+- **Scope**：`host` / `ui` / `shell`（= `src-tauri`）/ `build` / `docs` / `probes` / `m2` / `agents`（后续里程碑同理）；**可选**，跨面时用 `feat(host,ui): …` 或省掉括号。
+- 冒号后用一个空格；描述写"改了什么/为什么"，不写"修改了文件"。
+- **保留既有标记**：`[ci skip]`、`(#NN)` 放头部描述末尾，不占正文；不写 `Co-Authored-By` 之类署名 trailer，除非当轮明确要求。
+- ⚠ 本文件生效前的英文提交头部**不回改**；**仅当用户明确要求时**才改用英文（或其他）描述——用户的当场措辞**优先于本条默认**。
+
+示例：`feat(host): 接入上游 plugin-timer，去掉手写定时器`
 - `.gitignore` 只放通用忽略（node_modules/dist//target/ 等）。
 
 ## 临时工作区（agent 专用）
