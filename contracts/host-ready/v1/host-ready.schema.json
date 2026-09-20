@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vrcx-k.dev/contracts/host-ready/v1/host-ready.schema.json",
+  "title": "VRCX-K Host Ready",
+  "description": "The host → shell startup handshake: the host announces that its kkrpc/ws surface is listening and how to authenticate to it. This is the FIRST frame the host sends, so it is versioned like every other cross-boundary DTO — a shell that does not recognise `schemaVersion` must refuse the handshake rather than connect to a surface it cannot speak to.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "port", "token", "hostVersion"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Version of THIS handshake. Bumped only for a breaking shape change; the shell rejects a value it does not implement, which is what turns 'version-skewed sidecar' from a silent half-start into a named failure."
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "description": "TCP port the host's kkrpc/ws server bound on 127.0.0.1. It binds port 0 and reports the port the OS assigned, so this is always a concrete connectable port — never 0."
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Per-launch bearer token (32 random bytes, lowercase hex) that the ws client must present as `?token=`. The pattern is part of the contract, not a stylistic preference: a truncated or uppercased token would be rejected by the host's own comparison, so catching it here names the real fault."
+    },
+    "hostVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The host build's own version (the same value the ws API `getVersion()` returns, and the one the host already prints in its `ready` log line). Carried here because the shell supervises the host but otherwise has NO way to learn which build it is supervising: `getVersion()` is reachable only over the ws connection the face opens later."
+    }
+  }
+}

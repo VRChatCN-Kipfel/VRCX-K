@@ -6,7 +6,6 @@ import { RPCTransportClosedError } from "kkrpc"
 import type { Entry } from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
 import Loader from "@cordisjs/plugin-loader"
-import { HOST_VERSION } from "./api"
 import { log } from "./log"
 import { ShutdownSignal } from "./signal"
 import { makeRestartRequester } from "./restart"
@@ -259,7 +258,11 @@ async function bootstrap() {
   }
 
   const ready = await listenHostWs(ctx)
-  log(`ready ${JSON.stringify({ ...ready, version: HOST_VERSION })}`)
+  // `ready` is now the versioned handshake itself (see
+  // contracts/host-ready/v1/host-ready.schema.json), so the version is part of
+  // the payload rather than something this log line bolts on. The tests parse
+  // this line, so it keeps the bare JSON object shape.
+  log(`ready ${JSON.stringify(ready)}`)
 
   if (process.env.VRCXK_SHELL === "1") {
     const shell = connectShellStdio(ctx)

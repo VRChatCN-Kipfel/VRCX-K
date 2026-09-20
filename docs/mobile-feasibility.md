@@ -74,7 +74,7 @@
 return `ws://127.0.0.1:${ready.port}?token=${ready.token}`
 ```
 
-`HostReady = { port, token }`（`App.tsx:120/126` 经 Tauri IPC 取得）——**语义上已经是一次"连接信息交付"**，只是被写死成 localhost + 明文。
+`HostReady` 现为版本化契约 `{ schemaVersion, port, token, hostVersion }`（`contracts/host-ready/v1/host-ready.schema.json`，`App.tsx:120/126` 经 Tauri IPC 取得）——**语义上已经是一次"连接信息交付"**，只是被写死成 localhost + 明文。注意它仍**不含完整端点**（无 scheme / host / path），这正是本节要补的。
 
 需要：
 - `HostReady` 承载**完整端点**（scheme + host + port），而非只有 port；或引入"配对结果"作为端点来源。

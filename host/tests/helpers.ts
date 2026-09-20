@@ -140,7 +140,7 @@ export function killTreeSync(pid: number | undefined): void {
 export async function readReady(
   stderr: ReadableStream<Uint8Array>,
   timeoutMs = 15_000,
-): Promise<{ port: number; token: string; version: string }> {
+): Promise<{ schemaVersion: number; port: number; token: string; hostVersion: string }> {
   const reader = stderr.getReader()
   const decoder = new TextDecoder()
   let buf = ""
@@ -152,7 +152,12 @@ export async function readReady(
     const match = buf.match(/\[host\] ready ({.*})/)
     if (match) {
       reader.releaseLock()
-      return JSON.parse(match[1]) as { port: number; token: string; version: string }
+      return JSON.parse(match[1]) as {
+        schemaVersion: number
+        port: number
+        token: string
+        hostVersion: string
+      }
     }
   }
   throw new Error(`host did not become ready\n${buf}`)

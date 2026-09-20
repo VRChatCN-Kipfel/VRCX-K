@@ -37,6 +37,10 @@ export const CONTRACTS: Pair[] = [
     schema: "contracts/plugin-index/v1/plugin-index-entry.schema.json",
     generated: "host/src/contracts/pluginIndexEntry.generated.ts",
   },
+  {
+    schema: "contracts/host-ready/v1/host-ready.schema.json",
+    generated: "host/src/contracts/hostReady.generated.ts",
+  },
   // NOT LISTED, DELIBERATELY: host/src/contracts/hostLifecycle.ts.
   //
   // Its header says "Generated ... Do not hand-edit", and json-schema-to-

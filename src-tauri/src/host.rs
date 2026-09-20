@@ -5,7 +5,6 @@ use crate::host_lifecycle::{
 use crate::kkrpc_peer::Peer;
 use crate::process_tree::ProcessTree;
 use crate::shell_sys::register_shell_handlers;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -62,11 +61,10 @@ impl Default for StormPolicy {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HostReady {
-    pub port: u16,
-    pub token: String,
-}
+// `HostReady` is the versioned handshake contract — see `host_ready.rs` and
+// `contracts/host-ready/v1/host-ready.schema.json`. It is re-exported here
+// because this module owns the spawn path that produces it.
+pub use crate::host_ready::HostReady;
 
 #[cfg(test)]
 pub struct HostSession {
@@ -1061,20 +1059,37 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
 
     // Register the mandatory startup handshake before reading stdout. If the
     // host is already ready, its frame remains safely buffered in the pipe.
+    //
+    // The payload is parsed into the versioned contract type and validated
+    // before it is stored, so a malformed or version-skewed handshake is refused
+    // HERE. The previous field-by-field `get()` would silently yield `None` for
+    // anything unexpected, leaving the shell to report the far less accurate
+    // "host did not call ready() within 10s" — which blames the host for a
+    // handshake the shell itself could not understand.
     let ready_slot: Arc<Mutex<Option<HostReady>>> = Arc::new(Mutex::new(None));
     let ready_handler = Arc::clone(&ready_slot);
     peer.on(
         "ready",
         Arc::new(move |args| {
             if let Some(info) = args.first() {
-                if let (Some(port), Some(token)) = (
-                    info.get("port").and_then(|v| v.as_u64()),
-                    info.get("token").and_then(|v| v.as_str()),
-                ) {
-                    *ready_handler.lock().expect("ready slot") = Some(HostReady {
-                        port: port as u16,
-                        token: token.to_string(),
-                    });
+                match serde_json::from_value::<HostReady>(info.clone()) {
+                    Ok(ready) if ready.is_supported() => {
+                        *ready_handler.lock().expect("ready slot") = Some(ready);
+                    }
+                    Ok(ready) => {
+                        eprintln!(
+                            "[shell] host sent an unsupported ready handshake \
+                             (schemaVersion={}, expected={}, port={}, token_len={}, hostVersion={:?})",
+                            ready.schema_version,
+                            crate::host_ready::HOST_READY_SCHEMA_VERSION,
+                            ready.port,
+                            ready.token.len(),
+                            ready.host_version,
+                        );
+                    }
+                    Err(err) => {
+                        eprintln!("[shell] host sent a malformed ready handshake: {err}");
+                    }
                 }
             }
             serde_json::Value::Null
