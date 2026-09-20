@@ -167,5 +167,11 @@ for (const r of results) {
     ].join(" | "),
   )
 }
-writeFileSync(resolve(process.cwd(), ".temp/recon-stdio/probes-h6/out-13-final-matrix.json"), text)
+// Optional dump path, matching 12-rpcchannel-repeat.ts: this probe is
+// self-contained and must run on a clean clone, so nothing is written unless the
+// caller asks (`bun run <this> out.json`). The path used to be hardcoded to the
+// author's `.temp/recon-stdio/probes-h6/`, which does not exist in a fresh
+// checkout — the table printed fine and then the process died with ENOENT.
+const outPath = process.argv[2]
+if (outPath) writeFileSync(resolve(process.cwd(), outPath), text)
 process.exit(0)

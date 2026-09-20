@@ -222,60 +222,100 @@ Real `nodeStdioTransport()` + real `RPCChannel`:
 
 ## 4. Reproduction
 
-All commands from the repo root. Every probe run with `bun`. fd 0 is **always** a real pipe (`stdio: ["pipe","pipe","pipe"]`) — TRAP 1 and TRAP 2 are structurally impossible in these drivers, and every case prints its own `fstatSync(0)` reading.
+### 4.1 What you can actually run (the five probes promoted with this report)
+
+These are self-contained and live in this directory. Run them from the repo root.
 
 ```powershell
-cd E:\Users\30885\VRCX-K
-$p = ".temp/recon-stdio/probes-h6"
+# The consolidated final matrix (§3.1). Prints the whole table; no file written
+# unless you pass a path. ~50s: 10 children, each on a 5s observation window.
+bun run docs/probes/stdio-lifecycle/13-final-matrix.ts
+bun run docs/probes/stdio-lifecycle/13-final-matrix.ts .temp/out-13.json
 
-# Object model / mechanism
-bun $p/00-driver.ts $p/00-identity.ts
-bun $p/00-driver.ts $p/01b-lock-semantics-safe.ts
-bun $p/02-driver.ts 02-coupling-matrix.ts $p/out-02-coupling-matrix.json
+# Reproducibility for the RPCChannel cells (§3.2, last four rows). Drives 11 for
+# you — N=3 matches the report and takes ~60s (4 scenarios × 3 runs × 5s).
+$env:N="3"; bun run docs/probes/stdio-lifecycle/12-rpcchannel-repeat.ts
 
-# Real kkrpc shapes
-bun $p/03-driver.ts $p/out-03-real-kkrpc.json
-$env:MODES="official-resume,production-resume,stub-paused,stub-resume"
-bun $p/02-driver.ts 04-hypothesis-test.ts
-
-# Clean room (removes the listener confound)
-bun $p/05-driver.ts $p/out-05-clean-room.json
-
-# Flow-mode baseline
-foreach ($e in @("none","end","close","error","data","readable")) {
-  $env:EVENT = $e; bun $p/00-driver.ts $p/07-listen-triggers-resume.ts
-}
-
-# Single-variable + reproducibility + end-to-end
+# Single-variable causal test (§1.6): subscribe() is what resumes stdin.
+# See §4.3 for why the trailing pipe matters.
 foreach ($m in @("official","production")) { foreach ($s in @("0","1")) {
-  $env:MODE=$m; $env:SUBSCRIBE=$s; bun $p/00-driver.ts $p/09-subscribe-is-the-resumer.ts } }
-$env:N="5"; bun $p/10-repeat.ts $p/out-10-repeat.json
-$env:N="3"; bun $p/12-rpcchannel-repeat.ts $p/out-12-rpcchannel-repeat.json
-bun $p/13-final-matrix.ts
-bun $p/14-abrupt-really-abrupt.ts $p/out-14-abrupt.json
+  $env:MODE=$m; $env:SUBSCRIBE=$s
+  "frame" | bun run docs/probes/stdio-lifecycle/09-subscribe-is-the-resumer.ts } }
+
+# The discriminating lock-vs-flow cells (§1.5). Same fd-0 caveat.
+foreach ($m in @("stub-paused","stub-resume","official-resume","production-resume")) {
+  $env:MODE=$m; "frame" | bun run docs/probes/stdio-lifecycle/04-hypothesis-test.ts }
+
+# The end-to-end probe 12 drives (§3.2), one cell's full JSON at a time
+# (MODE = production | official).
+$env:MODE="official"; "frame" | bun run docs/probes/stdio-lifecycle/11-production-rpcchannel.ts
 ```
 
-**Warning (a trap I hit):** `02-driver.ts` **overrides `MODE`** with its own default mode list (`stream-only,stdin-only,…`). Running it against a probe that switches on `MODE` silently tests the wrong shapes and produced one contradictory reading I had to discard (§6). Use it only with an explicit `$env:MODES` list, or use the dedicated drivers (`05`, `12`, `13`). `13-final-matrix.ts` asserts `shapeHonored` per row for exactly this reason.
+Expected readings, as measured (see §3 for the numbers each cell should print):
+`13` → `onCloseFired` true **only** for the two `official-rpc` rows; `09` →
+`official`+`SUBSCRIBE=1` flips `onCloseFired` to true and `readableFlowing` to
+`true` while the other three cells stay `null`; `04` → `stub-paused` false /
+`stub-resume` true / `production-resume` false with
+`resumeError: "TypeError: Invalid state: ReadableStream is locked"`.
 
-### Probe files and raw outputs
+### 4.2 What is NOT in this repo
 
-| Probe | Purpose | Raw output |
+This report was extracted from a 23-probe investigation (15 raw outputs) run under
+`.temp/recon-stdio/probes-h6/` — a gitignored scratch directory that **no longer
+exists on the authoring machine either**. The other 18 probes
+(`00-identity`, `01b-lock-semantics-safe`, `02-coupling-matrix`, `03-real-kkrpc`,
+`05-official-clean-room`, `06-independent-method`, `07-listen-triggers-resume`,
+`08-what-resumes-stdin`, `10-repeat`, `14-abrupt-really-abrupt`, and their drivers)
+and every `out-*.json` / `out-*-raw.txt` referenced in §3 are **not retrievable**.
+Only the five probes above were promoted, because those are the ones that carry
+the argument; the rest are cited as the provenance of the numbers in §3, not as
+something you can re-run. §4.4 maps every table to its source. In short: §3.1,
+§1.5 and §1.6 are independently reproducible from this directory; §3.2's
+`10-repeat` rows (N=5), §3.3's abrupt table and §3.4's baseline are **reported
+measurements** whose probe files are gone.
+
+### 4.3 The fd-0 precondition (why the commands above pipe something in)
+
+Every probe prints the raw `fstatSync(0)` verdict (`fd0Kind`) alongside its result
+for a reason: **§3.1's ten rows were all measured with `fd0=fifo=true`**, so that
+is the configuration these commands are meant to reproduce. Piping a byte in
+(`"frame" | ...`) is what makes fd 0 a FIFO; launched bare from a terminal it
+reads `chr=true`.
+
+**Be honest about how weak that check is.** Running `04`/`09` bare and comparing
+`fd0Kind` is the reliable part. I also ran all four `09` cells bare and got the
+*same qualitative pattern* as the piped run — `official`+`SUBSCRIBE=1` still
+reported `onCloseFired=true, readableFlowing=true` — because in this automation
+harness a console fd 0 is already at EOF, so the resume fires a real `end`
+immediately. **Do not read that as "the console case is equivalent."** The
+`fd0Kind` value differs (`chr=true`), so it is not the measured configuration, and
+the agreement is an artifact of how this harness supplies stdin rather than a
+property of a real terminal. Pipe the input, and check `fd0Kind` matches the table
+you are comparing against.
+
+`13` and `11` do not need the pipe from you: `13` spawns its children with
+`stdio: ["pipe","pipe","pipe"]`, and `11` is spawned that way by `12`. That is why
+they assert/print `fd0=fifo=true` without help.
+
+**Warning (a trap the original author hit):** the retired `02-driver.ts`
+**overrode `MODE`** with its own default mode list
+(`stream-only,stdin-only,…`). Running it against a probe that switches on `MODE`
+silently tested the wrong shapes and produced one contradictory reading that had
+to be discarded (§6). If you resurrect a driver, give it an explicit mode list —
+or use the dedicated `12`/`13` drivers. `13-final-matrix.ts` asserts
+`shapeHonored` per row for exactly this reason.
+
+### 4.4 Provenance of every §3 number
+
+| §3 table | Source probe | In repo? |
 |---|---|---|
-| `00-identity.ts`, `00-driver.ts` | object model of `process.stdin` vs `Bun.stdin.stream()` | inline |
-| `01-lock-semantics.ts` | **negative example**: died on uncaught `ERR_INVALID_STATE` | inline |
-| `01b-lock-semantics-safe.ts` | same, fully contained | inline |
-| `02-coupling-matrix.ts`, `02-driver.ts` | acquisition-order matrix | `out-02-coupling-matrix.json` |
-| `03-real-kkrpc.ts`, `03-driver.ts` | production vs official-raw vs official-real | `out-03-real-kkrpc.json` |
-| `04-hypothesis-test.ts` | **discriminating lock-vs-flow cells** | `out-04-raw.txt` |
-| `05-official-clean-room.ts`, `05-driver.ts` | 2×2×2 grid, listener confound removed | `out-05-clean-room.json`, `out-05-raw.txt` |
-| `06-independent-method.ts` | second measurement route (found the `subscribe()` effect) | inline |
-| `07-listen-triggers-resume.ts` | per-listener flowing-mode baseline | `out-07-raw.txt` |
-| `08-what-resumes-stdin.ts`, `08-driver.ts` | parent-side causes ruled out | `out-08-raw.txt`, `out-08-what-resumes.json` |
-| `09-subscribe-is-the-resumer.ts` | **single-variable causal test** | inline |
-| `10-repeat.ts` | N=5 reproducibility | `out-10-repeat.json`, `out-10-raw.txt` |
-| `11-production-rpcchannel.ts`, `12-rpcchannel-repeat.ts` | end-to-end with real `RPCChannel` | `out-12-rpcchannel-repeat.json`, `out-12-raw.txt` |
-| `13-final-matrix.ts` | **consolidated final table** | `out-13-final-matrix.json`, `out-13-raw.txt` |
-| `14-abrupt-really-abrupt.ts`, `14-child.ts` | clean vs abrupt discrimination | `out-14-abrupt.json` |
+| §3.1 consolidated matrix | `13-final-matrix.ts` | **yes** — re-runnable above |
+| §3.2 `12-rpcchannel-repeat` rows (last 4) | `12` → `11` | **yes** — re-runnable above |
+| §3.2 `10-repeat` rows (first 8) | `10-repeat.ts` | no — reported only |
+| §3.3 clean-vs-abrupt | `14-abrupt-really-abrupt.ts` | no — reported only |
+| §3.4 flow-mode baseline | `07-listen-triggers-resume.ts` | no — reported only |
+| §1.5 discriminating cells | `04-hypothesis-test.ts` | **yes** — re-runnable above |
+| §1.6 single-variable test | `09-subscribe-is-the-resumer.ts` | **yes** — re-runnable above |
 
 ---
 
