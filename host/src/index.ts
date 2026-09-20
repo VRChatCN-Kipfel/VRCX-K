@@ -5,6 +5,9 @@ import { Context } from "cordis"
 import type { Entry } from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
 import Loader from "@cordisjs/plugin-loader"
+import Group from "@cordisjs/plugin-group"
+import Timer from "@cordisjs/plugin-timer"
+import LoggerConsole from "@cordisjs/plugin-logger-console"
 import { HOST_VERSION } from "./api"
 import { log } from "./log"
 import { ShutdownSignal } from "./signal"
@@ -185,12 +188,40 @@ async function bootstrap() {
 
   await ctx.plugin(Loader)
 
+  // ── Upstream plugins we were re-implementing by hand ────────────────────
+  //
+  // Adopted after an upstream survey found Cordis already ships solutions for
+  // problems this repo was solving itself (see docs/legacy-recon and the survey
+  // notes). Two are registered BEFORE the loader so plugin entries can use them:
+  //
+  //   Timer  — ctx.timeout/interval/throttle/debounce, EVERY one registered via
+  //            ctx.effect. This is why we do not need a lint that detects a bare
+  //            setInterval: the sanctioned API cannot leak, so the discipline is
+  //            the default path rather than a rule to remember (#19).
+  //            ⚠ Access is inject-gated: a plugin touching ctx.interval without
+  //              `inject: ['timer']` goes FAILED and never loads (measured —
+  //              docs/probes/probe31.ts and the inject-failure check). The plugin
+  //              template must declare it.
+  //
+  //   LoggerConsole — renders ctx.logger through console.log. Safe HERE only
+  //            because `import "./log"` (line 1) patches console.log → stderr
+  //            first; stdout carries the kkrpc/stdio protocol. Adopting this
+  //            without that patch would write protocol frames onto the log
+  //            channel.
+  await ctx.plugin(Timer)
+  await ctx.plugin(LoggerConsole, {})
+
   // Mount Include as a loader-tree builtin entry. This is the Cordis-standard
   // shape: the Include EntryTree is reachable via the loader Entry's
   // `.subtree`, which the dev watcher needs to map file events to plugin
   // Entries and to refresh config. `Include` stays a static import so
   // `bun build --compile` keeps it in the bundle (see M0 findings).
   ctx.loader.builtins.include = Include
+  // `cordis:group` resolves through builtins — without this, a `group: true` /
+  // `name: cordis:group` entry never materialises and its children are skipped
+  // silently. (That exact omission invalidated an earlier probe: every scenario
+  // reported loaded=[] including its own baseline.)
+  ctx.loader.builtins.group = Group
   const includeId = await ctx.loader.create({
     name: "cordis:include",
     config: { path: "./cordis.yml", enableLogs: false },

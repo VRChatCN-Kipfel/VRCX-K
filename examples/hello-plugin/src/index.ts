@@ -44,10 +44,42 @@ declare module "cordis" {
     notify: {
       send(title: string, body: string): Promise<boolean>
     }
+    /**
+     * From `@cordisjs/plugin-timer` — mixed onto every context by the host.
+     *
+     * ⚠ Re-declared here for the same reason as `notify` above: the host's own
+     *   augmentations are not importable by a plugin outside `host/`, so a plugin
+     *   restates what it uses. This duplication — and the drift it invites — is
+     *   exactly what a published `@vrcx-k/plugin-sdk` types package should remove
+     *   (#19). Until then, restating is the honest picture of the authoring
+     *   experience.
+     *
+     *   ⚠ And remember the rule that goes with it: ANY `ctx.*` access needs the
+     *     matching name in `inject`, or the plugin never loads at all.
+     */
+    interval(callback: () => void, delay: number): () => void
+    timeout(callback: () => void, delay: number): () => void
+    throttle<T extends (...args: never[]) => void>(callback: T, delay: number): T
+    debounce<T extends (...args: never[]) => void>(callback: T, delay: number): T
   }
 }
 
 import type { Context } from "cordis"
+
+/**
+ * ⚠ DECLARE WHAT YOU USE — and this is not optional.
+ *
+ * `ctx.notify` and `ctx.interval` are inject-gated. Touching one WITHOUT the
+ * matching `inject` entry is a HARD failure: the fiber goes FAILED and the plugin
+ * never loads at all. Measured both ways (host/tests/upstream-plugins.test.ts):
+ *
+ *     no inject        -> FAILED
+ *     inject: ['timer'] -> ACTIVE
+ *
+ * So the `inject` array below is not documentation. It is the difference between
+ * a plugin that runs and one that silently does not.
+ */
+export const inject = ["notify", "timer"]
 
 /** The service this plugin provides to others. Typed so callers get autocomplete. */
 export interface HelloService {
@@ -67,22 +99,22 @@ export function apply(ctx: Context) {
   }
   ctx.provide("hello", service)
 
-  // ── 2. Register EVERY side effect through ctx.effect ────────────────────
+  // ── 2. Schedule work with ctx.interval, NOT setInterval ─────────────────
   //
-  // The disposer returned from the effect is what cordis calls, in REVERSE
-  // order, when the plugin unloads. A bare `setInterval` would keep firing after
-  // unload and leak a little on every reload — exactly what the t11 requirement
-  // (N=100 load/unload back to baseline) measures.
-  ctx.effect(() => {
-    const timer = setInterval(() => {
-      // Reaching the host through a CURATED DOMAIN SERVICE, not ctx.shell.
-      // `ctx.shell.notify` also exists, but it is the low-level channel — the
-      // curated services exist so a template has one stable entry point.
-      void ctx.notify.send("hello-plugin", `still alive at ${new Date().toISOString()}`)
-    }, 60_000)
-
-    // Reclaim the timer. Forgetting this return value is the single most common
-    // leak in this codebase's plugin model.
-    return () => clearInterval(timer)
-  })
+  // This used to be a hand-written `ctx.effect(() => { const t = setInterval(…)
+  // return () => clearInterval(t) })` with a comment warning that forgetting the
+  // disposer is the most common leak in this plugin model.
+  //
+  // `ctx.interval` removes the opportunity to forget: it registers the timer
+  // through ctx.effect itself, so unloading the plugin stops it, and there is no
+  // disposer for an author to omit. The discipline stopped being a rule to
+  // remember and became the only way to write it.
+  //
+  // (Requires the `timer` entry in `inject` above — see the note there.)
+  ctx.interval(() => {
+    // Reaching the host through a CURATED DOMAIN SERVICE, not ctx.shell.
+    // `ctx.shell.notify` also exists, but it is the low-level channel — the
+    // curated services exist so a template has one stable entry point.
+    void ctx.notify.send("hello-plugin", `still alive at ${new Date().toISOString()}`)
+  }, 60_000)
 }

@@ -38,7 +38,7 @@ git merge-base --all origin/old/main origin/rewrite   → 退出码 1，无输�
 | `05-provenance.md` | 逐文件作者台账（`src/services/database/`） |
 | `06-captain-verification-sqlite-concurrency.md` | **队长实测**：单连接并发事务撞车 + `busy_timeout` 锁升级绕过 |
 | `07-dotnet-org-authored.md` | **本 org 原创**：`MySQL.cs`/`PostgreSQL.cs`（66 commits）、C# 侧事务、测试策略 |
-| `08-repo-wide-provenance.md` | **全仓**：91 个 org 从零创建 / 1335 共同历史 |
+| `08-repo-wide-provenance.md` | **全仓**：~~91~~ **75** 个 org 从零创建 / 1335 共同历史（⚠ 2026-09 修正：原 91 含 `docs/` 12 个 rename/copy 误判） |
 | `09-pg-transaction-breakage.md` | **PG 静默失效的完整故事** + 7 条可推广判据 |
 
 ---
@@ -49,7 +49,7 @@ git merge-base --all origin/old/main origin/rewrite   → 退出码 1，无输�
 
 | 类 | 含义 | 数量 |
 |---|---|---|
-| **A** | **上游四 refs 均无此路径** ⇒ **本 org 从零创建** | **91**（其中 `src/services/database/` **34**、`Dotnet/` **17**、`docs/architecture/` **31**） |
+| **A** | **上游四 refs 均无此路径** ⇒ **本 org 从零创建** | **~~91~~ 75**（其中 `src/services/database/` **34**、`Dotnet/` **17**、`docs/architecture/` **~~31~~ 19**）<br>⚠ 2026-09 修正：`docs/` 的 31 实为 **19 纯净 A + 12 rename/copy 自上游**（`d10b0cc0` 搬运），见 `08` §3.3 |
 | **C** | 上游也有 ⇒ **共同历史** | 1335 |
 | **B** | 上游有路径但该文件作者全 org | 0（方法学结果：上游覆盖绝大部分树） |
 
@@ -63,6 +63,31 @@ git merge-base --all origin/old/main origin/rewrite   → 退出码 1，无输�
 - `SQLiteAdapter.js` —— inline 自曾含 pa/copilot/yixijun 提交的 `sqlite.js`
 
 ⇒ **A 类只表示"这个文件路径由我们创建"，不表示"整个文件都是我们写的"。** 逐文件裁定仍需人工。
+
+⚠ **补充（2026-09，PV-5a）**：`--follow` 判据**只跟 rename 链，对 inline 合流是盲的** —— `SQLiteAdapter.js` 的 `--follow` 实测「全部 org」，却仍被上表列为例外。⇒ **"follow 干净"只能证明"没有 rename 继承"，不能证明"内容无上游血统"。**
+
+---
+
+## 两个未合并分支：browse（单写多读）模式 —— **归档，不适用**
+
+`old/main` 上有两个**从未合并**的功能分支，实现同一件事：
+
+| 分支 | commits | 内容 |
+|---|---|---|
+| `origin/old/feat/browse-mode` | 9 | 设计文档 M1/M2、启动流接线、C# SQLite 只读连接、**`readOnlyGate` Proxy 写入门禁** |
+| `1zyao/browse-mode-lease` | 15 | M2/M3：`NodeMode.cs`、`BrowseModeBanner.vue`、UI 置灰、login guard |
+
+**性质：它是被迫的补偿手段。** 起因是**多个进程要打开同一个 SQLite 文件**，所以要拦下除一个以外的所有写者。
+
+**⇒ 对本项目不适用，理由是架构前提不成立**：
+
+- 我们的**宿主即数据枢纽**，**写入口天然唯一**（就在脑里）
+- 客户端（脸）**不开库**，因此不存在"第二个写者"可拦
+- `ROADMAP §4.1`「脑留在桌面机、手机=脸+手」**保证只有一个脑** ⇒ 这正是**我们不需要 browse 模式的原因**
+
+**⇒ 不纳入 #13（多设备），也不进 roadmap。** 把"如何在多写者架构下打补丁"的经验导入"从设计上就单写者"的架构，只会诱导出一个**不需要的 gate**（且撞 P3 单一真源）。
+
+> 残余价值仅一句：**若将来脑真的可以有多份，才会遇到同类问题** —— 那是**架构级变更**，不属于插件功能范围。
 
 ---
 

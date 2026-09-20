@@ -125,7 +125,9 @@ VRCX-K/
 ## 许可证红线（抄代码禁令）
 
 - **严禁抄 `vrcx-0`（Map1en 系）的任何代码/结构/文件**——它是 **GPL** 协议，复制/改写/照搬其文件会污染本仓库。仅可观察其"产品方向可行性"（界面长什么样、功能有哪些），且须在文档记录为独立设计。我们与它同为"VRCX 能力 + Tauri 重写"是需求同源，架构是独立决策（见 docs/ROADMAP.md §参照）。
-- 可安全借鉴（MIT/Apache）：**VRCX 官方**（MIT，功能复刻主参照，能力清单/数据模型思路）、**koishi/cordis**（MIT）、**kkrpc**（⚠ 见下条，上游声明不一致）。
+- 可安全借鉴（MIT/Apache）：**VRCX 官方**（MIT，功能复刻主参照，能力清单/数据模型思路）、**`cordis` / `@cordisjs/*`**（MIT，可直接依赖）、**kkrpc**（⚠ 见下条，上游许可证声明不一致）。
+- ⛔ **`@koishijs/*` 的 console / WebUI 家族是 AGPL-3.0**（`plugin-console` / `-market` / `-config` / `-commands` / `-admin` / `client` …），**与 MIT 的兄弟包同在一个 npm scope 下，没有任何命名约定可区分** —— 而它们恰是 M2-4/M2-5 最想参照的那批。**取用前必须逐包查 `license`，不得按 scope 推断**（判据：`npm view <pkg> license`，见 `AGPL-3.0` 即禁区，不做例外）。
+- ⚠ **`koishi` 核心不可复用**（虽然也是 MIT）：与 satori 深度耦合（`Context extends satori.Context`），且锁 **cordis 3**（我们 rc.9），实测混用抛 `Export named 'Schema' not found in cordis`。**通用层已被上游抽到 `cordiverse`** ⇒ 需要什么去那里找。
 - 任何**GPL/AGPL 项目**的代码/文件一律不得进入本仓库（含引用/复制/改写其结构文件）；只允许行为/能力层面观察参照。
 - ⚠ **AGPL 的精确边界 = 仅 `@koishijs/*`**，**不是**"console / WebUI 家族"这种按功能描述的说法。两个 scope 名字相近，**必须逐包实测**：
   - `@koishijs/client`、`@koishijs/plugin-market` → **AGPL-3.0**（禁区）
@@ -144,6 +146,23 @@ VRCX-K/
 - **服务必须"先 provide、后 attach"**：`inject` 是**就绪门不是访问门**——未 inject 的插件照样能读服务，但注入尚未提供的服务的插件会卡在 `PENDING`，provide 后才 `ACTIVE`。（`host/src/index.ts` 的 tray/shortcut 即此模式。）
 - **持久性来自 `COMMIT`，不是来自 `ctx.effect()` 的 disposer**：已提交的行即使被**硬杀**也存活；只写在 disposer 里的数据被硬杀时**全丢**。⇒ 数据落盘走**写入路径**；`ctx.effect()` 里只放**非持久性清理**（句柄、临时文件、WS 关闭）。
   配套两条硬事实：① 写在**根 `ctx`** 上的 effect 不进 `registry`、**不报错、disposer 永不执行**（只有插件 fiber 内的会被回收）；② **Windows 上 `SIGTERM`/`SIGINT` 根本不投递**（`kill()` 是硬 TerminateProcess，处理器不触发），那两个处理器在 Windows 是**死代码**。详见 [`docs/shutdown-strategy-review.md`](docs/shutdown-strategy-review.md)。
+- **`ctx.*` 是 inject 门控的，缺 `inject` 是硬失败**：插件里碰 `ctx.interval` / `ctx.notify` 等而**没在 `inject` 数组里声明** ⇒ fiber **FAILED，插件永不加载**（零警告）。⚠ 写测试时**别把调用包在 try/catch 里**——那样 fiber 会保持 ACTIVE，读数会说"能用"而实际不能（实测踩过）。`host/tests/upstream-plugins.test.ts` 钉了两侧。
+
+## ⚠ 动机制之前先查上游（四次里错四次换来的规矩）
+
+> **cordis 的插件生态里已经有大量现成件。** 我们已四次准备自己造，结果每次都发现上游有：
+>
+> | 我们准备造的 | 上游已有 |
+> |---|---|
+> | #19「effect 纪律 + lint 拦裸定时器」 | **`@cordisjs/plugin-timer`**（`ctx.timeout/interval/...` 全部经 `ctx.effect`） |
+> | base 分组命名空间（`base@storage`） | **`@cordisjs/plugin-group`**（cordis 原生 group，子项独立启停/配置） |
+> | 手写 `log()` | **`@cordisjs/plugin-logger-console`** |
+> | `base-state.json` 的 `entries`（启停/配置） | **`EntryOptions.disabled` / `.config`** |
+>
+> ⇒ **动手前先查**：`cordis` / `cordiverse` 组织的仓库（约 26 个），以及 `npm view <pkg>` 确认**是否已发布**（源码在 main ≠ 能用）。
+>
+> **判据**：**如果某能力听起来"框架应该自带"，先去上游找，再决定造不造。**
+> **反例警告**：`base-state.json` 的 `entries` 已经写进文档与两条 issue 评论，才发现是第二份真源；`Dotnet/` 曾被预判"用不上"而跳过整块勘察，结果里面**有本 org 66 次提交的原创**。**两次都是"没查就下结论"。**
 
 ## 资料地图（唯一副本原则）
 
