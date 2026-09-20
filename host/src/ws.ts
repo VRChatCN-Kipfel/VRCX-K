@@ -6,6 +6,7 @@ import { WebSocketServer } from "ws"
 import type { Context } from "cordis"
 import { hostWsAPI, HOST_VERSION } from "./api"
 import { HOST_READY_SCHEMA_VERSION, type HostReady } from "./contracts/hostReady"
+import { collectHostEnvironment } from "./host-environment"
 
 /**
  * The handshake the host sends to the shell (see
@@ -46,5 +47,14 @@ export async function listenHostWs(ctx: Context): Promise<HostWsReady> {
     wss.close()
   })
 
-  return { schemaVersion: HOST_READY_SCHEMA_VERSION, port, token, hostVersion: HOST_VERSION }
+  return {
+    schemaVersion: HOST_READY_SCHEMA_VERSION,
+    port,
+    token,
+    hostVersion: HOST_VERSION,
+    // The environment is read once, here, because `ready` is sent once per
+    // process — see the schema's STALENESS note for why only slow-moving facts
+    // belong in it.
+    ...collectHostEnvironment(),
+  }
 }

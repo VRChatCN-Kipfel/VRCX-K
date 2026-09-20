@@ -1,7 +1,9 @@
 // The host ready handshake is the FIRST frame the host sends and the only place
-// the shell — and the face — learn how to reach the host's ws surface. It used
-// to be an undocumented `{ port, token }` literal duplicated in three files with
-// no schema and no drift gate; these tests pin the contract that replaced it.
+// the remote consumers — the Rust shell and the face, neither of which can call
+// `process.platform` for the host — learn how to reach the host's ws surface and
+// what environment it runs in. It used to be an undocumented `{ port, token }`
+// literal duplicated in three files with no schema and no drift gate; these
+// tests pin the contract that replaced it.
 //
 // Same shape as host-lifecycle-contract.test.ts: the committed mirror is checked
 // against the canonical schema at RUNTIME, so the schema and the TypeScript
@@ -9,21 +11,31 @@
 // `bun run check:contracts`).
 
 import { expect, test } from "bun:test"
-import { HOST_READY_SCHEMA_ID, HOST_READY_SCHEMA_VERSION, isHostReady } from "../src/contracts/hostReady"
+import {
+  HOST_READY_SCHEMA_ID,
+  HOST_READY_SCHEMA_VERSION,
+  isHostReady,
+  toArch,
+  toPlatform,
+} from "../src/contracts/hostReady"
+import { collectHostEnvironment } from "../src/host-environment"
 
 const schemaPath = new URL("../../contracts/host-ready/v1/host-ready.schema.json", import.meta.url)
 const schema = (await Bun.file(schemaPath).json()) as {
   $id: string
   additionalProperties: boolean
   required: string[]
-  properties: Record<string, { const?: unknown; minimum?: unknown; maximum?: unknown; pattern?: string }>
+  properties: Record<string, any>
 }
+
+const env = collectHostEnvironment()
 
 const valid = {
   schemaVersion: HOST_READY_SCHEMA_VERSION,
   port: 43120,
   token: "a".repeat(64),
   hostVersion: "0.0.1",
+  ...env,
 }
 
 test("the schema is the versioned canonical contract", () => {
@@ -32,16 +44,54 @@ test("the schema is the versioned canonical contract", () => {
   // additionalProperties:false is what makes an unexpected field a contract
   // violation rather than something both sides silently ignore.
   expect(schema.additionalProperties).toBe(false)
-  expect(schema.required).toEqual(["schemaVersion", "port", "token", "hostVersion"])
+  expect(schema.required).toEqual([
+    "schemaVersion",
+    "port",
+    "token",
+    "hostVersion",
+    "runtime",
+    "host",
+    "paths",
+    "capacity",
+  ])
 })
 
-test("the guard accepts the canonical handshake", () => {
+test("the guard accepts the handshake the host actually builds", () => {
+  // Not a hand-written fixture: this is the real collector output, so the guard
+  // and the producer cannot drift apart.
   expect(isHostReady(valid)).toBe(true)
-  // Port bounds and token pattern are part of the schema, so the guard must
-  // agree with them rather than being a looser hand-rolled check.
   expect(schema.properties.port.minimum).toBe(1)
   expect(schema.properties.port.maximum).toBe(65535)
   expect(schema.properties.token.pattern).toBe("^[0-9a-f]{64}$")
+})
+
+test("the collector reports facts that are true of this process", () => {
+  // Cross-check against the same APIs rather than hard-coding machine values.
+  expect(env.runtime.bunVersion).toBe(Bun.version)
+  expect(env.runtime.nodeVersion).toBe(process.version)
+  expect(env.host.mode).toBe(Bun.isStandaloneExecutable ? "compiled" : "source")
+  expect(env.paths.cwd).toBe(process.cwd())
+  expect(env.paths.execPath).toBe(process.execPath)
+  expect(env.capacity.cpuCount).toBeGreaterThanOrEqual(1)
+  // Memory exceeds 32 bits on ordinary machines, which is why the schema uses a
+  // safe-integer bound rather than u32.
+  expect(env.capacity.totalMemBytes).toBeGreaterThan(0)
+  expect(env.capacity.capturedAtMs).toBeGreaterThan(0)
+})
+
+test("the platform vocabulary is the one plugin-manifest already fixed", () => {
+  // Emitting the raw process.platform spelling would give the same machine two
+  // names across two contracts, so the translation is explicit and total.
+  expect(toPlatform("win32")).toBe("windows")
+  expect(toPlatform("darwin")).toBe("macos")
+  expect(toPlatform("linux")).toBe("linux")
+  expect(() => toPlatform("freebsd")).toThrow()
+  expect(toArch("x64")).toBe("x64")
+  expect(toArch("arm64")).toBe("arm64")
+  expect(() => toArch("ia32")).toThrow()
+  // The contract's enums must match what the mapper can produce.
+  expect(schema.properties.host.properties.platform.enum).toEqual(["windows", "linux", "macos"])
+  expect(schema.properties.host.properties.arch.enum).toEqual(["x64", "arm64"])
 })
 
 test("the guard rejects a wrong schema version", () => {
@@ -64,19 +114,56 @@ test("the guard rejects a token that is not the promised shape", () => {
   expect(isHostReady({ ...valid, token: 42 })).toBe(false)
 })
 
-test("the guard rejects a missing or oversized hostVersion", () => {
-  expect(isHostReady({ ...valid, hostVersion: "" })).toBe(false)
-  expect(isHostReady({ ...valid, hostVersion: "v".repeat(65) })).toBe(false)
-  const { hostVersion: _drop, ...withoutVersion } = valid
-  expect(isHostReady(withoutVersion)).toBe(false)
+test("the guard rejects a malformed environment group", () => {
+  expect(isHostReady({ ...valid, runtime: { bunVersion: "1.4.2" } })).toBe(false)
+  expect(isHostReady({ ...valid, runtime: { bunVersion: "", nodeVersion: "v1" } })).toBe(false)
+  // Raw process spellings must not be accepted on the wire.
+  expect(isHostReady({ ...valid, host: { ...env.host, platform: "win32" } })).toBe(false)
+  expect(isHostReady({ ...valid, host: { ...env.host, arch: "ia32" } })).toBe(false)
+  expect(isHostReady({ ...valid, host: { ...env.host, mode: "prod" } })).toBe(false)
+  expect(isHostReady({ ...valid, paths: { cwd: "" } })).toBe(false)
+  expect(isHostReady({ ...valid, capacity: { ...env.capacity, cpuCount: 0 } })).toBe(false)
 })
 
 test("the guard rejects extra fields and non-objects", () => {
   // An unexpected key means the two sides disagree about the handshake, which
   // is exactly what this contract exists to catch.
-  expect(isHostReady({ ...valid, extra: true })).toBe(false)
+  expect(isHostReady({ ...valid, extra: undefined, surprise: true })).toBe(false)
   expect(isHostReady({ ...valid, schema_version: 1 })).toBe(false)
   expect(isHostReady(null)).toBe(false)
   expect(isHostReady([valid])).toBe(false)
   expect(isHostReady("ready")).toBe(false)
+})
+
+test("the shared contract module stays free of host-only globals", async () => {
+  // `src/host.ts` (the face) imports this module, and the frontend tsconfig
+  // carries no Bun/node types on purpose. A `process`/`Bun`/`node:*` reference
+  // here typechecks fine for the host but breaks `bun run typecheck` for the
+  // face — which is exactly how this was caught once already. Pin the split.
+  const source = await Bun.file(new URL("../src/contracts/hostReady.ts", import.meta.url)).text()
+  const code = source
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("*") && !line.trimStart().startsWith("//"))
+    .join("\n")
+  expect(code).not.toMatch(/\bprocess\./)
+  expect(code).not.toMatch(/\bBun\./)
+  expect(code).not.toMatch(/from "node:/)
+})
+
+test("the extension slot accepts bounded scalar additions", () => {
+  // This is what keeps the road from narrowing: a future fact can travel
+  // without a schema-version bump, while the named groups stay strict.
+  expect(isHostReady({ ...valid, extra: { buildId: "abc123", beta: true, score: 0.5, none: null } })).toBe(true)
+  // Absent/empty is legal — "nothing extra", not "malformed".
+  expect(isHostReady({ ...valid, extra: {} })).toBe(true)
+})
+
+test("the extension slot is bounded, not a free-for-all", () => {
+  expect(schema.properties.extra.maxProperties).toBe(32)
+  const tooMany = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`k${i}`, 1]))
+  expect(isHostReady({ ...valid, extra: tooMany })).toBe(false)
+  // camelCase keys only, scalar values only.
+  expect(isHostReady({ ...valid, extra: { "bad-key": 1 } })).toBe(false)
+  expect(isHostReady({ ...valid, extra: { nested: { a: 1 } } })).toBe(false)
+  expect(isHostReady({ ...valid, extra: { list: [1, 2] } })).toBe(false)
 })
