@@ -12,6 +12,13 @@
 > adapter with `nodeStdioTransport()`. See `host/src/stdio.ts` —
 > `bunStdioTransport()`'s doc comment records the two defects and why the stop
 > and observe hooks are split.
+>
+> **Resolution (2026-09-20, PR #38)**: §7's recommendation is the one this
+> measurement alone supported, and it has been **superseded** — PR #38 made the
+> switch as the deliberate, tested refactor §7's own last clause allows. The
+> decision record and the three reasons the blocker did not apply are in §7;
+> §5.6's open question now carries a pointer to it. The measurements in §1–§6
+> are otherwise unchanged.
 
 ---
 
@@ -281,7 +288,7 @@ Stated plainly; each is a real gap, not a hedge.
 3. **`onClose` reason semantics are only partly characterized.** I confirmed `reason === undefined` for both teardowns and that kkrpc maps `error` → the error object (`stdio.ts:104-105`). I did **not** observe an `error`-reason close, so I cannot confirm the error path fires in practice.
 4. **Not verified on POSIX.** `stdin-watch.ts` documents that libuv uses socketpairs on POSIX; my abrupt/clean findings may not transfer. All results are Windows-only.
 5. **`RPCChannel` internal close propagation was not fully characterized.** My probe's `channelClosed` was `false` in every run and my `pendingOutcome` call was malformed (it resolved in 0–1 ms both shapes, i.e. it did not exercise a real in-flight call). **Do not read anything into those two fields.** Probe E's prior finding (pending call rejects ~303 ms when the *peer* closes) still stands on its own evidence; I did not re-verify it.
-6. **I did not measure whether switching shapes changes actual `#33` behaviour.** I only measured that `onClose` becomes available. Whether `stopOnStdinLoss` wired to `onClose` behaves better or worse than the current pump `onDone` is untested — notably `onDone` fired reliably (5/5) in the production shape, so the current code is not obviously broken.
+6. **I did not measure whether switching shapes changes actual `#33` behaviour.** I only measured that `onClose` becomes available. Whether `stopOnStdinLoss` wired to `onClose` behaves better or worse than the current pump `onDone` is untested — notably `onDone` fired reliably (5/5) in the production shape, so the current code is not obviously broken. **Answered by #38 — see §7.** `host/tests/stdin-loss.test.ts` now pins `onClose` as the sole stop trigger for the shell-attached path, and the pre-existing "shell-attached host stops" case still passes, so the swapped trigger is the same stop with one fewer source rather than a behaviour change.
 7. **`process.stdin` shim internals are inferred, not read.** The `own()` → `getReader()` chain is inferred from the thrown stack (`at own (5:15)`) plus observed behaviour, not from bun's source. The *behaviour* is measured and reproducible; the *naming* of the internal function is from the error trace.
 8. **One contradictory reading was discarded, not resolved by measurement.** See §6 — it is fully explained by a probe-harness bug, so I consider it settled, but I am flagging that I resolved it by reasoning about my own tooling rather than by re-running that exact configuration.
 
@@ -295,6 +302,46 @@ Corrected with a dedicated driver (`12-rpcchannel-repeat.ts`), `production + RPC
 
 ---
 
-## 7. One-line recommendation
+## 7. Recommendation — superseded by PR #38
 
-**Do not switch to `nodeStdioTransport()` on the strength of the `onClose` finding alone** — it does make `onClose` work (3/3, both teardowns, vs 0/3 today), but it is not a drop-in replacement: `stdin-watch.ts`'s `Bun.stdin.stream().getReader()` and the official transport are **mutually exclusive** (measured: watch-then-official throws `ERR_INVALID_STATE`, and official-then-watch throws identically), so the "single reader" contract in `stdin-watch.ts:19-21` and `stdio.ts:229-235` must be redesigned in the same change, and the current pump-based `onDone` already fires reliably (5/5) so `#33` is not regressed today — i.e. switch only as a deliberate, tested refactor, not as a bug fix.
+**As originally written (kept verbatim, this is what the measurement alone supported):**
+
+> **Do not switch to `nodeStdioTransport()` on the strength of the `onClose` finding alone** — it does make `onClose` work (3/3, both teardowns, vs 0/3 today), but it is not a drop-in replacement: `stdin-watch.ts`'s `Bun.stdin.stream().getReader()` and the official transport are **mutually exclusive** (measured: watch-then-official throws `ERR_INVALID_STATE`, and official-then-watch throws identically), so the "single reader" contract in `stdin-watch.ts:19-21` and `stdio.ts:229-235` must be redesigned in the same change, and the current pump-based `onDone` already fires reliably (5/5) so `#33` is not regressed today — i.e. switch only as a deliberate, tested refactor, not as a bug fix.
+
+**Decision (PR #38): the switch was made, and it is safe.** This is the ruling the
+report itself owes a reader, because §7 read cold says "do not" while the code now
+does exactly that. The switch was made as the deliberate, tested refactor §7's own
+final clause permits — **not** as a bug fix — and none of §7's three premises still
+block it:
+
+1. **The named blocker assumed the two readers must coexist; they do not.** §1.1's
+   mutual exclusivity is real and unchanged. But §7 inferred from it that the
+   single-reader contract would have to be *redesigned* so both could share. The
+   shipped wiring keeps them **disjoint instead**: `host/src/index.ts` dispatches
+   on `VRCXK_SHELL` — shell-attached takes the kkrpc transport, shell-less takes
+   `watchStdinClose()` — so `stdin-watch.ts:19-21`'s contract ("exactly one
+   reader") is preserved by *never* running both, not by teaching one stream two
+   readers. `host/src/stdio.ts` states this as a standing rule ("Do NOT
+   reintroduce a `Bun.stdin.stream()` reader here").
+2. **The `onDone`-vs-`onClose` question in §5.6 is now measured, not assumed.**
+   `host/tests/stdin-loss.test.ts` pins `onClose` as the sole trigger for the
+   shell-attached path (asserting exactly one stop line, so a regression that
+   re-added a second listener fails loudly), and the pre-existing "shell-attached
+   host stops when the shell end of stdin goes away" case still passes. Routing
+   `stopOnStdinLoss` from `onDone` to `onClose` is therefore the same stop with
+   one fewer trigger — which is what §7 was right to demand evidence for.
+3. **The side effect §7 did not weigh is absorbed at the call site.** kkrpc's
+   `handleTransportClose` rejects **every** pending request *before* invoking
+   `onClose`, so a shell that dies mid-handshake turns the in-flight
+   `shell.ready` into a rejection that would reach the bootstrap catch-all and
+   race the stdin-loss path over the exit code. `host/src/index.ts` now treats
+   that rejection as an expected outcome, which is precisely what lets `onClose`
+   be the *sole* trigger instead of needing a second stdin listener pair.
+
+⇒ Only §7's operational warning survives verbatim: **this is not a drop-in bug
+fix.** #38 shipped it with a regression test that was verified to go red when the
+`bootstrap` change is reverted, so the claim is pinned rather than asserted.
+
+**Scope note (still open, not resolved here):** the two readers cannot be made to
+coexist *in one process*. §7's redesign would still be required for that, and
+nothing in #38 attempts it.
