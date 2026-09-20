@@ -275,10 +275,19 @@ export function connectShellStdio(ctx: Context, options: { transport?: Transport
   // Windows, socketpair on POSIX — see stdin-watch.ts) carries that meaning; a
   // test-supplied transport owns unrelated streams.
   //
-  // `onClose` is the sole peer-death trigger for the shell-attached path, and it
-  // delivers a `reason`: `undefined` for a clean peer exit, an Error for a
-  // broken pipe. That distinction is logged, and is the reason we do not need a
-  // separate one-argument-lost callback anymore.
+  // `onClose` is the sole peer-death trigger for the shell-attached path. It
+  // carries a `reason`, but read that as OBSERVABILITY ONLY — it is not a
+  // behaviour switch:
+  //
+  //   - The ternary below only picks a log line; nothing branches on it.
+  //   - kkrpc maps a stream `error` to the error object, but that arm has never
+  //     been observed here. On Windows a clean exit (FIN) and an abrupt one
+  //     (RST) are INDISTINGUISHABLE at the reader, so in practice `reason` is
+  //     always `undefined` (measured, both teardowns — FINDINGS.md §3.3). Do not
+  //     build "the shell crashed vs exited" logic on it.
+  //
+  // It is still a real improvement over the old boolean callback: one signal
+  // instead of two, and it can in principle say why.
   const usesDefaultTransport = options.transport === undefined
   const watchStdinLoss = usesDefaultTransport && stdinIsPeerChannel()
   const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(options.transport ?? bunStdioTransport(), {
