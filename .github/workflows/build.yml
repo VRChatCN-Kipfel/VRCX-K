@@ -1,4 +1,4 @@
-# VRCX-K CI：桌面三平台 + 移动端（当前 Android）构建验证
+# VRCX-K CI：桌面三平台构建 + 平台无关静态门控 + 移动端（当前 Android）
 #
 # 桌面：在干净 checkout 上验证"新克隆直接可构建"承诺 + 三端跨架构兼容性
 #       （Windows x64 / Linux x64 / macOS arm64，均为原生 runner）。
@@ -32,10 +32,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 平台无关的静态门控（single-CPU runner）。
+  static-gates:
+    name: static gates (ubuntu-slim)
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      # 缓存全局包缓存而非 node_modules（理由见 desktop job 注释）
+      - name: Cache bun package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies (frozen)
+        run: bun install --frozen-lockfile
+
+      # dtolnay/rust-toolchain 走 --profile minimal，【不含 rustfmt/clippy】——
+      # 必须显式声明 components，否则 cargo fmt / clippy 直接 "no such command"。
+      - name: Install Rust stable (rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # rust-cache 必须在工具链【之后】：它的 key 取自当前 rustc 版本。
+      # 此处【不设 shared-key】—— 默认 key 已含 job id，故缓存只服务本 job
+      # 自己的重复 run。跨 job 复用需与目标 job 共用 shared-key，但那会让
+      # 多个 job 争抢同一条目（已存在的 key 不再被覆盖 ⇒ 后跑者更丰富的产物
+      # 反而存不进去），且 mobile(android) 与 desktop(ubuntu) 的 rustc/host
+      # 段相同、共用 key 会互相污染。故暂不合并，理由见提交说明。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # clippy 与 cargo check 不同：它要真正构建依赖树，Linux 上必须能
+      # pkg-config 到 webkit2gtk 等库（与 desktop job 的 Linux 依赖同源）。
+      - name: Linux system deps (webkit2gtk etc.)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Rust format check
+        run: cargo fmt --all --check
+
+      - name: Rust clippy
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: Frontend + host typecheck
+        run: bun run typecheck
+
+      # 契约漂移闸门（M2-2 决定 D3）：生成的 TS 镜像与 schema 必须同步。
+      # 在本闸门出现前，仓库里【没有任何】机制能发现两者不一致——直接后果已经
+      # 发生过：host/src/contracts/hostLifecycle.ts 头部写着 "Generated ...
+      # Do not hand-edit"，却从来没有脚本或 CI 步骤生成过它。
+      # 该步骤【不依赖】cargo 生成的 src-tauri/gen/schemas，故本 job 无需先跑
+      # cargo check（已验证：移走 gen/schemas 后三个门控仍全绿）。
+      - name: Contract drift gate (schemas <-> generated TS mirrors)
+        run: bun run check:contracts
+
   desktop:
     name: desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    needs: static-gates
     strategy:
       fail-fast: false
       matrix:
@@ -89,15 +155,9 @@ jobs:
       - name: Cargo check (spawns host sidecar self-heal)
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml
 
-      - name: Frontend + host typecheck
-        run: bun run typecheck
-
-      # 契约漂移闸门（M2-2 决定 D3）：生成的 TS 镜像与 schema 必须同步。
-      # 在此之前仓库里【没有任何】机制能发现两者不一致——直接后果已经发生：
-      # host/src/contracts/hostLifecycle.ts 头部写着 "Generated ... Do not
-      # hand-edit"，却从来没有脚本或 CI 步骤生成过它。
-      - name: Contract drift gate (schemas <-> generated TS mirrors)
-        run: bun run check:contracts
+      # 注意：typecheck 与 check:contracts 已【移出】本矩阵 → static-gates job。
+      # 二者输出与 OS 无关，本矩阵原先各平台跑一遍属于重复计算。此处不再重复，
+      # 平台无关的门控统一归 static-gates（见该 job 注释）。
 
       - name: Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
@@ -111,6 +171,7 @@ jobs:
   mobile:
     name: mobile (${{ matrix.platform.name }})
     runs-on: ${{ matrix.platform.os }}
+    needs: static-gates
     timeout-minutes: 60
     # 曾经是 continue-on-error（调通期：android 高频修错，失败不阻塞 desktop）。
     # 2026-09-11 去掉：桌面专属 API 已按平台门控（run 34561905131，android job
