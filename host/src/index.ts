@@ -272,9 +272,15 @@ async function bootstrap() {
     // is in flight makes kkrpc reject the pending request
     // (`RPCTransportClosedError`). That rejection is EXPECTED, not a failure:
     // "the shell died mid-handshake" is exactly the #33 case, and
-    // `stopOnStdinLoss` handles it with a graceful exit 0. Letting it propagate
-    // to the fatal handler below would race that path for the exit code, so it
-    // is absorbed here.
+    // `stopOnStdinLoss` handles it with a graceful exit 0.
+    //
+    // Why it is absorbed rather than allowed to propagate: BOTH exits are still
+    // reachable while this call is outstanding — `stopOnStdinLoss` exits 0, and
+    // the bootstrap catch-all below exits 1. The race was disarmed, NOT
+    // structurally removed: consuming this one rejection just means the second
+    // trigger never fires for this cause. Anything that awaits here (a new
+    // startup step inserted inside this window) re-arms it, because the two
+    // paths would again be competing for the exit code.
     //
     // Absorb ONLY that cause. The catch used to swallow every rejection, which
     // silently converted real startup failures — a shell that does not know this
