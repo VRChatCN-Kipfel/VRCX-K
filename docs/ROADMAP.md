@@ -124,14 +124,30 @@
 |---|---|---|
 | **VRCX 官方**（vrcx-team/VRCX） | **MIT** | ✅ 功能复刻主参照：能力清单、数据模型思路、行为（我们的架构是独立设计，代码自研） |
 | **`cordis` / `@cordisjs/*`**（cordiverse 组织） | **MIT** | ✅ 生态/插件机制参照 + **可直接依赖**（已实测：`plugin-timer` / `plugin-group` / `plugin-loader-webui` 均为 MIT 且已发布） |
-| ⛔ **`@koishijs/*`（console / WebUI 家族）** | **AGPL-3.0** | ⛔ **禁止任何形式的取用**（含复制/改写/照搬结构文件）。**仅可观察交互范式**，且不得进入本仓库 |
+| ⛔ **`@koishijs/*` 的 console / WebUI 家族** | **AGPL-3.0** | ⛔ **禁止任何形式的取用**（含复制/改写/照搬结构文件）。**仅可观察交互范式**，且不得进入本仓库 |
 | **`koishi` 核心** | MIT | ⚠ **不可复用**：与 satori 深度耦合（`Context extends satori.Context`，无条件启动 Satori），且锁 **cordis 3**（`@satorijs/core` peer `cordis ^3.18.1`）与本项目 rc.9 **不兼容**（实测混用抛 `Export named 'Schema' not found in cordis`）。**通用层已被上游抽到 `cordiverse`** ⇒ 需要什么去那里找 |
-| **kkrpc** | Apache-2.0 | ✅ 直接依赖（协议/传输） |
+| **kkrpc** | Apache-2.0 ⚠ | ✅ 直接依赖（协议/传输）。**⚠ 该许可证是上游"应当如此"而非 npm 实测**：`npm view kkrpc@2.1.0 license` **返回空**，发布 tarball 内无 LICENSE 文件，仓库 LICENSE 为 Apache-2.0（2025-03-30）而 README 写 MIT —— **三处声明互相矛盾**。不触发红线（无 AGPL 风险），但取用/再分发前应向上游确认。详见本表下方注 |
 | **vrcx-0**（Map1en 系） | **GPL** | ⚠ **禁止借鉴代码/结构**。仅可观察其"产品方向可行性"（证明 Tauri+React 重写路线有人走通），不做任何实现参照 |
 
 > ⚠ **`@koishijs/*` 是本次审查发现的许可证陷阱（2026-09，已独立复核）**：该 scope 下 **console/WebUI 家族**（`plugin-console` / `-logger` / `-config` / `-commands` / `-market` / `-admin` / `-auth` / `-insight` / `-notifier` / `client` / `components` …）**全部是 AGPL-3.0**，而 **MIT 的兄弟包也在同一 scope 下**（如 `@koishijs/utils`），**没有任何命名约定可区分**。
+> ⚠ **注意 `client` / `components` 两个名字在两个 scope 下都存在，且许可证相反**（`@koishijs/client` = AGPL，`@cordisjs/client` = MIT）—— **本行列举的是 `@koishijs/*` 那一侧**，不要误读到隔壁 scope。见下方修正。
 > ⇒ **而它们恰好是 M2-4（EntryTree 管理面）/ M2-5（市场）最想参照的那批** ⇒ **取用前必须逐包查 `license`，不得按 scope 推断**。
 > **判据**：`npm view <pkg> license` —— 看到 `AGPL-3.0` 即视为禁区，**不做例外**。
+
+> ⚠ **修正（2026-09 逐包实测）：边界是 `@koishijs/*`，不是"console/WebUI 家族"这个说法。**
+> 早先本表与 `AGENTS.md` 把这批统称为"console/WebUI 家族是 AGPL"，**连带把 `@cordisjs/*` 那半边也说成了禁区** —— 那是错的。实测：
+>
+> | 包 | `npm view <pkg> license` |
+> |---|---|
+> | `@koishijs/client` | **AGPL-3.0**（禁区） |
+> | `@koishijs/plugin-market` | **AGPL-3.0**（禁区） |
+> | `@cordisjs/client` | **MIT**（可用） |
+> | `@cordisjs/components` | **MIT**（可用） |
+> | `@cordisjs/plugin-webui` | **MIT**（可用） |
+>
+> ⇒ **两个 scope 名字相近，不可互相推断**；判据始终是逐包 `npm view`。本修正不放松任何红线——`@koishijs/*` 照旧逐包查。
+
+> ⚠ **kkrpc 的许可证声明不一致（2026-09 实测）**：`license` 字段在 npm 元数据中**为空**（摘要页显示 `Proprietary`），发布 tarball 内 `package.json` 与 LICENSE 文件同样缺失，而 GitHub 仓库 LICENSE 为 **Apache-2.0**、README 却写 **MIT**。本表按仓库 LICENSE 记作 Apache-2.0 是**沿用既有表述，非实测结论**。**不构成 AGPL 风险**（不触发红线），但属"上游未把话说清"，若要再分发或严格合规审查，应向上游提 issue 补齐并统一。
 
 > 注：我们与 vrcx-0 同为「VRCX 能力 + Tauri 重写」是**需求同源**（都复刻 VRCX）导致的方向重合，非借鉴其设计；我们的宿主差异（Cordis 插件生态 + 分层热更新 + kkrpc 三通道）是独立架构决策（架构 v4.2）。
 > VRCX 官方为 MIT，因此功能复刻的合法参照以官方为主，vrcx-0 的 GPL 不构成必需。
