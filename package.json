@@ -17,12 +17,15 @@
     "build:host": "bun run scripts/build-host.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.host.json && tsc --noEmit -p tsconfig.examples.json && tsc --noEmit -p tsconfig.packages.json",
     "check:contracts": "bun run scripts/check-contract-drift.ts",
+    "format": "biome format --write",
+    "lint": "biome lint --write",
+    "check:js": "biome ci",
     "generate:contracts": "bun run --cwd host generate:contracts",
     "test:ui": "bun test src",
     "test:host": "bun test --cwd host",
     "test:packages": "bun test packages",
     "test": "bun run test:ui && bun run test:host && bun run test:packages",
-    "verify": "bun run typecheck && bun run check:contracts && bun run test && bun run build"
+    "verify": "bun run typecheck && bun run check:contracts && bun run check:js && bun run test && bun run build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -34,6 +37,7 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.14",
     "@tauri-apps/cli": "^2",
     "@types/bun": "latest",
     "@types/react": "^19.1.8",

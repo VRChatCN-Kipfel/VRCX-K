@@ -88,12 +88,26 @@ jobs:
       - name: Frontend + host typecheck
         run: bun run typecheck
 
+      # JS/TS 侧的格式化 + lint 单一判据。用 `biome ci` 而不是
+      # `format --check` + `lint` 两条命令：ci 是同一次遍历里同时判
+      # format、lint 与 assist（organizeImports），语义就是"CI 语境"，且
+      # 它【只读】—— 绝不会顺手改文件而让门控变成"改了就算过"。
+      # 版本已 pin 在 package.json（@biomejs/biome 2.5.14），biome.json 的
+      # $schema 与之对齐；不要用 bunx 拉 latest，否则上游发新版会突然红。
+      - name: JS/TS format + lint (biome)
+        run: bun run check:js
+
       # 契约漂移闸门（M2-2 决定 D3）：生成的 TS 镜像与 schema 必须同步。
       # 在本闸门出现前，仓库里【没有任何】机制能发现两者不一致——直接后果已经
       # 发生过：host/src/contracts/hostLifecycle.ts 头部写着 "Generated ...
       # Do not hand-edit"，却从来没有脚本或 CI 步骤生成过它。
       # 该步骤【不依赖】cargo 生成的 src-tauri/gen/schemas，故本 job 无需先跑
       # cargo check（已验证：移走 gen/schemas 后三个门控仍全绿）。
+      #
+      # ⚠ 顺序有讲究：biome 必须【先】于本闸门且【排除 *.generated.ts】。
+      # 那 4 个生成物由 json2ts 产出、被本闸门逐字节比对，实测它们全都会被
+      # biome 改动；一旦让 biome 纳入它们，这里就会以"镜像与 schema 不一致"
+      # 的面目报错，掩盖真实原因。排除规则在 biome.json 的 files.includes。
       - name: Contract drift gate (schemas <-> generated TS mirrors)
         run: bun run check:contracts
 
