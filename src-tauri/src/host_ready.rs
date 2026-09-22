@@ -30,14 +30,14 @@ pub const HOST_READY_SCHEMA_ID: &str =
     "https://vrcx-k.dev/contracts/host-ready/v1/host-ready.schema.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HostRuntime {
     pub bun_version: String,
     pub node_version: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HostPlatformInfo {
     /// Operating system, using `contracts/plugin-manifest/v1`'s vocabulary
     /// (`windows`/`linux`/`macos`) rather than `process.platform`'s raw values.
@@ -53,14 +53,14 @@ pub struct HostPlatformInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HostPaths {
     pub cwd: String,
     pub exec_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HostCapacity {
     /// Dates the snapshot. Without it a log reader would treat these as live.
     pub captured_at_ms: u64,
@@ -75,10 +75,22 @@ pub struct HostCapacity {
 /// host and shell that disagreed about the handshake would both look fine — the
 /// exact class of quiet divergence this contract exists to prevent.
 ///
-/// `extra` is the bounded forward-compatibility slot. It is an OPEN MAP, and
-/// that is compatible with `deny_unknown_fields`: the attribute rejects unknown
-/// *top-level* fields, while this named field deliberately accepts arbitrary
-/// scalar entries (measured — see the `extra_slot_*` tests).
+/// SCOPE: this attribute is PER-STRUCT, and every struct in this module carries
+/// its own — the four groups (`HostRuntime`, `HostPlatformInfo`, `HostPaths`,
+/// `HostCapacity`) as well as this one, because the schema declares
+/// `additionalProperties:false` at each of those levels too. An earlier revision
+/// only had it here, which meant a stray key INSIDE `host`/`paths`/`capacity`
+/// was accepted by Rust while the TS guard and the schema both rejected it. If
+/// you add another nested struct, give it the attribute as well; the
+/// `nested_*_rejects_unknown_keys` tests below are what fail if you forget.
+///
+/// `extra` is the bounded forward-compatibility slot, and it is the ONE place
+/// where unknown keys are welcome. That is compatible with
+/// `deny_unknown_fields` because the attribute governs a struct's own fields,
+/// while `extra` is a named field holding an open map. Its bounds (≤32 entries,
+/// camelCase keys, scalar values only) are enforced in `is_supported` rather
+/// than by serde, since serde cannot express them for a `BTreeMap<String,
+/// Value>` — see `extra_slot_*` and `extra_bounds_*` below.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HostReady {
@@ -229,6 +241,40 @@ mod tests {
     fn an_unknown_top_level_field_is_rejected_rather_than_ignored() {
         let mut value = serde_json::to_value(valid()).unwrap();
         value["surprise"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HostReady>(value).is_err());
+    }
+
+    /// Strictness is per-struct, so every GROUP needs covering too — the schema
+    /// says `additionalProperties:false` at each of these levels, and an earlier
+    /// revision only enforced it at the top. Each case below failed before the
+    /// four nested `deny_unknown_fields` attributes were added.
+    ///
+    /// One test per group, so a regression names which struct lost it.
+    #[test]
+    fn nested_runtime_rejects_unknown_keys() {
+        let mut value = serde_json::to_value(valid()).unwrap();
+        value["runtime"]["surprise"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HostReady>(value).is_err());
+    }
+
+    #[test]
+    fn nested_host_rejects_unknown_keys() {
+        let mut value = serde_json::to_value(valid()).unwrap();
+        value["host"]["surprise"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HostReady>(value).is_err());
+    }
+
+    #[test]
+    fn nested_paths_rejects_unknown_keys() {
+        let mut value = serde_json::to_value(valid()).unwrap();
+        value["paths"]["surprise"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<HostReady>(value).is_err());
+    }
+
+    #[test]
+    fn nested_capacity_rejects_unknown_keys() {
+        let mut value = serde_json::to_value(valid()).unwrap();
+        value["capacity"]["surprise"] = serde_json::json!(true);
         assert!(serde_json::from_value::<HostReady>(value).is_err());
     }
 
