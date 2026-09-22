@@ -189,8 +189,11 @@ jobs:
       #   v0-rust-mobile-Linux-x64-6ff13d87-c2c5085e，只差 job 段，【从不互相命中】。
       #   真正跨 job 共享的是 bun 包缓存（其 key 由我们手写、不含 job 名）。
       #
-      # static-gates 通过 key + add-job-id-key: false 有意对齐本 job 的 key 以便
-      # 只读复用（见该 job 注释）；本 job 自己不设参数，保持默认的"可读可写"。
+      # static-gates 用 `shared-key: desktop`（配 save-if: false）有意对齐本 job
+      # 的 key 前缀以便只读复用（见该 job 注释）；本 job 自己不设参数，保持默认的
+      # "可读可写"。
+      # （上游 config.ts 里 `shared-key` 与 "key + add-job-id-key: false" 两条路径
+      # 产出同一前缀；本项目取前者。此处曾误写成后者，与本 job 的实际配置不符。）
       # workspace 根在仓库根，target 在 /target/ —— 用默认 `. -> target`
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -322,7 +325,9 @@ jobs:
       #   - 不改 src-tauri/gen/android 的 gradle（那是 gitignore 的生成物，
       #     往里写 signingConfigs 无法持久化）；
       #   - ⚠ 产物是 debug 签名的，【不可用于分发】。release 分发签名属于 M5，
-      #     届时需用 Secrets 注入正式 keystore（见 docs/mobile-feasibility.md）。
+      #     届时需用 Secrets 注入正式 keystore。注意：docs/mobile-feasibility.md
+      #     目前【尚无】签名/keystore 章节（此前本行误指该文件为出处），届时先补
+      #     那一节再照做，不要以为那里已有现成流程。
       - name: Debug-sign the APK (smoke only, not for distribution)
         id: sign
         run: bash scripts/android-debug-sign.sh "${{ steps.apk.outputs.apk }}"
@@ -392,13 +397,20 @@ jobs:
           script: bash scripts/android-smoke.sh "${{ steps.sign.outputs.signed_apk }}" android-smoke
       # APK 与日志都留存：断言失败时 logcat 是唯一的诊断入口；
       # APK 留存则让人能把这个包手工装到真机上复核。
+      #
+      # ⚠ 两个 APK 都传：`signed_apk` 在【签名失败】时为空字符串，而那正是最需要
+      # 拿产物排障的场景（要看签名步骤到底产出了什么）。只传它会让失败时反而
+      # 拿不到 APK；`apk`（unsigned，由 Locate APK 提供）此时仍然存在。
+      # if-no-files-found: warn 让"签名失败导致该项缺失"不掩盖真正的错误。
       - name: Upload smoke artifacts (APK + logcat)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: android-smoke-${{ matrix.platform.name }}
           path: |
+            ${{ steps.apk.outputs.apk }}
             ${{ steps.sign.outputs.signed_apk }}
             android-smoke/logcat.txt
+            android-smoke/logcat-app.txt
             android-smoke/device-state.txt
           if-no-files-found: warn
