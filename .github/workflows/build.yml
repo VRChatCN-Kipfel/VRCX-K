@@ -367,83 +367,13 @@ jobs:
           disable-animations: true
           # -no-snapshot：每次全新启动，避免快照掩盖只在首次启动出现的问题。
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: |
-            set -u
-            APK="${{ steps.apk.outputs.apk }}"
-            mkdir -p android-smoke
-            echo "APK = $APK"
-
-            adb wait-for-device
-            # 二次保险：emulator-runner 已等过一轮 boot，这里再确认一次。
-            # 单引号是【有意】的：$(...) 要交给设备端的 sh 展开，
-            # 写成双引号会被本地 shell 先展开成空串，等待逻辑就废了（SC2016 属误报）。
-            # shellcheck disable=SC2016
-            adb shell 'while [ -z "$(getprop sys.boot_completed)" ]; do sleep 1; done'
-
-            # 清空既有缓冲，确保捕获到的只有本次安装/启动产生的内容。
-            adb logcat -c
-
-            echo "── adb install ──"
-            if ! adb install -r "$APK"; then
-              echo "::error::adb install failed"
-              adb logcat -d > android-smoke/logcat.txt 2>&1 || true
-              exit 1
-            fi
-
-            echo "── launch via monkey（不硬编码 Activity 名）──"
-            adb shell monkey -p com.vrcxk.app -c android.intent.category.LAUNCHER 1
-
-            # 轮询进程出现，最多 90s —— 代替原先的固定 sleep 8。
-            LAUNCHED=0
-            for i in $(seq 1 45); do
-              if adb shell pidof com.vrcxk.app >/dev/null 2>&1; then
-                echo "process alive after $((i * 2))s"
-                LAUNCHED=1
-                break
-              fi
-              sleep 2
-            done
-
-            # 多跑一会儿：WebView 初始化与业务首帧都在这段时间内发生，
-            # 崩溃若发生也多半在此窗口内写入 logcat。
-            sleep 15
-
-            echo "── capture logcat ──"
-            adb logcat -d > android-smoke/logcat.txt 2>&1 || true
-            wc -l android-smoke/logcat.txt || true
-
-            # 存一份设备/包状态，便于事后核对实际 Activity 名与前台状态。
-            {
-              echo "### pidof"
-              adb shell pidof com.vrcxk.app || true
-              echo "### resolved launcher activity"
-              adb shell cmd package resolve-activity --brief com.vrcxk.app || true
-              echo "### resumed activity"
-              adb shell dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity' || true
-            } > android-smoke/device-state.txt 2>&1 || true
-            cat android-smoke/device-state.txt || true
-
-            FAIL=0
-
-            if [ "$LAUNCHED" -ne 1 ]; then
-              echo "::error::com.vrcxk.app did not start within 90s (see android-smoke/logcat.txt)"
-              FAIL=1
-            fi
-
-            # 崩溃判据只认这两类硬信号，不去猜业务层日志措辞（那会引入假阳性）。
-            if grep -qE 'FATAL EXCEPTION|Fatal signal [0-9]+|BEGIN: (libc|debuggerd)' android-smoke/logcat.txt; then
-              echo "::error::crash markers found in logcat:"
-              grep -nE 'FATAL EXCEPTION|Fatal signal [0-9]+|BEGIN: (libc|debuggerd)' android-smoke/logcat.txt | head -40
-              FAIL=1
-            fi
-
-            if [ "$FAIL" -ne 0 ]; then
-              echo "──── last 200 logcat lines ────"
-              tail -200 android-smoke/logcat.txt
-              exit 1
-            fi
-            echo "SMOKE_OK: installed, launched, no crash markers"
-
+          # ⚠ 脚本主体放在 scripts/android-smoke.sh —— 不能内联多行。
+          # reactivecircus/android-emulator-runner 会把 script 输入【逐行拆开】，
+          # 每行交给独立的 /usr/bin/sh -c 进程（实测日志形态），于是变量不跨行、
+          # if/fi 与 while/done 直接语法错误：
+          #   /usr/bin/sh: 1: Syntax error: end of file unexpected (expecting "fi")
+          # 落成文件后整段在同一 shell 进程内运行；本行只做转发。
+          script: bash scripts/android-smoke.sh "${{ steps.apk.outputs.apk }}" android-smoke
       # APK 与日志都留存：断言失败时 logcat 是唯一的诊断入口；
       # APK 留存则让人能把这个包手工装到真机上复核。
       - name: Upload smoke artifacts (APK + logcat)
