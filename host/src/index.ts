@@ -12,7 +12,7 @@ import LoggerConsole from "@cordisjs/plugin-logger-console"
 import { log } from "./log"
 import { ShutdownSignal } from "./signal"
 import { makeRestartRequester } from "./restart"
-import { stopOnStdinLoss } from "./lifecycle"
+import { stopOnShellLost, stopOnStdinLoss } from "./lifecycle"
 import { watchStdinClose } from "./stdin-watch"
 import { connectShellStdio, type DevWatchPush } from "./stdio"
 import { listenHostWs } from "./ws"
@@ -299,37 +299,53 @@ async function bootstrap() {
     const shell = connectShellStdio(ctx)
     // Announcing `ready` is a fire-and-observe call, not a startup gate.
     //
-    // Under the official stdio transport, a shell that goes away while this RPC
-    // is in flight makes kkrpc reject the pending request
-    // (`RPCTransportClosedError`). That rejection is EXPECTED, not a failure:
-    // "the shell died mid-handshake" is exactly the #33 case, and
-    // `stopOnStdinLoss` handles it with a graceful exit 0.
+    // "The shell is gone" reaches us through TWO independent detectors, and both
+    // must be absorbed or the exit code becomes a coin flip:
     //
-    // Why it is absorbed rather than allowed to propagate: BOTH exits are still
-    // reachable while this call is outstanding — `stopOnStdinLoss` exits 0, and
-    // the bootstrap catch-all below exits 1. The race was disarmed, NOT
-    // structurally removed: consuming this one rejection just means the second
-    // trigger never fires for this cause. Anything that awaits here (a new
-    // startup step inserted inside this window) re-arms it, because the two
-    // paths would again be competing for the exit code.
+    //   1. the READ side ends -> kkrpc rejects the pending call with
+    //      `RPCTransportClosedError` (probe 15, cells A–D);
+    //   2. a WRITE fails -> kkrpc rejects with the raw EPIPE error while
+    //      `onClose` stays silent, because the read side is untouched
+    //      (probe 16, cell E; `sawWriteFailure()` reports this).
     //
-    // Absorb ONLY that cause. The catch used to swallow every rejection, which
-    // silently converted real startup failures — a shell that does not know this
-    // method (version-skewed sidecar), a handler that throws, a channel torn
-    // down locally — into "keep bootstrapping" while the UI waited for a `ready`
-    // that already failed. Those now reach the fatal handler and exit 1 loudly.
-    // The reachable rejections are enumerated and discriminated in
-    // `docs/probes/stdio-lifecycle/15-ready-rejection-taxonomy.ts`; that probe
-    // also asserts `instanceof` still matches across kkrpc's bundle chunks, since
-    // a split there would silently turn this narrowing into a rethrow-everything.
+    // Case 2 is why this catch cannot key on the error type alone. Both mean the
+    // shell died mid-handshake — the #33 case — so both take the same graceful
+    // teardown. They differ only in the exit code they were previously given by
+    // accident: case 1 reached `stopOnStdinLoss` (exit 0), case 2 fell through to
+    // the catch-all (exit 1), and exit 1 is billed to the restart-storm budget
+    // with no cause of the host's own.
+    //
+    // Why absorbed rather than propagated: BOTH exits are still reachable while
+    // this call is outstanding — `stopOnStdinLoss` exits 0 and the bootstrap
+    // catch-all below exits 1. The race was disarmed, NOT structurally removed:
+    // consuming these rejections only means the second trigger never fires for
+    // these causes. Anything that awaits here (a new startup step inside this
+    // window) re-arms it.
+    //
+    // Anything that is NEITHER of the two is a genuine startup fault and must
+    // keep reaching the fatal handler: a shell that does not know this method
+    // (version-skewed sidecar), a handler that throws, a channel torn down
+    // locally. The full reachable set is enumerated and discriminated in
+    // `docs/probes/stdio-lifecycle/15-ready-rejection-taxonomy.ts` (A–D) and
+    // `16-write-failure-rejection.ts` (E); the former also asserts `instanceof`
+    // still matches across kkrpc's bundle chunks, since a split there would
+    // silently turn this narrowing into a rethrow-everything.
     try {
       await shell.ready(ready)
     } catch (error) {
-      if (!(error instanceof RPCTransportClosedError)) throw error
-      log(`shell.ready not delivered (${describeError(error)}) — the shell is gone`)
-      // The stdin-loss path now stops us cleanly. If it does not fire (no peer
-      // channel), keep bootstrapping: the ws surface is up and a later shell may
-      // still attach.
+      const readSideGone = error instanceof RPCTransportClosedError
+      const writeSideGone = shell.sawWriteFailure()
+      if (!readSideGone && !writeSideGone) throw error
+      log(
+        `shell.ready not delivered (${describeError(error)}) — the shell is gone ` +
+          `(${readSideGone ? "read side closed" : "write side failed"})`,
+      )
+      // Hand the teardown to the same stopping gate every other path uses, with
+      // the dedicated exit code: the handshake never completed, so this is not a
+      // clean stop (0), and the host is not at fault, so it must not be charged
+      // as a crash (1). `stopOnShellLost` is a no-op if the read-side detector
+      // already claimed the exit — the first trigger owns it.
+      await stopOnShellLost(ctx)
     }
     // Tray ingress: push snapshots to the shell and fan shell `tray.action`
     // notifications back out to host/plugin handlers. Only wired when a shell
