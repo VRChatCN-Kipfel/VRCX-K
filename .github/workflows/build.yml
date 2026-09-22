@@ -64,13 +64,41 @@ jobs:
           components: rustfmt, clippy
 
       # rust-cache 必须在工具链【之后】：它的 key 取自当前 rustc 版本。
-      # 此处【不设 shared-key】—— 默认 key 已含 job id，故缓存只服务本 job
-      # 自己的重复 run。跨 job 复用需与目标 job 共用 shared-key，但那会让
-      # 多个 job 争抢同一条目（已存在的 key 不再被覆盖 ⇒ 后跑者更丰富的产物
-      # 反而存不进去），且 mobile(android) 与 desktop(ubuntu) 的 rustc/host
-      # 段相同、共用 key 会互相污染。故暂不合并，理由见提交说明。
+      #
+      # ⚠ 这里刻意让本 job 的 key 与 desktop 的 ubuntu 条目【逐字一致】，以便直接
+      #   复用其热缓存。三个参数缺一不可，先说清"为什么需要"：
+      #
+      #   本 job 与 desktop-ubuntu 【都是 Linux x64 + 同一 rustc + 同一 Cargo.lock】，
+      #   依赖树完全相同，唯一差别是 rust-cache 默认把 GITHUB_JOB 写进 key，于是
+      #   本 job 得到 v0-rust-static-gates-…、desktop 得到 v0-rust-desktop-…，两者
+      #   互不可见 ⇒ 本 job 每次都得冷编整棵依赖树。实测这条差别的代价（本机 24 核）：
+      #     cargo check 冷编 212 crate ≈63s → 紧接着 clippy 只编 1 crate ≈8s
+      #   即"依赖产物已在"时 clippy 几乎免费；1 vCPU 冷编则是分钟级，可能撞上
+      #   平台 15 分钟硬杀（本 job 未设 timeout-minutes，正是为了先测出这个数）。
+      #
+      #   降 key 的办法：`shared-key: desktop` 会【替换掉】自动的 job 段，使本 job
+      #   得到前缀 v0-rust-desktop-Linux-x64 —— 与 desktop 那条【逐字相同】
+      #   （desktop 的实测 key 为 v0-rust-desktop-Linux-x64-6ff13d87-c2c5085e；
+      #   上游 config.ts 里 shared-key 与 "key + add-job-id-key:false" 两条路径
+      #   产出同一前缀，这里取更短的那个写法，减少参数面）。
+      #   ⚠ 维护约束：若将来重命名 desktop job，这里必须同步改，否则本 job 静默
+      #   退回冷编译（只是变慢，不会失败 —— 这类"静默变慢"正是要靠注释防的）。
+      #
+      #   save-if: false 同样必需，不能省：本 job 跑在 desktop【之前】（desktop 有
+      #   needs: static-gates），而 GitHub 对已存在的 key【不覆盖】。若本 job 也写
+      #   缓存，它会以自己较薄的产物（只有 clippy 的 dev 产物）抢先冻结该条目，
+      #   desktop 更丰富的产物（check + test）反而永远存不进去 —— 那会把 desktop
+      #   现有良好缓存拖退化。只恢复不保存 = 白嫖 desktop 的热缓存，且不污染它。
+      #   （上游 save.ts 实测：save-if=false 只跳过 save，restore 不受影响。）
+      #
+      #   命中的时序（诚实说明，避免误以为首次就快）：第一轮 static-gates 仍然
+      #   冷编（此时 desktop 尚未写过新 key），随后 desktop 写入；从第二轮起
+      #   本 job 才命中。即收益在【第二次及以后】的 run 兑现。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop
+          save-if: "false"
 
       # clippy 与 cargo check 不同：它要真正构建依赖树，Linux 上必须能
       # pkg-config 到 webkit2gtk 等库（与 desktop job 的 Linux 依赖同源）。
@@ -153,8 +181,16 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      # 跨 job / 跨 workflow 共享的 cargo 缓存（key 自动含 Cargo.lock/rustc/OS；
-      # 三平台矩阵各自隔离 key，但同平台不同 job 命中同一缓存）
+      # cargo 缓存（key 自动含 Cargo.lock/rustc/OS/arch，【以及 GITHUB_JOB】）。
+      #
+      # ⚠ 修正一条曾在此处的错误说法："同平台不同 job 命中同一缓存" —— 与实测不符。
+      #   rust-cache 默认把 job 名写进 key（add-job-id-key 默认 true），实测两条
+      #   key 为 v0-rust-desktop-Linux-x64-6ff13d87-c2c5085e 与
+      #   v0-rust-mobile-Linux-x64-6ff13d87-c2c5085e，只差 job 段，【从不互相命中】。
+      #   真正跨 job 共享的是 bun 包缓存（其 key 由我们手写、不含 job 名）。
+      #
+      # static-gates 通过 key + add-job-id-key: false 有意对齐本 job 的 key 以便
+      # 只读复用（见该 job 注释）；本 job 自己不设参数，保持默认的"可读可写"。
       # workspace 根在仓库根，target 在 /target/ —— 用默认 `. -> target`
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
