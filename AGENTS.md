@@ -91,8 +91,15 @@ VRCX-K/
 | `bun run dev:host` | 起 Cordis 宿主（host/） |
 | `bun run build:host` | 编译 host |
 | `bun run typecheck` | 前端 + app + host 三套类型检查 |
+| `bun run check:contracts` | schema ↔ 生成镜像逐字节比对（漂移闸门） |
+| `bun run check:js` | JS/TS 格式化 + lint + import 排序（`biome ci`，**只读**） |
+| `bun run format` | 按 biome 配置**写入**格式化（改文件） |
+| `bun run lint` | 按 biome 推荐集**写入** lint 修复（改文件） |
 | `bun run test` | 前端与 host 测试 |
-| **`bun run verify`** | **= typecheck + test + build，提交前必跑** |
+| **`bun run verify`** | **= typecheck + check:contracts + check:js + test + build，提交前必跑** |
+
+> `biome` 已 pin 在 devDependencies（`2.5.14`，与 `biome.json` 的 `$schema` 对齐）。
+> 不要改用 `bunx @biomejs/biome@latest`：上游发新版会在没人改代码的情况下让门控变红。
 
 ### 环境要求
 
@@ -106,9 +113,38 @@ VRCX-K/
 
 ### 交付前自检
 
-- `bun run verify` 全绿；Rust 侧 `cargo fmt --check` + `cargo clippy -- -D warnings` + `cargo test` 全绿。
+> **提交前必须跑完全部五道门控。** CI 侧的 `static-gates` job 就是这五道
+> （见 `.github/workflows/build.yml`），本地命令与 CI 判据**逐条对应**：
+> 本地跑过就等于预演过 CI，不要只跑一部分就提交。
+
+| # | 门控 | 本地命令 | 覆盖 |
+|---|---|---|---|
+| 1 | Rust 格式 | `cargo fmt --all --check` | `src-tauri/` |
+| 2 | Rust lint | `cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings` | `src-tauri/`（警告即失败） |
+| 3 | TS 类型 | `bun run typecheck` | 前端 + host + 五套 tsconfig |
+| 4 | JS/TS 格式 + lint | `bun run check:js` | `.ts/.tsx`（biome，含 import 排序） |
+| 5 | 契约漂移 | `bun run check:contracts` | schema ↔ 生成镜像逐字节 |
+
+⚠ **`bun run verify` 只等于第 3–5 道加测试与构建**，它的定义是
+`typecheck + check:contracts + check:js + test + build` —— **不含**
+`cargo fmt` / `cargo clippy` / `cargo test` 三道 Rust 门控。**"verify 全绿"不等于
+自检通过**，那三道必须单独跑（或用下面的一行脚本）。
+
+一行跑完全部五道（PowerShell / bash 通用）：
+
+```bash
+cargo fmt --all --check \
+  && cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings \
+  && cargo test --locked --manifest-path src-tauri/Cargo.toml \
+  && bun run verify
+```
+
 - 新增行为**必须有测试钉住**（回归测试优先于断言强度：宁可多写一条会失败的用例，也别把断言放宽）。
 - 纯格式化/漂移修复**单独提交**，不与功能 diff 混在一起。
+- **尽力而为，不要卡死**：若某道门控因**环境原因**（缺系统库、平台不支持、
+  工具未装）在本地跑不起来，**照实说明跑不了哪一道、为什么**，不要把"没跑"
+  说成"通过"，也不要为了让它通过而放宽断言或屏蔽规则。能让 CI 兜住的
+  就交给 CI，但**必须在提交信息里写明**哪一道未在本地验证。
 
 ## Git 约定
 
