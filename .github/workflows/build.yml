@@ -310,3 +310,149 @@ jobs:
           echo "APK: $APK"
           # 构建成功但找不到 APK 视为失败（防止静默通过）
           test -n "$APK"
+
+      # ── 模拟器冒烟：安装 + 启动 + 抓 logcat ───────────────────────────────
+      #
+      # 这一步回答"壳+脸能编译打包"之外的第二个问题：**装到设备上能不能跑起来**。
+      # 此前的 mobile job 只 find 到 APK 就结束，从不安装、不启动、不看日志。
+      #
+      # 历史：c9d948fb 曾写下等价步骤（mobile-compat.yml），但在 8f34872d 被
+      # **暂缓**（提交信息原文 "drop the emulator smoke for now (slowest/fragile
+      # step); current goal is proving shell+face compile to an APK"）。关键事实：
+      # 那 4 次 run 里该步骤**全部是 skipped**（卡在前面的 Java/SDK/构建步骤），
+      # 即那段脚本【从未真正执行过】。所以本步不是"把删掉的代码加回来"，而是
+      # **第一次真正调试它**。据此对原脚本做了四处修正，逐条说明为什么：
+      #
+      #  ① 原脚本写 `am start -n com.vrcxk.app/.MainActivity` —— 该 Activity 全名
+      #     从未经实测（gen/android 是 gitignore 的生成物，仓库里查不到）。写死一个
+      #     未验证的名字等于给自己埋一个假失败源。改用 `monkey` 触发 LAUNCHER
+      #     intent，由系统解析实际 Activity 名。
+      #  ② 原脚本 `sleep 8` 后断言前台 Activity —— 冷启一个 Tauri WebView 应用在
+      #     模拟器上很可能超过 8 秒。改为轮询进程出现（上限 90s），且不断言具体
+      #     Activity 名，改为"进程存活 + 无崩溃日志"这两个更稳的判据。
+      #  ③ 原脚本只做 dumpsys 断言，**完全没有留日志**。失败时无从诊断。本步把
+      #     logcat 落盘并在最后（if: always）上传为 artifact —— 这是本次的**主要
+      #     产出**：即便断言失败，也能拿到崩溃栈/原生信号。
+      #  ④ `target` 用 google_apis 而非 default：Tauri 依赖系统 WebView，AOSP 镜像
+      #     的 WebView 供给不确定；google_apis 是 WebView 类应用的常规选择。
+      #
+      # KVM：Linux runner 上模拟器要硬件加速就必须先放行 /dev/kvm（否则退回纯软件
+      # 模拟，慢到可能撞 timeout）。下面按上游 README 的官方配方开启。
+      # 先跑一步 pre-check 把事实打印出来：首次运行需要据此判断这台 runner 到底有没有
+      # 嵌套虚拟化（没有的话 `disable-linux-hw-accel: auto` 会自动降级，耗时会暴露）。
+      - name: Check KVM availability
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "KVM device present: $(ls -l /dev/kvm)"
+          else
+            echo "::warning::/dev/kvm absent — emulator falls back to software rendering (slow)"
+          fi
+          echo "cpu virt flags: $(egrep -c '(vmx|svm)' /proc/cpuinfo || true)"
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Emulator smoke (install + launch + logcat)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          # 冷启本身要几分钟；给足余量，避免把"慢"误报成"挂"。
+          emulator-boot-timeout: 900
+          disable-animations: true
+          # -no-snapshot：每次全新启动，避免快照掩盖只在首次启动出现的问题。
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: |
+            set -u
+            APK="${{ steps.apk.outputs.apk }}"
+            mkdir -p android-smoke
+            echo "APK = $APK"
+
+            adb wait-for-device
+            # 二次保险：emulator-runner 已等过一轮 boot，这里再确认一次。
+            # 单引号是【有意】的：$(...) 要交给设备端的 sh 展开，
+            # 写成双引号会被本地 shell 先展开成空串，等待逻辑就废了（SC2016 属误报）。
+            # shellcheck disable=SC2016
+            adb shell 'while [ -z "$(getprop sys.boot_completed)" ]; do sleep 1; done'
+
+            # 清空既有缓冲，确保捕获到的只有本次安装/启动产生的内容。
+            adb logcat -c
+
+            echo "── adb install ──"
+            if ! adb install -r "$APK"; then
+              echo "::error::adb install failed"
+              adb logcat -d > android-smoke/logcat.txt 2>&1 || true
+              exit 1
+            fi
+
+            echo "── launch via monkey（不硬编码 Activity 名）──"
+            adb shell monkey -p com.vrcxk.app -c android.intent.category.LAUNCHER 1
+
+            # 轮询进程出现，最多 90s —— 代替原先的固定 sleep 8。
+            LAUNCHED=0
+            for i in $(seq 1 45); do
+              if adb shell pidof com.vrcxk.app >/dev/null 2>&1; then
+                echo "process alive after $((i * 2))s"
+                LAUNCHED=1
+                break
+              fi
+              sleep 2
+            done
+
+            # 多跑一会儿：WebView 初始化与业务首帧都在这段时间内发生，
+            # 崩溃若发生也多半在此窗口内写入 logcat。
+            sleep 15
+
+            echo "── capture logcat ──"
+            adb logcat -d > android-smoke/logcat.txt 2>&1 || true
+            wc -l android-smoke/logcat.txt || true
+
+            # 存一份设备/包状态，便于事后核对实际 Activity 名与前台状态。
+            {
+              echo "### pidof"
+              adb shell pidof com.vrcxk.app || true
+              echo "### resolved launcher activity"
+              adb shell cmd package resolve-activity --brief com.vrcxk.app || true
+              echo "### resumed activity"
+              adb shell dumpsys activity activities | grep -E 'mResumedActivity|ResumedActivity' || true
+            } > android-smoke/device-state.txt 2>&1 || true
+            cat android-smoke/device-state.txt || true
+
+            FAIL=0
+
+            if [ "$LAUNCHED" -ne 1 ]; then
+              echo "::error::com.vrcxk.app did not start within 90s (see android-smoke/logcat.txt)"
+              FAIL=1
+            fi
+
+            # 崩溃判据只认这两类硬信号，不去猜业务层日志措辞（那会引入假阳性）。
+            if grep -qE 'FATAL EXCEPTION|Fatal signal [0-9]+|BEGIN: (libc|debuggerd)' android-smoke/logcat.txt; then
+              echo "::error::crash markers found in logcat:"
+              grep -nE 'FATAL EXCEPTION|Fatal signal [0-9]+|BEGIN: (libc|debuggerd)' android-smoke/logcat.txt | head -40
+              FAIL=1
+            fi
+
+            if [ "$FAIL" -ne 0 ]; then
+              echo "──── last 200 logcat lines ────"
+              tail -200 android-smoke/logcat.txt
+              exit 1
+            fi
+            echo "SMOKE_OK: installed, launched, no crash markers"
+
+      # APK 与日志都留存：断言失败时 logcat 是唯一的诊断入口；
+      # APK 留存则让人能把这个包手工装到真机上复核。
+      - name: Upload smoke artifacts (APK + logcat)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-smoke-${{ matrix.platform.name }}
+          path: |
+            ${{ steps.apk.outputs.apk }}
+            android-smoke/logcat.txt
+            android-smoke/device-state.txt
+          if-no-files-found: warn
