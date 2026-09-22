@@ -22,6 +22,13 @@
   then. Still outside `includes`: `contracts/*.schema.json` (has its own semantic check
   in `check:contracts`), `docs/**/*.html` (generated arch diagram), and the local-state
   JSON under `.agent-teams/` / `.mnemon/`.
+- **`.sh` files are never in the `biome` gate.** `biome` has no shell support and
+  `scripts/` only lists `**/*.ts`, so the three Android scripts
+  (`android-smoke.sh`, `android-debug-sign.sh`, `android-smoke.test.sh`) are **not**
+  covered by `check:js`. They are covered by **`bash -n` + shellcheck locally** and by
+  **CI's `static-gates` step 13** (`bash scripts/android-smoke.test.sh`, which pins the
+  crash-criteria of `android-smoke.sh`). Two different concerns — a green `check:js`
+  says nothing about shell scripts.
 
 ## `stdio-lifecycle/` (subdirectory)
 

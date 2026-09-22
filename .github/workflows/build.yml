@@ -139,6 +139,23 @@ jobs:
       - name: Contract drift gate (schemas <-> generated TS mirrors)
         run: bun run check:contracts
 
+      # android 冒烟脚本的崩溃判据回归测试。
+      #
+      # 为什么放在【门控 job】而不是 mobile：它自带假 adb，不需要设备、不需要
+      # Android SDK、不需要 JDK，纯粹是 shell 逻辑测试（几百毫秒）。放进 mobile
+      # 意味着只有走到 android 那一步才跑，且要先等 6 分钟构建；放在这里能在
+      # desktop/mobile 之前就拦下判据回归。
+      #
+      # 为什么必须有它：崩溃判据有两个静默失效方向，且都不会报错 ——
+      #   ① 误报：全量裸匹配会把别的进程的 `FATAL EXCEPTION` 算到本应用头上；
+      #   ② 漏报：按 app pid 过滤会整类丢掉原生崩溃（tombstone 由 `crash_dump`
+      #      写出，其条目 pid 不是应用的 pid）。
+      # 6 个场景里 `app-native-crash` 与 `bare-signal-noise` 分别钉死这两个方向。
+      # ⚠ 没有这条接线时它只是仓库里的死代码 —— 将来有人把判据改回 pid 过滤，
+      # 不会有任何东西变红。这正是它必须接进 CI 的原因。
+      - name: Android smoke crash-criteria regression
+        run: bash scripts/android-smoke.test.sh
+
   desktop:
     name: desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

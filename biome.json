@@ -16,6 +16,8 @@
       "packages/**/*.ts",
       "packages/**/*.tsx",
       "examples/**/*.ts",
+      "examples/**/*.tsx",
+      "examples/**/*.css",
       "vite.config.ts",
       "host/plugins/**/*.ts",
       "index.ts",
