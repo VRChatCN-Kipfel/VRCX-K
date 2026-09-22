@@ -7,7 +7,21 @@ resolver = "2"
 # cargo commands run from the repo root operate on it uniformly.
 
 [profile.release]
-codegen-units = 1
+# codegen-units 刻意【不设】，即用 cargo 默认值 16（非增量构建）。
+#
+# 它原本是 create-tauri-app 模板带来的 `codegen-units = 1`（模板注释指向
+# tauri.app/concept/size，即"减小体积"主题），随 0918f77e 脚手架一并进入本仓库，
+# 并非本项目的取舍。而按 rustc 文档，这一条的主要卖点是【生成代码的运行时性能】，
+# 对体积贡献很小；代价是把 crate 限制为单个 codegen unit、禁掉代码生成并行。
+# 文档原话："Setting this to 1 may improve the performance of generated code,
+# but may be slower to compile."
+#
+# ⚠ 尚未验证：它对本仓库 android 构建那 4×~45s 的实际贡献【未做受控实测】
+#   （本地无 NDK，无法复现 android 链接）。删掉它依据的是官方文档与"恢复默认
+#   即恢复并行"的机制，不是实测结论。若后续测量发现收益不明显，应重新评估，
+#   而不是想当然地认为它有用。
+#
+# lto / opt-level / strip / panic 保留 —— 它们才是真正影响发布质量与体积的项。
 lto = true
 opt-level = 3
 panic = "abort"
