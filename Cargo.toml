@@ -7,21 +7,24 @@ resolver = "2"
 # cargo commands run from the repo root operate on it uniformly.
 
 [profile.release]
-# codegen-units 刻意【不设】，即用 cargo 默认值 16（非增量构建）。
+# ⚠ 不要删这一行。它来自 create-tauri-app 模板（注释指向 tauri.app/concept/size），
+#   看起来像"为了体积牺牲编译速度"的包袱，但实测**删掉它会让 android 构建慢一倍**：
 #
-# 它原本是 create-tauri-app 模板带来的 `codegen-units = 1`（模板注释指向
-# tauri.app/concept/size，即"减小体积"主题），随 0918f77e 脚手架一并进入本仓库，
-# 并非本项目的取舍。而按 rustc 文档，这一条的主要卖点是【生成代码的运行时性能】，
-# 对体积贡献很小；代价是把 crate 限制为单个 codegen unit、禁掉代码生成并行。
-# 文档原话："Setting this to 1 may improve the performance of generated code,
-# but may be slower to compile."
+#     保留 codegen-units = 1 : 各 ABI 只重编 ~10 个 crate，build 共 6m20s
+#     删除（即默认 16）      : 各 ABI 重编 ~213 个 crate，build 共 11m25s
 #
-# ⚠ 尚未验证：它对本仓库 android 构建那 4×~45s 的实际贡献【未做受控实测】
-#   （本地无 NDK，无法复现 android 链接）。删掉它依据的是官方文档与"恢复默认
-#   即恢复并行"的机制，不是实测结论。若后续测量发现收益不明显，应重新评估，
-#   而不是想当然地认为它有用。
+#   机制：codegen-units 是【编译期 codegen 参数，会进入 cargo 的 fingerprint】。
+#   改动它 ⇒ 全部依赖的 fingerprint 失效 ⇒ 每个 target 重编整棵依赖树，rust-cache
+#   形同失效（实测日志里缓存仍报 full match，但产物因指纹变化无法复用）。
+#   保留它时 511 个依赖正常命中缓存，每 target 只需重编本仓库的 ~10 个 crate
+#   再做一次 fat-LTO 链接。
 #
-# lto / opt-level / strip / panic 保留 —— 它们才是真正影响发布质量与体积的项。
+#   即那 ~45s/target 是 **LTO 链接的固有成本，不是 codegen-units 的代价**。
+#   rustc 文档说 "may be slower to compile" 是在【冷编译】语境下；在有缓存的
+#   CI 上结论相反。改 profile 类参数务必做同缓存的受控实测。
+#
+#   证据：run 35715896263（含本行）vs run 35726109285（曾删除本行）。
+codegen-units = 1
 lto = true
 opt-level = 3
 panic = "abort"
