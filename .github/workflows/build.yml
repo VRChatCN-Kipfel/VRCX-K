@@ -311,6 +311,22 @@ jobs:
           # 构建成功但找不到 APK 视为失败（防止静默通过）
           test -n "$APK"
 
+      # release APK 默认是 **unsigned** 的，而 Android 平台层【强制要求已签名】
+      # 才能安装 —— adb 没有任何"忽略签名"的开关（pm install 的 -r/-t/-d/-g/-i
+      # 全都不涉及签名；已核对本地 `pm help` 与 install 选项列表）。所以不签名就
+      # 装不上，这也是模拟器冒烟第一次运行时暴露的问题：
+      #   adb: failed to install .../app-universal-release-unsigned.apk
+      #
+      # 这里用【一次性 debug 证书】现场签名，只为让模拟器能装上并验证"应用能跑"：
+      #   - 不引入任何 Secrets（keytool 现场生成，密码为惯例值 android）；
+      #   - 不改 src-tauri/gen/android 的 gradle（那是 gitignore 的生成物，
+      #     往里写 signingConfigs 无法持久化）；
+      #   - ⚠ 产物是 debug 签名的，【不可用于分发】。release 分发签名属于 M5，
+      #     届时需用 Secrets 注入正式 keystore（见 docs/mobile-feasibility.md）。
+      - name: Debug-sign the APK (smoke only, not for distribution)
+        id: sign
+        run: bash scripts/android-debug-sign.sh "${{ steps.apk.outputs.apk }}"
+
       # ── 模拟器冒烟：安装 + 启动 + 抓 logcat ───────────────────────────────
       #
       # 这一步回答"壳+脸能编译打包"之外的第二个问题：**装到设备上能不能跑起来**。
@@ -373,7 +389,7 @@ jobs:
           # if/fi 与 while/done 直接语法错误：
           #   /usr/bin/sh: 1: Syntax error: end of file unexpected (expecting "fi")
           # 落成文件后整段在同一 shell 进程内运行；本行只做转发。
-          script: bash scripts/android-smoke.sh "${{ steps.apk.outputs.apk }}" android-smoke
+          script: bash scripts/android-smoke.sh "${{ steps.sign.outputs.signed_apk }}" android-smoke
       # APK 与日志都留存：断言失败时 logcat 是唯一的诊断入口；
       # APK 留存则让人能把这个包手工装到真机上复核。
       - name: Upload smoke artifacts (APK + logcat)
@@ -382,7 +398,7 @@ jobs:
         with:
           name: android-smoke-${{ matrix.platform.name }}
           path: |
-            ${{ steps.apk.outputs.apk }}
+            ${{ steps.sign.outputs.signed_apk }}
             android-smoke/logcat.txt
             android-smoke/device-state.txt
           if-no-files-found: warn
