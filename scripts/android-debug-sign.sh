@@ -44,26 +44,27 @@ else
     fi
   }
   APKSIGNER="$(find_apksigner)"
-
-  # build-tools 未必已就位：本仓库的 setup-android 只声明了 `platform-tools`，
-  # 而 build-tools 是后续 gradle / emulator-runner 阶段才被拉取的。签名步骤紧跟
-  # "Locate APK"，时序上可能早于它们 —— 实测 CI 日志里 `build-tools;37.0.0` 的
-  # 安装发生在模拟器步骤期间，晚于签名步骤所在位置。所以这里按需自装，
-  # 不依赖别的步骤恰好先跑过。
-  if [ -z "$APKSIGNER" ]; then
-    echo "apksigner not found; installing build-tools via sdkmanager..."
-    SDKMANAGER="$(find "$SDK/cmdline-tools" -mindepth 2 -maxdepth 3 -name sdkmanager -type f 2>/dev/null | sort -V | tail -1 || true)"
-    if [ -n "$SDKMANAGER" ]; then
-      # 版本不写死：装 latest，再重新解析路径。
-      yes | "$SDKMANAGER" --install 'build-tools;latest' >/dev/null 2>&1 || true
-      APKSIGNER="$(find_apksigner)"
-    fi
-  fi
 fi
 if [ -z "$APKSIGNER" ]; then
-  echo "::error::apksigner not found under $SDK/build-tools, and could not install build-tools"
+  # 刻意【不】在这里自装 build-tools。此前这里写的是
+  #   yes | sdkmanager --install 'build-tools;latest' ... || true
+  # 那是个【假安全网】，两点都错：
+  #   1) `build-tools;latest` 不是合法的 sdkmanager 包名（它要具体版本，如
+  #      `build-tools;37.0.0`），该命令必然失败；
+  #   2) 失败又被 `|| true` 吞掉，于是"按需自装"从未真正发生过 —— 下面这个
+  #      硬失败分支才是它唯一可能的归宿。
+  # 实测（run 35733791102，本步成功那次）：`apksigner` 来自
+  #   /usr/local/lib/android/sdk/build-tools/37.0.0/apksigner
+  # 而 build-tools 是前一步 `tauri android build`（AGP）自己拉进来的，时间上
+  # 早于本步；emulator-runner 在更后面才又装了一次。即本兜底【从未被触发】。
+  # 与其保留一段永远不会正确执行的代码，不如失败时把原因和出路讲清楚。
+  echo "::error::apksigner not found under $SDK/build-tools"
   echo "  ANDROID_HOME=$SDK"
-  ls -1 "$SDK/build-tools" 2>/dev/null || echo "  (no build-tools directory)"
+  echo "  build-tools 目前的内容："
+  ls -1 "$SDK/build-tools" 2>/dev/null || echo "    (build-tools 目录不存在)"
+  echo "  出路：确认前一步 'Build universal APK' 已成功执行（AGP 会拉取 build-tools），"
+  echo "        或在 workflow 的 setup-android 步骤显式声明一个具体版本，例如"
+  echo "        packages: 'platform-tools, build-tools;37.0.0'"
   exit 1
 fi
 echo "apksigner: $APKSIGNER"
