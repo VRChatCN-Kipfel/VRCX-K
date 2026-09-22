@@ -4,12 +4,18 @@ import { expose } from "kkrpc"
 import { webSocketTransport } from "kkrpc/ws"
 import { WebSocketServer } from "ws"
 import type { Context } from "cordis"
-import { hostWsAPI } from "./api"
+import { hostWsAPI, HOST_VERSION } from "./api"
+import { HOST_READY_SCHEMA_VERSION, type HostReady } from "./contracts/hostReady"
+import { collectHostEnvironment } from "./host-environment"
 
-export type HostWsReady = {
-  port: number
-  token: string
-}
+/**
+ * The handshake the host sends to the shell (see
+ * `contracts/host-ready/v1/host-ready.schema.json`). `hostVersion` is carried on
+ * the wire, not only in the log line, because the shell supervises the host but
+ * has no other way to learn which build it is supervising — `getVersion()` needs
+ * the ws connection, which the face opens later.
+ */
+export type HostWsReady = HostReady
 
 export async function listenHostWs(ctx: Context): Promise<HostWsReady> {
   const token = randomBytes(32).toString("hex")
@@ -41,5 +47,14 @@ export async function listenHostWs(ctx: Context): Promise<HostWsReady> {
     wss.close()
   })
 
-  return { port, token }
+  return {
+    schemaVersion: HOST_READY_SCHEMA_VERSION,
+    port,
+    token,
+    hostVersion: HOST_VERSION,
+    // The environment is read once, here, because `ready` is sent once per
+    // process — see the schema's STALENESS note for why only slow-moving facts
+    // belong in it.
+    ...collectHostEnvironment(),
+  }
 }

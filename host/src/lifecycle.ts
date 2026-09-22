@@ -32,6 +32,8 @@
 //   shell supervisor keeps a separate, longer force-kill deadline.
 
 import type { Context } from "cordis"
+import { HOST_STDIO_LOST_EXIT } from "./api"
+import type { ShutdownSignal } from "./signal"
 
 // A cooperative host shutdown gets enough time for real plugin cleanup. The
 // shell keeps a separate, longer 30s deadline and kills the process tree if
@@ -139,10 +141,30 @@ export async function gracefulStopWithTimeout(
   initialMs = GRACEFUL_STOP_TIMEOUT_MS,
   hardCapMs = GRACEFUL_STOP_HARD_CAP_MS,
 ): Promise<boolean> {
+  // `ctx.signal` is declared via `declare module "cordis"`, which makes
+  // TypeScript believe it is ALWAYS present. It is not: it is `provide`d during
+  // bootstrap and then TORN DOWN by the first `gracefulStop`, because disposing
+  // the root runtimes disposes the service that provides it. A SECOND stop
+  // attempt — which `stopOnShellLost` introduced, and which any future second
+  // caller would hit — therefore dereferenced `undefined` and crashed with
+  // `TypeError: ctx.signal.begin` on a path that was already shutting down.
+  //
+  // Treat a missing signal as "a shutdown already owns this process": there is
+  // nothing left to coordinate, and the caller must NOT schedule a competing
+  // exit. This mirrors the `!acquired` branch below, which exists for exactly
+  // the same reason.
+  const signal: ShutdownSignal | undefined = ctx.signal
+  if (!signal) {
+    console.error(
+      `[host] graceful stop requested (${reason}) after shutdown already tore down the signal — ignoring`,
+    )
+    return false
+  }
+
   // Acquire the stopping gate. If another shutdown is already running (stop
   // RPC, restart RPC or the dev-watch restart requester), do nothing — the
   // first trigger owns cleanup and the process exit.
-  const acquired = ctx.signal.begin(initialMs, hardCapMs, reason)
+  const acquired = signal.begin(initialMs, hardCapMs, reason)
   if (!acquired) {
     console.error(`[host] graceful stop requested (${reason}) but a shutdown is already in progress — ignoring`)
     return false
@@ -159,7 +181,10 @@ export async function gracefulStopWithTimeout(
 
   const outcome = await Promise.race([
     cleanup.then(() => "done" as const),
-    ctx.signal.deadlinePromise!,
+    // Use the captured reference: `gracefulStop` above may already have torn
+    // down the service, and re-reading `ctx.signal` here would dereference
+    // `undefined` for the same reason guarded against at the top.
+    signal.deadlinePromise!,
   ])
 
   if (outcome === "timeout") {
@@ -181,4 +206,32 @@ export async function stopOnStdinLoss(ctx: Context, origin: "shell" | "launcher"
   console.error(`[host] stdin closed (${origin} is gone) — graceful shutdown`)
   const acquired = await gracefulStopWithTimeout(ctx, "stop")
   if (acquired) setTimeout(() => process.exit(0), 10)
+}
+
+/**
+ * Stop the host because the shell became unreachable WHILE the startup handshake
+ * was still in flight — the sending-side counterpart of `stopOnStdinLoss`.
+ *
+ * The teardown is the same graceful one; only the exit code differs, and that
+ * difference is the point:
+ *
+ *   - NOT `0`: the handshake never completed, so the shell never learned our ws
+ *     port and the app never started. Reporting a clean stop for a failed
+ *     startup would be a lie — and it is the lie that made this case invisible.
+ *   - NOT `1`: `classify_watch` reads every non-51 code as a crash and charges it
+ *     to the restart-storm budget; eight of those inside the stable window park
+ *     the host in `Failed`. The host did nothing wrong here, so it must not be
+ *     billed for it.
+ *
+ * Hence `HOST_STDIO_LOST_EXIT`, which the shell maps to a distinct outcome that
+ * relaunches without touching the storm counter.
+ *
+ * Same stopping gate as every other path, so if the read-side detector
+ * (`onClose`) already claimed the exit this is a no-op and that path's code
+ * stands — the first trigger owns the exit.
+ */
+export async function stopOnShellLost(ctx: Context): Promise<void> {
+  console.error("[host] shell went away during the ready handshake — graceful shutdown (stdio lost)")
+  const acquired = await gracefulStopWithTimeout(ctx, "stop")
+  if (acquired) setTimeout(() => process.exit(HOST_STDIO_LOST_EXIT), 10)
 }

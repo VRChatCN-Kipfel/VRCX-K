@@ -28,7 +28,7 @@
 | 2 | **配对状态存哪** | **宿主磁盘**（单文件，原子写），路径 = **`$VRCXK_USER_DIR/sessions.json`**（壳 spawn 时注入，ADR [`adr-plugin-layout.md`](adr-plugin-layout.md) §4.3；与宿主另一处持久状态 `base-state.json` **同目录同来源**）；**pending 配对只存内存** | 脑是最终鉴权方且将来可能上服务器，凭据必须跟脑；pending 短命，重启即失效更安全。**不存壳/脸**。▸ 评审 B2：**不走 `shell.path.resolve("data")`**——那条走 stdio 桥、仅在 `VRCXK_SHELL=1` 时可用（`dev:host`/headless 拿不到，见 `host/src/index.ts:241-243`），且该 kind 就是 `app_data_dir()`（`src-tauri/src/shell_sys.rs`），正是 ADR 明令禁止的「第二处状态目录」 |
 | 3 | **核心服务还是插件** | **拆两半**：`ctx.sessions`（核心，**`extends Service`**：认证 + 会话表 + 广播）＋ 授权政策（插件，注册为**独立服务 `ctx.sessionPolicy`**，**不挂在 `ctx.sessions` 上**） | 认证是传输层安全边界，必须始终存在、不依赖插件加载顺序；授权规则随业务演化，适合插件化。**必须 `extends Service`**：`ctx.provide` 的普通对象**零归因**（findings §0/§1.2），而这是特权面服务，将来做 §8 授权判定 / §11 审计时无法回答"哪个插件做了动作" |
 | 4 | **信任分级** | **三档** `local` / `trusted` / `limited`；**手机 = `trusted`（同一用户，业务同权）**，但**设备管理权默认仅 `local`** | 手机是可丢失设备：业务上该同权，但让一台可能被盗的设备能吊销/接管其他设备会自我锁死 |
-| 5 | **与 51 重启 / generation** | 设备密钥**跨重启不变**（设计目标）；**活会话是每进程的，重启即清空**，对端重连 = **新会话**；宿主每次启动生成 **`bootId`**，在握手帧里告知对端"换代" | 壳的 `generation` 是"壳第几次拉起"（`src-tauri/src/host.rs`），**随 `host-lifecycle` 快照事件**到脸（`src-tauri/src/lib.rs`）——**不是 `host-ready`**（该 DTO 只有 `{port,token}`）；`bootId` 是宿主自己的进程身份。两者分层，不合并（详见 §9） |
+| 5 | **与 51 重启 / generation** | 设备密钥**跨重启不变**（设计目标）；**活会话是每进程的，重启即清空**，对端重连 = **新会话**；宿主每次启动生成 **`bootId`**，在握手帧里告知对端"换代" | 壳的 `generation` 是"壳第几次拉起"（`src-tauri/src/host.rs`），**随 `host-lifecycle` 快照事件**到脸（`src-tauri/src/lib.rs`）——**不是 `host-ready`**（该 DTO 是版本化契约 `{schemaVersion, port, token, hostVersion}`，**不含 generation，也不含 bootId**）；`bootId` 是宿主自己的进程身份。两者分层，不合并（详见 §9） |
 
 ---
 
@@ -215,7 +215,7 @@ session.channel.getAPI().client.event("friend.online", { … })
 对应 §4.8 点名的「外部访问鉴权 + 端口暴露安全模型」。
 
 - **绑定可配**：`host`/`port` 由 cordis 配置或 env（如 `VRCXK_WS_HOST`/`VRCXK_WS_PORT`）提供，默认仍是 `127.0.0.1` + `0`（随机）。`host/src/ws.ts:16` 的硬编码 `new WebSocketServer({ host: "127.0.0.1", port: 0 })` 换成读取配置。
-- **脸侧前置**：只改宿主绑定**不够**。脸侧 `src/host.ts:15` 硬编码 `ws://127.0.0.1`、`HostReady` 只有 `{port, token}`（`host/src/ws.ts:9-12`）；`mobile-feasibility.md` §2.1 要求 `HostReady` 承载**完整端点**。§10 的 P1/P2 需含脸侧改动与边界。▸ 评审 N9。
+- **脸侧前置**：只改宿主绑定**不够**。脸侧 `src/host.ts` 硬编码 `ws://127.0.0.1`，且 `HostReady` 是版本化契约 `{schemaVersion, port, token, hostVersion}`（`contracts/host-ready/v1/host-ready.schema.json`）——**仍然不含完整端点**（无 scheme / host / path）；`mobile-feasibility.md` §2.1 要求 `HostReady` 承载**完整端点**。§10 的 P1/P2 需含脸侧改动与边界。▸ 评审 N9。
 - **非 loopback 强制 TLS**：绑定到非 `127.0.0.1`/`::1` 时，**必须** `wss://` + 设备凭据，否则**拒绝启动**（响亮报错，不静默降级）——「不能只开绑定不改鉴权」（`mobile-feasibility.md` §2.2）。
 - **TLS 的宿主实现形态**：`new WebSocketServer({host, port})` **不能直接 TLS**；需 `https.createServer({cert, key})` + `new WebSocketServer({ server })`。证书/私钥**存放位置、文件权限、轮换**须定（且须落 ADR 用户目录，与 §5 同源）。▸ 评审 N11。
 - **证书信任的鸡生蛋**：device-code 只证明「用户在场」，**不证明对端是那台脑** ⇒ 局域网 MITM 可代理配对并转交码。至少一条缓解：双端显示**证书指纹（SAS）** / 配对码做 PAKE / 让用户把证书装进设备信任库。▸ 评审 N17。
@@ -262,7 +262,7 @@ session.channel.getAPI().client.event("friend.online", { … })
 - **设备密钥跨重启不变** → 重启后设备**无需重配对**，直接重连。
 - **活会话是每进程的**：重启即全部销毁；会话表靠设备重连重建。**不恢复旧连接**（连接是瞬态的，恢复无意义且危险）。
 - **`bootId`**：宿主每次进程启动生成一个随机 `bootId`（字符串/uuid），在握手/`welcome` 帧里带给对端。对端据此判断"脑换了进程"，重置自己的幂等状态。
-- **与壳的 `generation` 分层**：`generation` = 壳第几次拉起宿主（`src-tauri/src/host.rs`），**随 `host-lifecycle` 快照事件**到脸（`src-tauri/src/lib.rs`）——**不是 `host-ready`**（该 DTO 只有 `{port,token}`）；`bootId` = 宿主自己的进程身份，走 ws 到所有客户端。两者都要，别合并。▸ 评审 N7。
+- **与壳的 `generation` 分层**：`generation` = 壳第几次拉起宿主（`src-tauri/src/host.rs`），**随 `host-lifecycle` 快照事件**到脸（`src-tauri/src/lib.rs`）——**不是 `host-ready`**（该 DTO 是版本化契约 `{schemaVersion, port, token, hostVersion}`，**不含 generation**）；`bootId` = 宿主自己的进程身份，走 ws 到所有客户端。两者都要，别合并。▸ 评审 N7。
 - ▸ 评审 N8 **现成缺口**：托盘 schema 的 `generation` 恒 0（host 不送有意义的值，见 `host/src/tray.ts` / `src-tauri/src/tray.rs` 注释）。P1 明确二选一：壳 spawn 时注入 `VRCXK_GENERATION`（顺手补上托盘那个恒 0）**或**明确该字段长期为 0。**`bootId` 是字符串/uuid，不进托盘 schema**（该 schema 拒超 safe-integer 的代际，`src-tauri/src/tray_schema.rs`）。
 
 ---

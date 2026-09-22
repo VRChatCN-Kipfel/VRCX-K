@@ -13,9 +13,11 @@
 // silently disarms the watch there (this suite caught exactly that on CI).
 
 import { afterEach, beforeAll, expect, test } from "bun:test"
+import { spawn } from "node:child_process"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { dispose, wrap } from "kkrpc"
+import { dispose, RPCChannel, wrap } from "kkrpc"
+import { stdioJsonTransport } from "kkrpc/stdio"
 import { webSocketClientTransport } from "kkrpc/ws"
 import type { HostWsAPI } from "../src/api"
 import { HOST_SPAWN_DETACHED, killTree, readReady, resolveBun, warmBun } from "./helpers"
@@ -111,6 +113,106 @@ test("shell-attached host stops when the shell end of stdin goes away", async ()
 
   const code = await withDeadline(proc.exited, 20_000, "host did not stop after the shell end closed")
   expect(code).toBe(0)
+}, 40_000)
+
+// Regression: the official stdio transport delivers `onClose`, and kkrpc
+// rejects every pending request immediately before invoking it. A shell that
+// dies while `shell.ready` is still in flight therefore turns that RPC into a
+// rejection. If that rejection escaped to the bootstrap catch-all it would
+// `process.exit(1)` — and it would race the stdin-loss path, which exits 0.
+// Both the exit code and the observability line are pinned here so a future
+// refactor of either hook fails loudly instead of silently picking a winner.
+test("shell dying mid-handshake is a clean stop, not a fatal bootstrap error", async () => {
+  proc = Bun.spawn([bun, "src/index.ts"], {
+    cwd: hostDir,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: HOST_SPAWN_DETACHED,
+    env: { ...process.env, VRCXK_SHELL: "1" },
+  })
+  // Collect stderr from the very first byte: `readReady` releases its lock but
+  // consumes the `ready` line, and we assert on that whole transcript below.
+  const stderrChunks: string[] = []
+  const collector = (async () => {
+    try {
+      for await (const chunk of proc!.stderr as ReadableStream<Uint8Array>) {
+        stderrChunks.push(new TextDecoder().decode(chunk))
+      }
+    } catch {
+      // killTree during afterEach tears the pipe down under us; the assertions
+      // below only need what arrived before exit.
+    }
+  })()
+  const seen = () => stderrChunks.join("")
+  const deadline = Date.now() + 15_000
+  while (!/\[host\] ready /.test(seen())) {
+    if (Date.now() > deadline) throw new Error(`host never became ready\n${seen()}`)
+    await new Promise((r) => setTimeout(r, 20))
+  }
+
+  // Pull the pipe immediately: `shell.ready` is outstanding right now, which is
+  // exactly the race this test pins.
+  proc.stdin!.end?.()
+
+  const code = await withDeadline(proc.exited, 20_000, "host did not stop after the shell end closed")
+  await collector
+  const stderr = seen()
+
+  expect(stderr).not.toContain("fatal bootstrap error")
+  expect(code).toBe(0)
+  // The `onClose` hook is the sole stop trigger on this path, and it reports
+  // why the peer went away.
+  expect(stderr).toMatch(/\[host\] shell (closed its stdio|stdio broke \()/)
+  expect(stderr).toContain("stdin closed (shell is gone)")
+  // One peer death must produce exactly one stop: kkrpc fires `onClose` once,
+  // but a regression that also re-armed a stdin listener would double it.
+  expect(stderr.match(/stdin closed \(shell is gone\)/g)).toHaveLength(1)
+}, 40_000)
+
+test("a genuine startup failure still exits loudly instead of being swallowed", async () => {
+  // The shell here is a peer that does NOT expose `ready` — a version-skewed or
+  // otherwise broken sidecar. kkrpc turns that call into an error rejection that
+  // is NOT `RPCTransportClosedError`, so bootstrap must rethrow it and exit 1.
+  //
+  // This is the counterweight to the case above: absorbing the shell-death
+  // rejection must not also absorb failures that mean "startup is broken". The
+  // blanket catch this replaced exited 0 here with only a log line, leaving the
+  // UI waiting for a `ready` that had already failed.
+  //
+  // Uses node's `spawn` (not `Bun.spawn`) because kkrpc's stdio transport needs
+  // Node-style streams: it calls `.on`/`.off` on the lifecycle object.
+  const child = spawn(bun, ["src/index.ts"], {
+    cwd: hostDir,
+    env: { ...process.env, VRCXK_SHELL: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  })
+  const stderrChunks: string[] = []
+  child.stderr!.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()))
+
+  try {
+    // Attach as the shell, but expose nothing — `ready` is therefore unknown,
+    // and the peer answers the call with an error frame.
+    const transport = stdioJsonTransport({
+      readable: child.stdout!,
+      writable: child.stdin!,
+      lifecycle: child.stdout!,
+    })
+    const channel = new RPCChannel(transport, { expose: {} })
+
+    const code = await withDeadline(
+      new Promise<number | null>((resolve) => child.once("exit", resolve)),
+      20_000,
+      "host did not exit on a broken ready handshake",
+    )
+
+    expect(stderrChunks.join("")).toContain("fatal bootstrap error")
+    expect(code).toBe(1)
+    channel.destroy()
+  } finally {
+    killTree(child.pid!)
+  }
 }, 40_000)
 
 test("stdinIsPeerChannel classifies the real fd 0 (pipe vs ignore)", async () => {

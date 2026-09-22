@@ -43,7 +43,7 @@ test("host ws ping and getVersion", async () => {
   const { proc: child, ready } = await spawnHost()
   expect(ready.port).toBeGreaterThan(0)
   expect(ready.token).toMatch(/^[0-9a-f]{64}$/)
-  expect(ready.version).toBe(HOST_VERSION)
+  expect(ready.hostVersion).toBe(HOST_VERSION)
 
   const stdout = await drain(child.stdout)
   expect(stdout).toBe("")

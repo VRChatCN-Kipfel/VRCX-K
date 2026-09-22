@@ -63,7 +63,7 @@ test("compiled host finds cordis.yml via cwd", async () => {
   const ready = await readReady(proc.stderr, 60_000)
   expect(ready.port).toBeGreaterThan(0)
   expect(ready.token).toMatch(/^[0-9a-f]{64}$/)
-  expect(ready.version).toBe(HOST_VERSION)
+  expect(ready.hostVersion).toBe(HOST_VERSION)
 
   const stdout = await drain(proc.stdout)
   expect(stdout).toBe("")

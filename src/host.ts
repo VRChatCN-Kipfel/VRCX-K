@@ -1,10 +1,8 @@
 import { RPCChannel } from "kkrpc"
 import { webSocketClientTransport } from "kkrpc/ws"
+import type { HostReady } from "../host/src/contracts/hostReady"
 
-export type HostReady = {
-  port: number
-  token: string
-}
+export type { HostReady }
 
 export type HostWsAPI = {
   ping(): Promise<string>

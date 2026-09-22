@@ -8,8 +8,9 @@
     "dev": "bun run src/index.ts",
     "build": "bun run ../scripts/build-host.ts",
     "test": "bun test",
-    "generate:contracts": "bun run generate:tray-contract && bun run generate:plugin-contracts",
+    "generate:contracts": "bun run generate:tray-contract && bun run generate:plugin-contracts && bun run generate:host-ready-contract",
     "generate:tray-contract": "json2ts ../contracts/tray-menu.schema.json -o src/tray-contract.generated.ts --maxItems -1",
+    "generate:host-ready-contract": "json2ts ../contracts/host-ready/v1/host-ready.schema.json -o src/contracts/hostReady.generated.ts",
     "generate:plugin-contracts": "json2ts ../contracts/plugin-manifest/v1/plugin-manifest.schema.json -o src/contracts/pluginManifest.generated.ts && json2ts ../contracts/plugin-index/v1/plugin-index-entry.schema.json -o src/contracts/pluginIndexEntry.generated.ts"
   },
   "dependencies": {

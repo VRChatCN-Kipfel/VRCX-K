@@ -97,7 +97,7 @@ test.skipIf(!available)("sidecar launches to ready and stops gracefully via stdi
   const ready = await readReady(proc.stderr, 60_000)
   expect(ready.port).toBeGreaterThan(0)
   expect(ready.token).toMatch(/^[0-9a-f]{64}$/)
-  expect(ready.version).toBe("0.0.1")
+  expect(ready.hostVersion).toBe("0.0.1")
 
   // Graceful stop via the stdio RPC (compact protocol the Rust Peer speaks).
   const frame =

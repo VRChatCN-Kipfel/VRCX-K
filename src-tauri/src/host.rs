@@ -5,7 +5,6 @@ use crate::host_lifecycle::{
 use crate::kkrpc_peer::Peer;
 use crate::process_tree::ProcessTree;
 use crate::shell_sys::register_shell_handlers;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -14,6 +13,71 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 pub const HOST_RESTART_EXIT: i32 = 51;
+
+/// The host gave up because the shell became unreachable mid-handshake.
+///
+/// The host discovered the shell was gone from the SENDING side (a write failed
+/// with EPIPE) rather than from the read side that `onClose` watches, and tore
+/// down cooperatively. See `host/src/api.ts`'s `HOST_STDIO_LOST_EXIT` for why
+/// neither 0 nor 1 is acceptable here; the reason the code exists at all is that
+/// `classify_watch` would otherwise bill this to the restart-storm budget and
+/// park the host in `Failed` after eight occurrences inside the stable window.
+///
+/// The parity test at the bottom of this file asserts the value matches the
+/// host's constant, so the two sides cannot drift apart silently.
+pub const HOST_STDIO_LOST_EXIT: i32 = 52;
+
+/// Why a spawn attempt failed to produce a ready host.
+///
+/// A plain `String` was not enough once the host gained a second, non-fault
+/// exit: the supervisor must charge a STARTUP failure to the storm budget but
+/// must NOT charge a shell-lost teardown, and string-matching an exit code
+/// through a formatted message is exactly the kind of coupling that breaks
+/// silently when someone rewords the message.
+enum SpawnFailure {
+    /// A real startup fault (bind failure, no `ready`, bad ping). Retryable, and
+    /// it accumulates toward the storm cap.
+    Retry(String),
+    /// The host exited `HOST_STDIO_LOST_EXIT`: it lost the shell mid-handshake
+    /// and stopped itself cleanly. Not the host's fault, so it is relaunched
+    /// immediately and never billed to the storm budget.
+    StdioLost,
+}
+
+impl std::fmt::Display for SpawnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpawnFailure::Retry(reason) => write!(f, "{reason}"),
+            SpawnFailure::StdioLost => write!(
+                f,
+                "host exited {HOST_STDIO_LOST_EXIT} (shell lost mid-handshake)"
+            ),
+        }
+    }
+}
+
+impl From<String> for SpawnFailure {
+    fn from(reason: String) -> Self {
+        SpawnFailure::Retry(reason)
+    }
+}
+
+impl From<&str> for SpawnFailure {
+    fn from(reason: &str) -> Self {
+        SpawnFailure::Retry(reason.to_string())
+    }
+}
+
+///
+/// The host discovered the shell was gone from the SENDING side (a write failed
+/// with EPIPE) rather than from the read side that `onClose` watches, and tore
+/// down cooperatively. See `host/src/api.ts`'s `HOST_STDIO_LOST_EXIT` for why
+/// neither 0 nor 1 is acceptable here; the reason it exists at all is that
+/// `classify_watch` would otherwise bill this to the restart-storm budget and
+/// park the host in `Failed` after eight occurrences inside the stable window.
+///
+/// The parity test at the bottom of this file asserts the value matches the
+/// host's constant, so the two sides cannot drift apart silently.
 // A cooperative stop is allowed to take time while the host remains responsive.
 // This is also the watchdog budget: it starts when the stop request is sent,
 // is shared by the RPC wait and child-exit wait, and ends by killing the process
@@ -62,11 +126,10 @@ impl Default for StormPolicy {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HostReady {
-    pub port: u16,
-    pub token: String,
-}
+// `HostReady` is the versioned handshake contract — see `host_ready.rs` and
+// `contracts/host-ready/v1/host-ready.schema.json`. It is re-exported here
+// because this module owns the spawn path that produces it.
+pub use crate::host_ready::HostReady;
 
 #[cfg(test)]
 pub struct HostSession {
@@ -340,6 +403,25 @@ impl HostState {
         inner.lifecycle.pid = None;
         inner.lifecycle.port = None;
         inner.lifecycle.last_error = Some("host restart storm cap reached".into());
+    }
+
+    /// Record why a spawn attempt failed, so the reason reaches the SNAPSHOT.
+    ///
+    /// Before this existed the cause lived only in `eprintln!` output: the tray
+    /// and the UI showed `phase: backoff`/`failed` with a `lastError` that was
+    /// either `None` or the generic storm-cap message. That is how a rejected
+    /// `ready` handshake surfaced as the misleading "host did not call ready()
+    /// within 10s" — the shell knew the host HAD called ready and had been
+    /// refused, but that knowledge never left stderr.
+    ///
+    /// Kept separate from `mark_failed` because the two carry different text and
+    /// sit on different paths: this records the informative FIRST failure of a
+    /// streak, while `mark_failed` records the terminal giving-up state.
+    fn record_spawn_error(&self, reason: &str) {
+        let mut inner = self.inner.lock().expect("host");
+        // Clamp to the schema's `lastError` maxLength so a long message cannot
+        // produce a snapshot the contract's own guard would reject.
+        inner.lifecycle.last_error = Some(reason.chars().take(4096).collect());
     }
 
     /// Restore the running intent after a Restart command stopped the current
@@ -769,17 +851,54 @@ fn run_running_segment_inner(
                             }
                         }
                     }
+                    WatchOutcome::StdioLost => {
+                        // The host reached Ready and later lost the shell, so it
+                        // exited with the dedicated code instead of crashing.
+                        // Same rule as the pre-ready case: not the host's fault,
+                        // so no storm charge and no backoff — relaunch at once.
+                        // (In practice the shell has gone away too, so the
+                        // supervisor is usually already unwinding; handling this
+                        // explicitly keeps the arm from silently degrading into a
+                        // crash should a future caller exit 52 in other
+                        // circumstances.)
+                        eprintln!(
+                            "[shell] host exited {HOST_STDIO_LOST_EXIT} (shell became unreachable); \
+                             relaunching without a storm charge"
+                        );
+                        on_snapshot(&state.lifecycle_snapshot());
+                    }
                 }
             }
-            Err(err) => {
+            Err(failure) => {
                 if !state.wants_running() {
                     return;
+                }
+                // The host lost the shell mid-handshake. It stopped itself
+                // cleanly for a reason that is NOT its fault (the shell went
+                // away), so this must not be billed to the storm budget — eight
+                // of those inside the stable window would park a healthy host in
+                // `Failed`. Relaunch immediately; the shell that owns us will
+                // have gone away too, so the next attempt is a fresh session.
+                if matches!(failure, SpawnFailure::StdioLost) {
+                    eprintln!(
+                        "[shell] host exited {HOST_STDIO_LOST_EXIT} (shell lost mid-handshake); \
+                         relaunching without a storm charge"
+                    );
+                    // Publish so the tray shows the transient state rather than
+                    // staying on `Starting`.
+                    on_snapshot(&state.lifecycle_snapshot());
+                    continue;
                 }
                 // Spawn failures never reached Ready, so there is no stable
                 // window to forgive them: they always accumulate.
                 state.bump_streak();
+                // Put the reason in the SNAPSHOT, not just stderr: the tray and
+                // the UI read `lastError`, and a reason that never leaves the log
+                // is how a rejected handshake used to present as the misleading
+                // "host did not call ready() within 10s".
+                state.record_spawn_error(&failure.to_string());
                 eprintln!(
-                    "[shell] host spawn failed: {err} ({}/{})",
+                    "[shell] host spawn failed: {failure} ({}/{})",
                     state.fail_streak(),
                     state.storm.max_failures
                 );
@@ -803,6 +922,8 @@ fn run_running_segment_inner(
 enum WatchOutcome {
     Stopped,
     RestartRequested,
+    /// The host lost its shell mid-handshake and exited `HOST_STDIO_LOST_EXIT`.
+    StdioLost,
     Crashed(Option<ExitStatus>),
 }
 
@@ -868,9 +989,46 @@ fn watch_until_exit(state: &HostState, rx: &Receiver<HostCommand>) -> WatchOutco
 
 fn classify_watch(status: Option<ExitStatus>) -> WatchOutcome {
     match status {
-        Some(status) if status.code() == Some(HOST_RESTART_EXIT) => WatchOutcome::RestartRequested,
-        Some(status) => WatchOutcome::Crashed(Some(status)),
+        // Delegates the CODE judgement to `classify_exit_code` so the watch loop
+        // and the pre-ready handshake cannot drift apart, while still carrying
+        // the full status for the crash log.
+        Some(status) => match classify_exit_code(status.code()) {
+            WatchOutcome::RestartRequested => WatchOutcome::RestartRequested,
+            WatchOutcome::StdioLost => WatchOutcome::StdioLost,
+            _ => WatchOutcome::Crashed(Some(status)),
+        },
         None => WatchOutcome::Stopped,
+    }
+}
+
+/// Classify a child exit by its CODE alone.
+///
+/// Split out from `classify_watch` for two reasons:
+///
+///   1. `ExitStatus` cannot be constructed in safe Rust (it is only obtained
+///      from a real process), so a code-level function is the only way to
+///      unit-test the classification without spawning children.
+///   2. Both the watch loop AND the pre-ready handshake need the same judgement,
+///      and the handshake cannot reuse `WatchOutcome`. Keeping the decision in
+///      one place stops the two from drifting — which is exactly what made the
+///      dedicated exit code dead code on the handshake path when it existed only
+///      inside `classify_watch`.
+fn classify_exit_code(code: Option<i32>) -> WatchOutcome {
+    match code {
+        Some(HOST_RESTART_EXIT) => WatchOutcome::RestartRequested,
+        // The host lost the shell mid-handshake and stopped itself. That is NOT a
+        // crash: the host did nothing wrong, and charging it to the storm budget
+        // would park a perfectly healthy host in `Failed` after eight of these.
+        // Distinct from `Stopped` too, so the tray can say "lost the shell"
+        // instead of "stopped", and distinct from 51 because nothing was
+        // restarted at the host's request.
+        Some(HOST_STDIO_LOST_EXIT) => WatchOutcome::StdioLost,
+        // No code means the child was terminated (a signal, or TerminateProcess
+        // on Windows) rather than exiting on its own. `classify_watch` has always
+        // read that as a deliberate stop, and this arm must agree with it or the
+        // two paths would disagree about the same process.
+        None => WatchOutcome::Stopped,
+        Some(_) => WatchOutcome::Crashed(None),
     }
 }
 
@@ -948,7 +1106,7 @@ pub fn spawn_host() -> Result<HostSession, String> {
     })
 }
 
-fn spawn_host_into(state: &HostState, app: Option<&AppHandle>) -> Result<HostReady, String> {
+fn spawn_host_into(state: &HostState, app: Option<&AppHandle>) -> Result<HostReady, SpawnFailure> {
     {
         let mut inner = state.inner.lock().expect("host");
         if inner.stopping {
@@ -976,11 +1134,19 @@ fn spawn_host_into(state: &HostState, app: Option<&AppHandle>) -> Result<HostRea
         }
     };
     let peer = starting.peer.clone();
-    if let Err(mut tree) = state.adopt_inflight(generation, starting.tree, peer) {
+    // Destructure before `starting.tree` is moved into `adopt_inflight`, so the
+    // wait can still see the ready slot and the refusal reason afterwards.
+    let StartingHost {
+        tree,
+        ready_slot,
+        ready_error,
+        ..
+    } = starting;
+    if let Err(mut tree) = state.adopt_inflight(generation, tree, peer) {
         tree.kill_tree();
         return Err("stopped during spawn".into());
     }
-    let wait = wait_until_ready_in_state(state, generation, &starting.ready_slot);
+    let wait = wait_until_ready_in_state(state, generation, &ready_slot, &ready_error);
     let ready = match wait {
         Ok(ready) => ready,
         Err(err) => {
@@ -999,12 +1165,12 @@ fn spawn_host_into(state: &HostState, app: Option<&AppHandle>) -> Result<HostRea
             // unwinding, otherwise the supervisor retries (or parks in Failed)
             // while a live host keeps the port bound.
             state.reap_tree();
-            return Err(format!("host ping: {err}"));
+            return Err(format!("host ping: {err}").into());
         }
     };
     if pong != serde_json::json!("pong") {
         state.reap_tree();
-        return Err(format!("host ping returned {pong}"));
+        return Err(format!("host ping returned {pong}").into());
     }
     match state.promote_ready(generation, ready) {
         Ok(ready) => Ok(ready),
@@ -1019,6 +1185,10 @@ struct StartingHost {
     tree: ProcessTree,
     peer: Arc<Peer>,
     ready_slot: Arc<Mutex<Option<HostReady>>>,
+    /// Why the `ready` handler REFUSED a handshake, if it did. Reported by the
+    /// wait instead of its generic timeout, so a refused handshake is not
+    /// indistinguishable from one that never arrived.
+    ready_error: Arc<Mutex<Option<String>>>,
 }
 
 fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
@@ -1061,20 +1231,47 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
 
     // Register the mandatory startup handshake before reading stdout. If the
     // host is already ready, its frame remains safely buffered in the pipe.
+    //
+    // The payload is parsed into the versioned contract type and validated
+    // before it is stored, so a malformed or version-skewed handshake is refused
+    // HERE.
+    //
+    // A refusal ALSO records its reason in `ready_error`, which
+    // `wait_until_ready_in_state` reports instead of its generic timeout. Without
+    // that, refusing a handshake looked identical to the host never sending one:
+    // the wait ran out its full 10s and reported "host did not call ready()
+    // within 10s", blaming the host for the shell's own refusal — while the real
+    // cause sat in stderr where the tray and UI cannot see it.
     let ready_slot: Arc<Mutex<Option<HostReady>>> = Arc::new(Mutex::new(None));
+    let ready_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let ready_handler = Arc::clone(&ready_slot);
+    let ready_error_handler = Arc::clone(&ready_error);
     peer.on(
         "ready",
         Arc::new(move |args| {
             if let Some(info) = args.first() {
-                if let (Some(port), Some(token)) = (
-                    info.get("port").and_then(|v| v.as_u64()),
-                    info.get("token").and_then(|v| v.as_str()),
-                ) {
-                    *ready_handler.lock().expect("ready slot") = Some(HostReady {
-                        port: port as u16,
-                        token: token.to_string(),
-                    });
+                match serde_json::from_value::<HostReady>(info.clone()) {
+                    Ok(ready) if ready.is_supported() => {
+                        *ready_handler.lock().expect("ready slot") = Some(ready);
+                    }
+                    Ok(ready) => {
+                        let reason = format!(
+                            "host sent an unsupported ready handshake \
+                             (schemaVersion={}, expected={}, port={}, token_len={}, hostVersion={:?})",
+                            ready.schema_version,
+                            crate::host_ready::HOST_READY_SCHEMA_VERSION,
+                            ready.port,
+                            ready.token.len(),
+                            ready.host_version,
+                        );
+                        eprintln!("[shell] {reason}");
+                        *ready_error_handler.lock().expect("ready error") = Some(reason);
+                    }
+                    Err(err) => {
+                        let reason = format!("host sent a malformed ready handshake: {err}");
+                        eprintln!("[shell] {reason}");
+                        *ready_error_handler.lock().expect("ready error") = Some(reason);
+                    }
                 }
             }
             serde_json::Value::Null
@@ -1088,6 +1285,7 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
         tree,
         peer,
         ready_slot,
+        ready_error,
     })
 }
 
@@ -1120,28 +1318,68 @@ fn wait_until_ready_in_state(
     state: &HostState,
     generation: u64,
     ready_slot: &Mutex<Option<HostReady>>,
-) -> Result<HostReady, String> {
+    ready_error: &Mutex<Option<String>>,
+) -> Result<HostReady, SpawnFailure> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if !state.still_current(generation) {
-            return Err("stopped during ready".into());
+            return Err(SpawnFailure::Retry("stopped during ready".into()));
         }
         if let Some(ready) = ready_slot.lock().expect("ready slot").clone() {
             return Ok(ready);
+        }
+        // The host DID send a handshake and the shell refused it. Report that
+        // immediately and specifically: waiting out the full timeout would
+        // report "did not call ready()", which is false, and would send a reader
+        // looking at the host instead of at the refusal reason.
+        if let Some(reason) = ready_error.lock().expect("ready error").clone() {
+            return Err(SpawnFailure::Retry(reason));
         }
         {
             let mut inner = state.inner.lock().expect("host");
             if let Some(tree) = inner.tree.as_mut() {
                 if let Ok(Some(status)) = tree.try_wait() {
                     inner.clear();
-                    return Err(format!("host exited before ready: {status}"));
+                    // The handshake never completes, so this is the ONLY place a
+                    // mid-handshake exit is classified: `classify_watch` runs
+                    // later, on the watch loop, which a host that dies before
+                    // `ready` never reaches. Without this arm the dedicated exit
+                    // code would be dead code and the host would still be billed
+                    // as a crash.
+                    return Err(classify_spawn_exit(status));
                 }
             }
         }
         if Instant::now() >= deadline {
-            return Err("host did not call ready() within 10s".into());
+            return Err(SpawnFailure::Retry(format!(
+                "host did not call ready() within {READY_TIMEOUT_SECS}s"
+            )));
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How long the shell waits for the host's `ready` frame before giving up.
+const READY_TIMEOUT_SECS: u64 = 10;
+
+/// Classify a child exit observed DURING the ready handshake.
+///
+/// The handshake cannot reuse `WatchOutcome` (it needs "should this count
+/// against the storm budget?", not "what does the watch loop do next"), but the
+/// CODE judgement must be identical — hence both delegate to
+/// `classify_exit_code`. Keeping them in step is what stops the dedicated code
+/// from being recognised in one path and billed as a crash in the other.
+fn classify_spawn_exit(status: ExitStatus) -> SpawnFailure {
+    classify_spawn_exit_code(status.code())
+}
+
+fn classify_spawn_exit_code(code: Option<i32>) -> SpawnFailure {
+    match classify_exit_code(code) {
+        WatchOutcome::StdioLost => SpawnFailure::StdioLost,
+        _ => SpawnFailure::Retry(match code {
+            Some(code) => format!("host exited before ready with code {code}"),
+            None => "host exited before ready without a code".to_string(),
+        }),
     }
 }
 
@@ -1386,6 +1624,77 @@ mod tests {
     #[test]
     fn restart_exit_matches_named_const() {
         assert_eq!(HOST_RESTART_EXIT, 51);
+    }
+
+    /// The dedicated exit codes are a CROSS-LANGUAGE contract: the host's
+    /// `host/src/api.ts` writes them and this module reads them. Pinning the
+    /// values here is what turns a silent divergence (host exits 53, shell only
+    /// knows 52, and 53 gets billed as a crash) into a failing test.
+    #[test]
+    fn exit_codes_match_the_hosts_constants() {
+        assert_eq!(HOST_RESTART_EXIT, 51, "HOST_RESTART_EXIT must match api.ts");
+        assert_eq!(
+            HOST_STDIO_LOST_EXIT, 52,
+            "HOST_STDIO_LOST_EXIT must match api.ts"
+        );
+        // The two must stay distinct, or the classifier would conflate a
+        // deliberate restart with a lost shell.
+        assert_ne!(HOST_STDIO_LOST_EXIT, HOST_RESTART_EXIT);
+    }
+
+    /// The whole point of the dedicated code: it must NOT be classified as a
+    /// crash, because `Crashed` is what feeds the restart-storm budget.
+    #[test]
+    fn the_stdio_lost_code_is_not_a_crash() {
+        assert!(
+            matches!(
+                classify_exit_code(Some(HOST_STDIO_LOST_EXIT)),
+                WatchOutcome::StdioLost
+            ),
+            "exit {HOST_STDIO_LOST_EXIT} must classify as StdioLost, not Crashed"
+        );
+    }
+
+    /// ...and the handshake path, which never reaches `classify_watch`, must
+    /// reach the same conclusion. Before `classify_spawn_exit` existed the
+    /// dedicated code was dead: a host that dies before `ready` is observed by
+    /// `wait_until_ready_in_state`, so it was still billed as a startup failure.
+    #[test]
+    fn the_stdio_lost_code_is_not_a_spawn_failure() {
+        assert!(
+            matches!(
+                classify_spawn_exit_code(Some(HOST_STDIO_LOST_EXIT)),
+                SpawnFailure::StdioLost
+            ),
+            "a pre-ready exit {HOST_STDIO_LOST_EXIT} must not be a Retry failure"
+        );
+    }
+
+    /// Every other code keeps its existing meaning on BOTH paths — the new code
+    /// must not have widened what counts as "not our fault".
+    #[test]
+    fn other_exit_codes_still_count_as_failures() {
+        for code in [0, 1, 2, HOST_RESTART_EXIT, 53, 255] {
+            assert!(
+                !matches!(classify_exit_code(Some(code)), WatchOutcome::StdioLost),
+                "exit {code} must not classify as StdioLost"
+            );
+            assert!(
+                matches!(classify_spawn_exit_code(Some(code)), SpawnFailure::Retry(_)),
+                "exit {code} must still be a Retry spawn failure"
+            );
+        }
+    }
+
+    /// `None` means "terminated without a code" (a signal / TerminateProcess) —
+    /// that is a stop, not a stdio loss.
+    #[test]
+    fn a_codeless_exit_is_stopped_not_stdio_lost() {
+        assert!(matches!(classify_exit_code(None), WatchOutcome::Stopped));
+        assert!(matches!(
+            classify_spawn_exit_code(None),
+            SpawnFailure::Retry(_)
+        ));
     }
 
     #[test]
@@ -2149,6 +2458,54 @@ mod tests {
                 .contains("reload requested without a ready host"),
             "unexpected last_error: {:?}",
             snapshot.last_error
+        );
+    }
+
+    /// A refused `ready` handshake must reach the SNAPSHOT, not only stderr.
+    ///
+    /// This is the substance of the review's fourth point: the tray and the UI
+    /// read `lastError`, so a refusal whose reason never leaves `eprintln!` is
+    /// invisible to the user — and the wait then reports the generic "host did
+    /// not call ready() within 10s", which blames the host for the shell's own
+    /// refusal.
+    #[test]
+    fn a_spawn_error_reaches_the_snapshot() {
+        let state = HostState::default();
+        state.record_spawn_error("host sent an unsupported ready handshake (schemaVersion=2)");
+        let snapshot = state.lifecycle_snapshot();
+        assert!(
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("unsupported ready handshake"),
+            "unexpected last_error: {:?}",
+            snapshot.last_error
+        );
+    }
+
+    /// The recorded reason must stay inside the contract's `lastError` bound, or
+    /// the snapshot would carry a value the schema's own guard rejects.
+    #[test]
+    fn a_spawn_error_is_clamped_to_the_contract_bound() {
+        let state = HostState::default();
+        state.record_spawn_error(&"x".repeat(10_000));
+        let snapshot = state.lifecycle_snapshot();
+        let len = snapshot.last_error.as_deref().unwrap_or("").chars().count();
+        assert!(len <= 4096, "lastError must respect maxLength: got {len}");
+
+        // Read the bound out of the SCHEMA rather than trusting the literal
+        // above: if the contract tightens, this test is what notices.
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../contracts/host-lifecycle/v1/host-lifecycle.schema.json"
+        ))
+        .unwrap();
+        let max = schema["properties"]["lastError"]["maxLength"]
+            .as_u64()
+            .expect("lastError.maxLength must be a number");
+        assert!(
+            (len as u64) <= max,
+            "lastError length {len} exceeds the schema bound {max}"
         );
     }
 }
