@@ -71,13 +71,7 @@ export function sameIgnoringLineEndings(a: string, b: string): boolean {
 
 export function checkOne(pair: Pair, tmpDir: string): DriftResult {
   const out = join(tmpDir, basename(pair.generated))
-  const args = [
-    "json2ts",
-    join(repoRoot, pair.schema),
-    "-o",
-    out,
-    ...(pair.extraArgs ?? []),
-  ]
+  const args = ["json2ts", join(repoRoot, pair.schema), "-o", out, ...(pair.extraArgs ?? [])]
   const proc = Bun.spawnSync(["bunx", ...args], { cwd: join(repoRoot, "host") })
   if (proc.exitCode !== 0) {
     const stderr = proc.stderr ? new TextDecoder().decode(proc.stderr).trim() : ""

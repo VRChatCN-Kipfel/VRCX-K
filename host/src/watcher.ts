@@ -40,19 +40,30 @@ export class HostWatcher {
 
   async start() {
     if (this.watcher || this.closed) return
-    const { roots, onEvent, onChange: _onChange, bindings: _bindings, debounceMs: _debounceMs, ...watchOptions } = this.options
-    const watchRoots = roots.map((root) => isAbsolute(root) ? root : resolve(root))
+    const {
+      roots,
+      onEvent,
+      onChange: _onChange,
+      bindings: _bindings,
+      debounceMs: _debounceMs,
+      ...watchOptions
+    } = this.options
+    const watchRoots = roots.map((root) => (isAbsolute(root) ? root : resolve(root)))
     const watcher = watch(watchRoots, {
       ignoreInitial: true,
       atomic: 100,
       followSymlinks: false,
       ...watchOptions,
-      ignored: watchOptions.ignored ?? ((path) => {
-        const normalized = canonicalPath(path)
-        return normalized.includes(`${sep}node_modules${sep}`)
-          || normalized.includes(`${sep}.git${sep}`)
-          || normalized.includes(`${sep}dist${sep}`)
-      }),
+      ignored:
+        watchOptions.ignored ??
+        ((path) => {
+          const normalized = canonicalPath(path)
+          return (
+            normalized.includes(`${sep}node_modules${sep}`) ||
+            normalized.includes(`${sep}.git${sep}`) ||
+            normalized.includes(`${sep}dist${sep}`)
+          )
+        }),
     })
     this.watcher = watcher
     watcher.on("ready", () => {

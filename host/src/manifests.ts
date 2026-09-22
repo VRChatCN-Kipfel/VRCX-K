@@ -26,7 +26,10 @@ import { canonicalPath } from "./watch-path"
  *   Bare package names (no "./") cannot be resolved this way and are skipped:
  *   the loader resolves those through node resolution, not a filesystem path.
  */
-export async function loadManifests(ctx: Context, includeEntry: Entry): Promise<{
+export async function loadManifests(
+  ctx: Context,
+  includeEntry: Entry,
+): Promise<{
   loaded: string[]
   skipped: string[]
 }> {
@@ -49,13 +52,15 @@ export async function loadManifests(ctx: Context, includeEntry: Entry): Promise<
       // NOT silently skipped: this means the entry names a path we cannot turn
       // into a directory, which is a host problem rather than a plugin one.
       skipped.push(entry.id)
-      ctx.logger?.("manifest")?.warn?.(
-        "%s: cannot resolve plugin directory from %s (baseUrl %s): %s",
-        entry.id,
-        entry.options?.name,
-        ctx.baseUrl,
-        resolved.reason,
-      )
+      ctx
+        .logger?.("manifest")
+        ?.warn?.(
+          "%s: cannot resolve plugin directory from %s (baseUrl %s): %s",
+          entry.id,
+          entry.options?.name,
+          ctx.baseUrl,
+          resolved.reason,
+        )
       continue
     }
     try {

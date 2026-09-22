@@ -197,22 +197,24 @@ export function subscribeHostLifecycle(deps: HostLifecycleSubscribeDeps): () => 
         applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` }),
     )
 
-  void deps.listen((raw) => applyIfLive({ kind: "event", raw })).then(
-    (fn) => {
-      if (cancelled) {
-        fn()
-        return
-      }
-      unlisten = fn
-      return seed()
-    },
-    (err: unknown) => {
-      deps.onListenError?.(err)
-      return seed().then(() =>
-        applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
-      )
-    },
-  )
+  void deps
+    .listen((raw) => applyIfLive({ kind: "event", raw }))
+    .then(
+      (fn) => {
+        if (cancelled) {
+          fn()
+          return
+        }
+        unlisten = fn
+        return seed()
+      },
+      (err: unknown) => {
+        deps.onListenError?.(err)
+        return seed().then(() =>
+          applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
+        )
+      },
+    )
 
   return () => {
     cancelled = true
@@ -234,7 +236,11 @@ export function formatHostSnapshot(snapshot: HostSnapshot): HostLifecycleField[]
     { key: "generation", label: "generation", value: String(snapshot.generation) },
     { key: "attempt", label: "attempt", value: String(snapshot.attempt) },
     { key: "pid", label: "pid", value: snapshot.pid === null ? HOST_ABSENT : String(snapshot.pid) },
-    { key: "port", label: "port", value: snapshot.port === null ? HOST_ABSENT : String(snapshot.port) },
+    {
+      key: "port",
+      label: "port",
+      value: snapshot.port === null ? HOST_ABSENT : String(snapshot.port),
+    },
     {
       key: "nextRetryMs",
       label: "nextRetryMs",

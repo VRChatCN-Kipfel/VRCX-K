@@ -199,7 +199,11 @@ describe("real host entry wiring", () => {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, VRCXK_DEV_WATCH: "1", VRCXK_DEV_WATCH_MAP: '{"alpha":"not-an-array"}' },
+      env: {
+        ...process.env,
+        VRCXK_DEV_WATCH: "1",
+        VRCXK_DEV_WATCH_MAP: '{"alpha":"not-an-array"}',
+      },
     })
     procs.push(proc)
     const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])

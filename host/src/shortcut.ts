@@ -18,11 +18,7 @@
 // never delivered.
 
 import { Service, type Context } from "cordis"
-import type {
-  ShellShortcutBridge,
-  ShortcutPressEvent,
-  ShortcutRegistration,
-} from "./stdio"
+import type { ShellShortcutBridge, ShortcutPressEvent, ShortcutRegistration } from "./stdio"
 
 declare module "cordis" {
   interface Context {

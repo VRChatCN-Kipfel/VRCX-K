@@ -166,7 +166,9 @@ export async function gracefulStopWithTimeout(
   // first trigger owns cleanup and the process exit.
   const acquired = signal.begin(initialMs, hardCapMs, reason)
   if (!acquired) {
-    console.error(`[host] graceful stop requested (${reason}) but a shutdown is already in progress — ignoring`)
+    console.error(
+      `[host] graceful stop requested (${reason}) but a shutdown is already in progress — ignoring`,
+    )
     return false
   }
 
@@ -231,7 +233,9 @@ export async function stopOnStdinLoss(ctx: Context, origin: "shell" | "launcher"
  * stands — the first trigger owns the exit.
  */
 export async function stopOnShellLost(ctx: Context): Promise<void> {
-  console.error("[host] shell went away during the ready handshake — graceful shutdown (stdio lost)")
+  console.error(
+    "[host] shell went away during the ready handshake — graceful shutdown (stdio lost)",
+  )
   const acquired = await gracefulStopWithTimeout(ctx, "stop")
   if (acquired) setTimeout(() => process.exit(HOST_STDIO_LOST_EXIT), 10)
 }

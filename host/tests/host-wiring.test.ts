@@ -33,8 +33,7 @@ describe("declaresHeartbeat", () => {
   function includeWith(entries: Array<{ id?: string; name?: string }>): Entry {
     return {
       subtree: {
-        entries: () =>
-          entries.map((options) => ({ options })),
+        entries: () => entries.map((options) => ({ options })),
       },
     } as unknown as Entry
   }
@@ -43,9 +42,9 @@ describe("declaresHeartbeat", () => {
     expect(declaresHeartbeat(includeWith([{ id: "heartbeat" }]))).toBe(true)
     expect(declaresHeartbeat(includeWith([{ name: "./plugins/heartbeat.ts" }]))).toBe(true)
     expect(declaresHeartbeat(includeWith([{ name: "plugins\\heartbeat.js" }]))).toBe(true)
-    expect(declaresHeartbeat(includeWith([{ id: "heartbeat", name: "./plugins/heartbeat.ts" }]))).toBe(
-      true,
-    )
+    expect(
+      declaresHeartbeat(includeWith([{ id: "heartbeat", name: "./plugins/heartbeat.ts" }])),
+    ).toBe(true)
   })
 
   test("does not match unrelated plugins that merely contain the word", () => {

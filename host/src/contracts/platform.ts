@@ -42,7 +42,9 @@ export function toPluginPlatform(nodePlatform: string): PluginPlatform | undefin
 
 /** Map a Node `process.arch` to a manifest arch, or undefined when unsupported. */
 export function toPluginArch(nodeArch: string): PluginArch | undefined {
-  return (PLUGIN_ARCHES as readonly string[]).includes(nodeArch) ? (nodeArch as PluginArch) : undefined
+  return (PLUGIN_ARCHES as readonly string[]).includes(nodeArch)
+    ? (nodeArch as PluginArch)
+    : undefined
 }
 
 export type PlatformVerdict =

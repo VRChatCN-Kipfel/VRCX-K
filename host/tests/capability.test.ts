@@ -61,7 +61,11 @@ function fakeBridge(seen: string[]): ShellStdioBridge {
     ready: async () => {},
     shell,
     tray: { setSnapshot: async () => ({ ok: true, revision: 1 }), onAction: () => () => {} },
-    shortcut: { register: async () => ({ ok: true }), unregister: async () => ({ ok: true }), onPress: () => () => {} },
+    shortcut: {
+      register: async () => ({ ok: true }),
+      unregister: async () => ({ ok: true }),
+      onPress: () => () => {},
+    },
   }
 }
 
@@ -115,7 +119,7 @@ describe("capability surface (M2-1)", () => {
   // compiles while the `ctx.shell` declaration keeps advertising it — the plugin
   // then gets `is not a function` at runtime. `RawShellSpec` pins the top level;
   // this pins the nested namespaces.
-  test("the raw shell mirror enumerates every ShellSysAPI[\"shell\"] method", () => {
+  test('the raw shell mirror enumerates every ShellSysAPI["shell"] method', () => {
     const ctx = new Context()
     createShellCapabilities(ctx, new ShellHandle(() => {}))
     // `Service` adds own `ctx`/`name`; every other own key is a mirror entry.

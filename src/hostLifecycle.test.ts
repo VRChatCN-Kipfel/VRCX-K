@@ -39,9 +39,15 @@ describe("isHostSnapshot / envelope guard", () => {
     // The old hand-fork accepted any object here; the canonical host validator
     // requires a HostExitSummary.
     expect(isHostSnapshot({ ...snapshot(), lastExit: [] })).toBe(false)
-    expect(isHostSnapshot({ ...snapshot(), lastExit: { code: 1, signal: null, kind: "crashed" } })).toBe(true)
-    expect(isHostSnapshot({ ...snapshot(), lastExit: { code: 1, signal: null, kind: "nope" } })).toBe(false)
-    expect(isHostSnapshot({ ...snapshot(), lastExit: { code: "1", signal: null, kind: "crashed" } })).toBe(false)
+    expect(
+      isHostSnapshot({ ...snapshot(), lastExit: { code: 1, signal: null, kind: "crashed" } }),
+    ).toBe(true)
+    expect(
+      isHostSnapshot({ ...snapshot(), lastExit: { code: 1, signal: null, kind: "nope" } }),
+    ).toBe(false)
+    expect(
+      isHostSnapshot({ ...snapshot(), lastExit: { code: "1", signal: null, kind: "crashed" } }),
+    ).toBe(false)
   })
 
   test("rejects the {snapshot} envelope in the bare guard", () => {
@@ -88,19 +94,28 @@ describe("reduceHostLifecycle", () => {
   })
 
   test("response with a bare snapshot also goes live", () => {
-    const view = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: snapshot() })
+    const view = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "response",
+      raw: snapshot(),
+    })
     expect(view.status).toBe("live")
   })
 
   test("unrecognized response degrades to unsupported instead of throwing", () => {
-    const view = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: { snapshot: {} } })
+    const view = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "response",
+      raw: { snapshot: {} },
+    })
     expect(view.status).toBe("unsupported")
     expect(view.snapshot).toBeNull()
     expect(view.notice).toContain("无法识别")
   })
 
   test("event updates a live view", () => {
-    const first = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: snapshot() })
+    const first = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "response",
+      raw: snapshot(),
+    })
     const next = reduceHostLifecycle(first, {
       kind: "event",
       raw: { snapshot: snapshot({ generation: 4, phase: "backoff", nextRetryMs: 1500 }) },
@@ -111,8 +126,13 @@ describe("reduceHostLifecycle", () => {
   })
 
   test("malformed event keeps the last known good snapshot", () => {
-    const live = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: snapshot() })
-    expect(reduceHostLifecycle(live, { kind: "event", raw: { snapshot: { lastExit: [] } } })).toBe(live)
+    const live = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "response",
+      raw: snapshot(),
+    })
+    expect(reduceHostLifecycle(live, { kind: "event", raw: { snapshot: { lastExit: [] } } })).toBe(
+      live,
+    )
     expect(reduceHostLifecycle(live, { kind: "event", raw: null })).toBe(live)
   })
 
@@ -121,7 +141,9 @@ describe("reduceHostLifecycle", () => {
       kind: "response",
       raw: snapshot({ generation: 7 }),
     })
-    expect(reduceHostLifecycle(live, { kind: "event", raw: snapshot({ generation: 6 }) })).toBe(live)
+    expect(reduceHostLifecycle(live, { kind: "event", raw: snapshot({ generation: 6 }) })).toBe(
+      live,
+    )
     const sameGen = reduceHostLifecycle(live, {
       kind: "event",
       raw: snapshot({ generation: 7, phase: "stopping" }),
@@ -130,7 +152,10 @@ describe("reduceHostLifecycle", () => {
   })
 
   test("unsupported (missing command on an older shell) never clobbers a live snapshot", () => {
-    const live = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: snapshot() })
+    const live = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "response",
+      raw: snapshot(),
+    })
     expect(reduceHostLifecycle(live, { kind: "unsupported", reason: "no command" })).toBe(live)
 
     const pending = reduceHostLifecycle(initialHostLifecycleView, {
@@ -203,7 +228,10 @@ describe("reduceHostLifecycle", () => {
   })
 
   test("listen error keeps the last snapshot and surfaces the message", () => {
-    const live = reduceHostLifecycle(initialHostLifecycleView, { kind: "response", raw: snapshot() })
+    const live = reduceHostLifecycle(initialHostLifecycleView, {
+      kind: "response",
+      raw: snapshot(),
+    })
     const failed = reduceHostLifecycle(live, { kind: "error", message: "listen boom" })
     expect(failed.status).toBe("error")
     expect(failed.snapshot).toEqual(snapshot())
@@ -278,7 +306,9 @@ describe("hostLifecycleSummary", () => {
   })
 
   test("live without a snapshot stays in the pending wording (no crash)", () => {
-    expect(hostLifecycleSummary(view({ status: "live", snapshot: null }))).toBe("正在读取宿主生命周期…")
+    expect(hostLifecycleSummary(view({ status: "live", snapshot: null }))).toBe(
+      "正在读取宿主生命周期…",
+    )
   })
 })
 

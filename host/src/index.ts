@@ -51,7 +51,10 @@ function toDevWatchPush(event: DevWatchEvent): DevWatchPush {
     base.entryId = event.entryId
     base.status = event.result.status
     if (event.result.error !== undefined) {
-      base.error = event.result.error instanceof Error ? event.result.error.message : String(event.result.error)
+      base.error =
+        event.result.error instanceof Error
+          ? event.result.error.message
+          : String(event.result.error)
     }
   } else if (event.type === "change" || event.type === "unowned" || event.type === "ambiguous") {
     base.path = event.path
@@ -93,13 +96,15 @@ async function readDevMap(): Promise<Record<string, string[]> | undefined> {
     try {
       return assertDevMap(JSON.parse(await readFile(raw, "utf8")), raw)
     } catch (inner) {
-      throw new Error(`VRCXK_DEV_WATCH_MAP file "${raw}" is not a valid dev map: ${describeError(inner)}`, {
-        cause: inner,
-      })
+      throw new Error(
+        `VRCXK_DEV_WATCH_MAP file "${raw}" is not a valid dev map: ${describeError(inner)}`,
+        {
+          cause: inner,
+        },
+      )
     }
   }
 }
-
 
 /**
  * Wait for the include tree to settle, failing FAST on a broken include:
@@ -139,7 +144,9 @@ async function waitForIncludeReady(ctx: Context, includeEntry: Entry): Promise<v
           } catch (error) {
             cause = error
           }
-          throw new Error(`${entry.id} plugin failed to assemble: ${describeError(cause)}`, { cause })
+          throw new Error(`${entry.id} plugin failed to assemble: ${describeError(cause)}`, {
+            cause,
+          })
         }
         if (fiber.state === FIBER_ACTIVE) activeEntries += 1
       }
@@ -263,7 +270,9 @@ async function bootstrap() {
         // Structured stderr log always.
         if (event.type === "reload") {
           const { entryId, result } = event
-          log(`dev reload ${entryId}: ${result.status}${result.error ? ` (${String(result.error)})` : ""}`)
+          log(
+            `dev reload ${entryId}: ${result.status}${result.error ? ` (${String(result.error)})` : ""}`,
+          )
         } else if (event.type === "started") {
           // Emitted once chokidar finished its initial scan (tests and humans
           // both need to know the watcher is live).

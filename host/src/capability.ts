@@ -1,10 +1,5 @@
 import { Service, symbols, type Context } from "cordis"
-import type {
-  AppInfo,
-  PathKind,
-  ShellStdioBridge,
-  ShellSysAPI,
-} from "./stdio"
+import type { AppInfo, PathKind, ShellStdioBridge, ShellSysAPI } from "./stdio"
 
 type ShellApi = ShellSysAPI["shell"]
 
@@ -226,7 +221,8 @@ const RAW_SHELL: RawShellSpec = {
       s ? s.shortcut.register(accelerator) : Promise.resolve({ ok: false, error: "no-shell" }),
     unregister: (s, accelerator) =>
       s ? s.shortcut.unregister(accelerator) : Promise.resolve({ ok: false, error: "no-shell" }),
-    isRegistered: (s, accelerator) => (s ? s.shortcut.isRegistered(accelerator) : Promise.resolve(false)),
+    isRegistered: (s, accelerator) =>
+      s ? s.shortcut.isRegistered(accelerator) : Promise.resolve(false),
   },
   app: {
     info: (s) => (s ? s.app.info() : Promise.resolve(null)),
@@ -239,7 +235,9 @@ const RAW_SHELL: RawShellSpec = {
   devWatchEvent: (s, event) => (s ? s.devWatchEvent(event) : Promise.resolve(false)),
   tray: {
     setSnapshot: (s, snapshot) =>
-      s ? s.tray.setSnapshot(snapshot) : Promise.resolve({ ok: false, revision: 0, error: "no-shell" }),
+      s
+        ? s.tray.setSnapshot(snapshot)
+        : Promise.resolve({ ok: false, revision: 0, error: "no-shell" }),
   },
 }
 

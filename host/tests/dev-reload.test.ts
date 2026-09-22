@@ -31,9 +31,16 @@ async function fixture() {
   return { root, pluginDir, entryFile, utilFile }
 }
 
-type FiberLike = { uid: number | null; dispose(): Promise<void>; runtime?: { callback?: unknown }; await(): Promise<unknown> }
+type FiberLike = {
+  uid: number | null
+  dispose(): Promise<void>
+  runtime?: { callback?: unknown }
+  await(): Promise<unknown>
+}
 
-function fakeEntry(overrides: Partial<{ fiber: FiberLike | null; id: string; config: unknown; root: string }> = {}) {
+function fakeEntry(
+  overrides: Partial<{ fiber: FiberLike | null; id: string; config: unknown; root: string }> = {},
+) {
   const root = overrides.root ?? "C:/work"
   let fiber: FiberLike | null = overrides.fiber ?? null
   const entry = {
@@ -74,7 +81,7 @@ function makeDeps(overrides: Partial<ReloadDeps> = {}): ReloadDeps {
           if (typeof callback === "function") {
             ;(callback as () => void)()
           } else if (callback && typeof callback === "object") {
-            ;((callback as { apply: () => void }).apply)()
+            ;(callback as { apply: () => void }).apply()
           }
         },
       }
@@ -94,7 +101,11 @@ describe("collectCacheKeysUnderRoots", () => {
       "C:\\work\\plugins-evil.ts": {},
     }
     const keys = collectCacheKeysUnderRoots(["C:\\work\\plugins"], cache)
-    expect(keys.sort()).toEqual(["C:\\work\\plugins\\index.ts", "C:\\work\\plugins\\sub\\a.ts", "c:/work/plugins/util.ts"])
+    expect(keys.sort()).toEqual([
+      "C:\\work\\plugins\\index.ts",
+      "C:\\work\\plugins\\sub\\a.ts",
+      "c:/work/plugins/util.ts",
+    ])
   })
 
   test("invalidateCache deletes only the matching keys", () => {
@@ -129,11 +140,15 @@ describe("reloadPluginEntry state machine", () => {
       await: async () => {},
     }
     const entry = fakeEntry({ fiber: oldFiber })
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      loadEntryModule: async () => {
-        throw new Error("syntax error")
-      },
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        loadEntryModule: async () => {
+          throw new Error("syntax error")
+        },
+      }),
+    )
     expect(result.status).toBe("kept-old")
     expect(result.phase).toBe("import")
     expect(disposeCalls).toHaveLength(0) // old fiber untouched
@@ -149,9 +164,13 @@ describe("reloadPluginEntry state machine", () => {
       await: async () => {},
     }
     const entry = fakeEntry({ fiber: oldFiber })
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      loadEntryModule: async () => ({ notAPlugin: true }),
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        loadEntryModule: async () => ({ notAPlugin: true }),
+      }),
+    )
     expect(result.status).toBe("kept-old")
     expect(result.phase).toBe("import")
   })
@@ -160,7 +179,11 @@ describe("reloadPluginEntry state machine", () => {
     const applyCalls: string[] = []
     const oldFiber = {
       uid: 1,
-      runtime: { callback: function oldApply() { applyCalls.push("old") } },
+      runtime: {
+        callback: function oldApply() {
+          applyCalls.push("old")
+        },
+      },
       dispose: async () => {
         applyCalls.push("dispose")
         ;(oldFiber as { uid: number | null }).uid = null
@@ -208,12 +231,16 @@ describe("reloadPluginEntry state machine", () => {
       await: async () => {},
     }
     const entry = fakeEntry({ fiber: oldFiber })
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      loadEntryModule: async () => ({ apply: () => {} }),
-      pluginOnEntryCtx: async () => {
-        throw new Error("always fails")
-      },
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        loadEntryModule: async () => ({ apply: () => {} }),
+        pluginOnEntryCtx: async () => {
+          throw new Error("always fails")
+        },
+      }),
+    )
     expect(result.status).toBe("restart-required")
     expect(result.phase).toBe("swap")
   })
@@ -222,7 +249,11 @@ describe("reloadPluginEntry state machine", () => {
     const calls: string[] = []
     const oldFiber = {
       uid: 1,
-      runtime: { callback: function oldApply() { calls.push("old-apply") } },
+      runtime: {
+        callback: function oldApply() {
+          calls.push("old-apply")
+        },
+      },
       dispose: async () => {
         calls.push("dispose")
         ;(oldFiber as { uid: number | null }).uid = null
@@ -253,14 +284,18 @@ describe("reloadPluginEntry state machine", () => {
     }
     const entry = fakeEntry({ fiber: oldFiber })
     const disposeCalls: string[] = []
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      timeoutMs: 30,
-      loadEntryModule: () => new Promise<never>(() => {}), // never resolves
-      pluginOnEntryCtx: async () => {
-        disposeCalls.push("unexpected")
-        return { uid: 2, await: async () => {} }
-      },
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        timeoutMs: 30,
+        loadEntryModule: () => new Promise<never>(() => {}), // never resolves
+        pluginOnEntryCtx: async () => {
+          disposeCalls.push("unexpected")
+          return { uid: 2, await: async () => {} }
+        },
+      }),
+    )
     expect(result.status).toBe("kept-old")
     expect(result.phase).toBe("import")
     expect(disposeCalls).toHaveLength(0) // old fiber untouched
@@ -277,11 +312,15 @@ describe("reloadPluginEntry state machine", () => {
       await: async () => {},
     }
     const entry = fakeEntry({ fiber: oldFiber })
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      timeoutMs: 30,
-      loadEntryModule: async () => ({ apply: () => {} }),
-      pluginOnEntryCtx: () => new Promise<never>(() => {}), // swap AND restore both hang
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        timeoutMs: 30,
+        loadEntryModule: async () => ({ apply: () => {} }),
+        pluginOnEntryCtx: () => new Promise<never>(() => {}), // swap AND restore both hang
+      }),
+    )
     // The swap timed out and restore failed: the abandoned fiber may still come
     // up, so the live state is unknown → `timeout` (G).
     expect(result.status).toBe("timeout")
@@ -300,15 +339,19 @@ describe("reloadPluginEntry state machine", () => {
     }
     const entry = fakeEntry({ fiber: oldFiber })
     let call = 0
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      timeoutMs: 30,
-      loadEntryModule: async () => ({ apply: () => {} }),
-      pluginOnEntryCtx: async () => {
-        call += 1
-        if (call === 1) return { uid: 2, await: () => new Promise<never>(() => {}) } // await hangs
-        throw new Error("restore also fails")
-      },
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        timeoutMs: 30,
+        loadEntryModule: async () => ({ apply: () => {} }),
+        pluginOnEntryCtx: async () => {
+          call += 1
+          if (call === 1) return { uid: 2, await: () => new Promise<never>(() => {}) } // await hangs
+          throw new Error("restore also fails")
+        },
+      }),
+    )
     expect(result.status).toBe("timeout")
     expect(result.phase).toBe("swap")
   })
@@ -321,10 +364,14 @@ describe("reloadPluginEntry state machine", () => {
       await: async () => {},
     }
     const entry = fakeEntry({ fiber: oldFiber })
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      timeoutMs: 30,
-      loadEntryModule: async () => ({ apply: () => {} }),
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        timeoutMs: 30,
+        loadEntryModule: async () => ({ apply: () => {} }),
+      }),
+    )
     // Half-torn entry, abandoned disposer may still be running → unknown state.
     expect(result.status).toBe("timeout")
     expect(result.phase).toBe("swap")
@@ -342,15 +389,19 @@ describe("reloadPluginEntry state machine", () => {
     }
     const entry = fakeEntry({ fiber: oldFiber })
     let call = 0
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      timeoutMs: 30,
-      loadEntryModule: async () => ({ apply: () => {} }),
-      pluginOnEntryCtx: async () => {
-        call += 1
-        if (call === 1) return new Promise<never>(() => {}) // swap hangs
-        return { uid: 3, await: async () => {} } // restore succeeds
-      },
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        timeoutMs: 30,
+        loadEntryModule: async () => ({ apply: () => {} }),
+        pluginOnEntryCtx: async () => {
+          call += 1
+          if (call === 1) return new Promise<never>(() => {}) // swap hangs
+          return { uid: 3, await: async () => {} } // restore succeeds
+        },
+      }),
+    )
     // Restore is a KNOWN state, so a swap timeout is not reported as `timeout`.
     expect(result.status).toBe("restored-old")
     expect(result.phase).toBe("swap")
@@ -366,9 +417,13 @@ describe("reloadPluginEntry state machine", () => {
       await: async () => {},
     }
     const entry = fakeEntry({ fiber: oldFiber })
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      loadEntryModule: async () => ({ apply: () => {} }),
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        loadEntryModule: async () => ({ apply: () => {} }),
+      }),
+    )
     expect(result.status).toBe("restart-required")
     expect(result.phase).toBe("swap")
     // Entry was NOT rebuilt over the half-torn fiber.
@@ -385,12 +440,16 @@ describe("reloadPluginEntry state machine", () => {
       await: async () => {},
     }
     const entry = fakeEntry({ fiber: oldFiber })
-    const result = await reloadPluginEntry(entry, ["./plugins"], makeDeps({
-      loadEntryModule: async () => ({ apply: () => {} }),
-      pluginOnEntryCtx: async () => {
-        throw new Error("new fiber fails")
-      },
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      ["./plugins"],
+      makeDeps({
+        loadEntryModule: async () => ({ apply: () => {} }),
+        pluginOnEntryCtx: async () => {
+          throw new Error("new fiber fails")
+        },
+      }),
+    )
     expect(result.status).toBe("restart-required")
     expect(result.phase).toBe("swap")
   })
@@ -413,11 +472,15 @@ describe("reloadPluginEntry state machine", () => {
     cache[entryKey] = { sentinel: "entry-v1" }
     cache[utilKey] = { sentinel: "util-v1" }
     try {
-      const result = await reloadPluginEntry(entry, [join(root, "plugins")], makeDeps({
-        loadEntryModule: async () => {
-          throw new Error("syntax error")
-        },
-      }))
+      const result = await reloadPluginEntry(
+        entry,
+        [join(root, "plugins")],
+        makeDeps({
+          loadEntryModule: async () => {
+            throw new Error("syntax error")
+          },
+        }),
+      )
       expect(result.status).toBe("kept-old")
       // Strong rollback: both cache entries are back (they were deleted before
       // the import attempt and restored on failure).
@@ -441,12 +504,16 @@ describe("reloadPluginEntry state machine", () => {
     }
     const entry = fakeEntry({ fiber: oldFiber, root })
     const cache: Record<string, unknown> = { [entryFile]: { sentinel: "injected" } }
-    const result = await reloadPluginEntry(entry, [join(root, "plugins")], makeDeps({
-      cache,
-      loadEntryModule: async () => {
-        throw new Error("syntax error")
-      },
-    }))
+    const result = await reloadPluginEntry(
+      entry,
+      [join(root, "plugins")],
+      makeDeps({
+        cache,
+        loadEntryModule: async () => {
+          throw new Error("syntax error")
+        },
+      }),
+    )
     expect(result.status).toBe("kept-old")
     // Deleted for the import attempt, restored by the strong rollback.
     expect(cache[entryFile]).toEqual({ sentinel: "injected" })
@@ -465,24 +532,28 @@ describe("module cache defaults (ESM safety)", () => {
   // ESM has no `require` at all — run the real import there when node exists.
   const nodeAvailable = spawnSync("node", ["--version"], { encoding: "utf8" }).status === 0
 
-  test.skipIf(!nodeAvailable)("imports and runs under a pure ESM runtime (node) without require", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "vrcxk-reload-esm-"))
-    roots.push(dir)
-    const moduleUrl = pathToFileURL(join(import.meta.dir, "..", "src", "dev-reload.ts")).href
-    const probe = join(dir, "probe.mjs")
-    await writeFile(
-      probe,
-      `import { moduleCache, collectCacheKeysUnderRoots } from ${JSON.stringify(moduleUrl)}\n` +
-        `console.log(JSON.stringify({ hasRequire: typeof require !== "undefined", ok: typeof moduleCache() === "object", keys: collectCacheKeysUnderRoots(["nope"]).length }))\n`,
-    )
-    const proc = Bun.spawn(["node", probe], { stdout: "pipe", stderr: "pipe" })
-    const [code, stdout, stderr] = await Promise.all([
-      proc.exited,
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ])
-    expect(stderr).toBe("")
-    expect(code).toBe(0)
-    expect(JSON.parse(stdout.trim())).toEqual({ hasRequire: false, ok: true, keys: 0 })
-  }, 60_000)
+  test.skipIf(!nodeAvailable)(
+    "imports and runs under a pure ESM runtime (node) without require",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "vrcxk-reload-esm-"))
+      roots.push(dir)
+      const moduleUrl = pathToFileURL(join(import.meta.dir, "..", "src", "dev-reload.ts")).href
+      const probe = join(dir, "probe.mjs")
+      await writeFile(
+        probe,
+        `import { moduleCache, collectCacheKeysUnderRoots } from ${JSON.stringify(moduleUrl)}\n` +
+          `console.log(JSON.stringify({ hasRequire: typeof require !== "undefined", ok: typeof moduleCache() === "object", keys: collectCacheKeysUnderRoots(["nope"]).length }))\n`,
+      )
+      const proc = Bun.spawn(["node", probe], { stdout: "pipe", stderr: "pipe" })
+      const [code, stdout, stderr] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      expect(stderr).toBe("")
+      expect(code).toBe(0)
+      expect(JSON.parse(stdout.trim())).toEqual({ hasRequire: false, ok: true, keys: 0 })
+    },
+    60_000,
+  )
 })

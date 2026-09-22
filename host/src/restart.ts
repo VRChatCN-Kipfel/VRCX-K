@@ -33,12 +33,16 @@ export type RestartRequesterOptions = {
   gracefulStop?: (reason: "stop" | "restart") => Promise<boolean>
 }
 
-export function makeRestartRequester(ctx: Context, options: RestartRequesterOptions): RestartRequester {
+export function makeRestartRequester(
+  ctx: Context,
+  options: RestartRequesterOptions,
+): RestartRequester {
   const shellAttached = options.shellAttached
   const now = options.now ?? Date.now
   const exitProcess = options.exitProcess ?? ((code: number) => process.exit(code))
   const gracefulStop =
-    options.gracefulStop ?? (async (reason: "stop" | "restart") => gracefulStopWithTimeout(ctx, reason))
+    options.gracefulStop ??
+    (async (reason: "stop" | "restart") => gracefulStopWithTimeout(ctx, reason))
   const lastRequest = new Map<string, number>()
   const startedAt = now()
   let restarting = false
@@ -49,7 +53,12 @@ export function makeRestartRequester(ctx: Context, options: RestartRequesterOpti
     // "long ago" so the rate-limit arm never suppresses a first request
     // (a bare 0 would suppress everything until the clock passes 60s).
     const last = lastRequest.get(info.entryId) ?? Number.NEGATIVE_INFINITY
-    const reason = info.error instanceof Error ? info.error.message : info.error === undefined ? "unknown error" : String(info.error)
+    const reason =
+      info.error instanceof Error
+        ? info.error.message
+        : info.error === undefined
+          ? "unknown error"
+          : String(info.error)
     const log = (line: string) => console.error("[host]", line)
     if (current - last < RESTART_RATE_LIMIT_MS || current - startedAt < RESTART_GRACE_MS) {
       log(`dev restart-required ${info.entryId} suppressed (rate limit / startup grace): ${reason}`)

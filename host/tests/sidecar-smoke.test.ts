@@ -70,41 +70,43 @@ test.skipIf(!available && !requireArtifact)(
   },
 )
 
-test.skipIf(!available)("sidecar launches to ready and stops gracefully via stdio RPC", async () => {
+test.skipIf(!available)(
+  "sidecar launches to ready and stops gracefully via stdio RPC",
+  async () => {
+    // The packaged shell spawns the sidecar with cwd = resource dir so the
+    // host finds cordis.yml/plugins beside itself. In this repo the artifact
+    // dir has no runtime seed yet (M1 decision: not bundled), so run with
+    // cwd = host/ where the runtime files live — dev-mode parity.
+    proc = Bun.spawn([artifact], {
+      cwd: join(repoRoot, "host"),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      // POSIX: the sidecar becomes its own process-group leader (setsid), so
+      // killTree's kill(-pid) reaps host + any descendants in one signal — same
+      // semantics as the Rust shell's process_group(0) / Job Object.
+      // Windows: NOT detached (#33) — detached lets the child outlive the runner
+      // (probe10: 8/8 survived); non-detached ties it to the runner's job object
+      // so an interrupted run reaps it.
+      detached: HOST_SPAWN_DETACHED,
+      // The Rust shell always marks the child as shell-attached so the host
+      // connects the kkrpc/stdio bridge (VRCXK_SHELL=1, see host.rs
+      // start_host_process / host/src/index.ts).
+      env: { ...process.env, VRCXK_SHELL: "1" },
+    })
+    // Cold start of the 82MB sidecar can exceed the 15s default on Windows.
+    const ready = await readReady(proc.stderr, 60_000)
+    expect(ready.port).toBeGreaterThan(0)
+    expect(ready.token).toMatch(/^[0-9a-f]{64}$/)
+    expect(ready.hostVersion).toBe("0.0.1")
 
-  // The packaged shell spawns the sidecar with cwd = resource dir so the
-  // host finds cordis.yml/plugins beside itself. In this repo the artifact
-  // dir has no runtime seed yet (M1 decision: not bundled), so run with
-  // cwd = host/ where the runtime files live — dev-mode parity.
-  proc = Bun.spawn([artifact], {
-    cwd: join(repoRoot, "host"),
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    // POSIX: the sidecar becomes its own process-group leader (setsid), so
-    // killTree's kill(-pid) reaps host + any descendants in one signal — same
-    // semantics as the Rust shell's process_group(0) / Job Object.
-    // Windows: NOT detached (#33) — detached lets the child outlive the runner
-    // (probe10: 8/8 survived); non-detached ties it to the runner's job object
-    // so an interrupted run reaps it.
-    detached: HOST_SPAWN_DETACHED,
-    // The Rust shell always marks the child as shell-attached so the host
-    // connects the kkrpc/stdio bridge (VRCXK_SHELL=1, see host.rs
-    // start_host_process / host/src/index.ts).
-    env: { ...process.env, VRCXK_SHELL: "1" },
-  })
-  // Cold start of the 82MB sidecar can exceed the 15s default on Windows.
-  const ready = await readReady(proc.stderr, 60_000)
-  expect(ready.port).toBeGreaterThan(0)
-  expect(ready.token).toMatch(/^[0-9a-f]{64}$/)
-  expect(ready.hostVersion).toBe("0.0.1")
-
-  // Graceful stop via the stdio RPC (compact protocol the Rust Peer speaks).
-  const frame =
-    JSON.stringify({ t: "q", id: "smoke-stop", op: "call", p: ["stop"] }) + "\n"
-  proc.stdin!.write(frame)
-  await proc.stdin!.flush?.()
-  proc.stdin!.end?.()
-  const exited = await proc.exited
-  expect(exited).toBe(0)
-}, 90_000)
+    // Graceful stop via the stdio RPC (compact protocol the Rust Peer speaks).
+    const frame = JSON.stringify({ t: "q", id: "smoke-stop", op: "call", p: ["stop"] }) + "\n"
+    proc.stdin!.write(frame)
+    await proc.stdin!.flush?.()
+    proc.stdin!.end?.()
+    const exited = await proc.exited
+    expect(exited).toBe(0)
+  },
+  90_000,
+)

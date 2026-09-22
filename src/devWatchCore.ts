@@ -26,7 +26,6 @@ export type DevWatchPush = {
   entries?: string[]
 }
 
-
 /** One received event kept in the panel log. */
 export type DevWatchLog = {
   seq: number
@@ -184,6 +183,10 @@ export function idleHint(state: DevWatchPanelState): string {
 }
 
 /** Prepend a received push, keep at most `max` entries. */
-export function appendLog(prev: DevWatchLog[], entry: DevWatchLog, max: number = MAX_LOG): DevWatchLog[] {
+export function appendLog(
+  prev: DevWatchLog[],
+  entry: DevWatchLog,
+  max: number = MAX_LOG,
+): DevWatchLog[] {
   return [entry, ...prev].slice(0, max)
 }

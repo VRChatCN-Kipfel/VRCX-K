@@ -24,12 +24,12 @@ import type { Entry } from "@cordisjs/plugin-loader"
 export const RELOAD_TIMEOUT_MS = 10_000
 
 export type ReloadStatus =
-  | "reloaded"          // new fiber is active
-  | "kept-old"          // Phase A failed before old fiber was touched
-  | "restored-old"      // Phase B failed, old module was rebuilt
-  | "restart-required"  // could not restore; caller decides next step
-  | "timeout"           // a swap/await phase timed out: the live state is unknown
-  | "skipped"           // no fiber / entry disabled / nothing to do
+  | "reloaded" // new fiber is active
+  | "kept-old" // Phase A failed before old fiber was touched
+  | "restored-old" // Phase B failed, old module was rebuilt
+  | "restart-required" // could not restore; caller decides next step
+  | "timeout" // a swap/await phase timed out: the live state is unknown
+  | "skipped" // no fiber / entry disabled / nothing to do
 
 export type ReloadResult = {
   status: ReloadStatus
@@ -146,7 +146,10 @@ export function collectCacheKeysUnderRoots(
 }
 
 /** Drop module cache entries under `roots`. Returns the number of dropped keys. */
-export function invalidateCache(roots: string[], cache: Record<string, unknown> = moduleCache()): number {
+export function invalidateCache(
+  roots: string[],
+  cache: Record<string, unknown> = moduleCache(),
+): number {
   const keys = collectCacheKeysUnderRoots(roots, cache)
   for (const key of keys) delete cache[key]
   return keys.length
@@ -167,7 +170,12 @@ export type ReloadDeps = {
 
 function isPlugin(value: unknown): boolean {
   if (typeof value === "function") return true
-  if (value && typeof value === "object" && typeof (value as { apply?: unknown }).apply === "function") return true
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { apply?: unknown }).apply === "function"
+  )
+    return true
   return false
 }
 
@@ -177,7 +185,11 @@ function isPlugin(value: unknown): boolean {
  * Returns a ReloadResult describing what happened. This function never throws
  * for plugin-authored failures — they are folded into the result status.
  */
-export async function reloadPluginEntry(entry: Entry, roots: string[], deps: ReloadDeps): Promise<ReloadResult> {
+export async function reloadPluginEntry(
+  entry: Entry,
+  roots: string[],
+  deps: ReloadDeps,
+): Promise<ReloadResult> {
   const log = deps.log ?? noopLog
   const timeoutMs = deps.timeoutMs ?? RELOAD_TIMEOUT_MS
   const started = performance.now()
@@ -190,14 +202,16 @@ export async function reloadPluginEntry(entry: Entry, roots: string[], deps: Rel
   }
 
   // Snapshot the old plugin callback so we can restore it if the new apply fails.
-  const oldCallback = (oldFiber as unknown as { runtime?: { callback?: unknown } }).runtime?.callback
+  const oldCallback = (oldFiber as unknown as { runtime?: { callback?: unknown } }).runtime
+    ?.callback
 
   // The entry's own module file (lexical, absolute) is always part of the
   // invalidation set; `roots` covers imported siblings/helpers.
   const baseUrl = deps.baseUrl ?? (entry.parent.tree.ctx as unknown as { baseUrl?: string }).baseUrl
-  const entryFile = entry.options.name.startsWith(".") && baseUrl
-    ? fileURLToPath(new URL(entry.options.name, baseUrl))
-    : entry.options.name
+  const entryFile =
+    entry.options.name.startsWith(".") && baseUrl
+      ? fileURLToPath(new URL(entry.options.name, baseUrl))
+      : entry.options.name
   const cache = deps.cache ?? moduleCache()
   const invalidationSet = new Set<string>(collectCacheKeysUnderRoots(roots, cache))
   invalidationSet.add(entryFile)
@@ -223,7 +237,13 @@ export async function reloadPluginEntry(entry: Entry, roots: string[], deps: Rel
     log(`[dev-watch] ${entryId}: import failed — keeping old fiber`)
     // Even when the import TIMED OUT the old module is fully restored here, so
     // the live state is known → kept-old (never "timeout").
-    return { status: "kept-old", entryId, phase: "import", error, durationMs: performance.now() - started }
+    return {
+      status: "kept-old",
+      entryId,
+      phase: "import",
+      error,
+      durationMs: performance.now() - started,
+    }
   }
   if (!isPlugin(newModule)) {
     for (const [key, value] of cacheSnapshot) {
@@ -276,7 +296,13 @@ export async function reloadPluginEntry(entry: Entry, roots: string[], deps: Rel
     log(`[dev-watch] ${entryId}: new fiber failed (${String(error)}) — attempting restore`)
     const restored = await tryRestoreOld(entry, oldCallback, config, deps, timeoutMs, log)
     if (restored) {
-      return { status: "restored-old", entryId, phase: "swap", error, durationMs: performance.now() - started }
+      return {
+        status: "restored-old",
+        entryId,
+        phase: "swap",
+        error,
+        durationMs: performance.now() - started,
+      }
     }
     // Restore failed. If the swap itself timed out, the abandoned fiber may
     // still come up: the live state is unknown → `timeout`.
@@ -288,7 +314,6 @@ export async function reloadPluginEntry(entry: Entry, roots: string[], deps: Rel
       durationMs: performance.now() - started,
     }
   }
-
   // Link the new fiber back to the entry.
   ;(entry as unknown as { fiber?: unknown }).fiber = newFiber
   try {
@@ -297,7 +322,13 @@ export async function reloadPluginEntry(entry: Entry, roots: string[], deps: Rel
     log(`[dev-watch] ${entryId}: new fiber await failed — attempting restore`)
     const restored = await tryRestoreOld(entry, oldCallback, config, deps, timeoutMs, log)
     if (restored) {
-      return { status: "restored-old", entryId, phase: "swap", error, durationMs: performance.now() - started }
+      return {
+        status: "restored-old",
+        entryId,
+        phase: "swap",
+        error,
+        durationMs: performance.now() - started,
+      }
     }
     // Same reasoning as the swap branch: an await timeout leaves the new fiber
     // in an unknown state, so report `timeout` rather than a definite failure.
@@ -328,7 +359,11 @@ async function tryRestoreOld(
     return false
   }
   try {
-    const fiber = await withTimeout(deps.pluginOnEntryCtx(entry, oldCallback, config), timeoutMs, "restore")
+    const fiber = await withTimeout(
+      deps.pluginOnEntryCtx(entry, oldCallback, config),
+      timeoutMs,
+      "restore",
+    )
     ;(entry as unknown as { fiber?: unknown }).fiber = fiber
     await withTimeout((fiber as { await(): Promise<unknown> }).await(), timeoutMs, "restore-await")
     log(`[dev-watch] ${entryId}: restored old plugin`)

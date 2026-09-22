@@ -58,12 +58,19 @@ async function makeHost() {
   c.baseUrl = pathToFileURL(root).href + "/"
   await c.plugin(Loader)
   c.loader.builtins.include = Include
-  const id = await c.loader.create({ name: "cordis:include", config: { path: "./cordis.yml", enableLogs: false } })
+  const id = await c.loader.create({
+    name: "cordis:include",
+    config: { path: "./cordis.yml", enableLogs: false },
+  })
   const entry = c.loader.resolve(id)
   // Wait for the include subtree + first plugin fiber.
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    const e = entry.subtree && [...entry.subtree.entries()].find((x: unknown) => (x as Entry).options.name === "./plugins/alpha.ts")
+    const e =
+      entry.subtree &&
+      [...entry.subtree.entries()].find(
+        (x: unknown) => (x as Entry).options.name === "./plugins/alpha.ts",
+      )
     if (e && (e as Entry).fiber?.uid != null) break
     await new Promise((r) => setTimeout(r, 50))
   }
@@ -72,7 +79,11 @@ async function makeHost() {
   return { root, pluginDir, configFile, entryFile, utilFile }
 }
 
-function waitEvent(events: DevWatchEvent[], predicate: (e: DevWatchEvent) => boolean, timeoutMs = 8_000): Promise<DevWatchEvent> {
+function waitEvent(
+  events: DevWatchEvent[],
+  predicate: (e: DevWatchEvent) => boolean,
+  timeoutMs = 8_000,
+): Promise<DevWatchEvent> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs
     const poll = () => {
@@ -109,7 +120,9 @@ describe("DevWatch live reload", () => {
     // Let the initial scan settle before we change files.
     await new Promise((r) => setTimeout(r, 150))
 
-    const alphaEntry = [...include.entries()].find((e: Entry) => e.options.name === "./plugins/alpha.ts") as Entry
+    const alphaEntry = [...include.entries()].find(
+      (e: Entry) => e.options.name === "./plugins/alpha.ts",
+    ) as Entry
     const uidBefore = alphaEntry.fiber?.uid
 
     await atomicWrite(entryFile, (await Bun.file(entryFile).text()) + "// touched\n")
@@ -175,7 +188,9 @@ describe("DevWatch live reload", () => {
     await waitEvent(events, (e) => e.type === "started")
     await new Promise((r) => setTimeout(r, 150))
 
-    const alphaEntry = [...include.entries()].find((e: Entry) => e.options.name === "./plugins/alpha.ts") as Entry
+    const alphaEntry = [...include.entries()].find(
+      (e: Entry) => e.options.name === "./plugins/alpha.ts",
+    ) as Entry
     const uidBefore = alphaEntry.fiber?.uid
     const countBefore = (globalThis as Record<string, unknown>).__alphaCount as number
 
@@ -193,7 +208,10 @@ describe("DevWatch live reload", () => {
 
   test("include refresh picks up a new entry after cordis.yml changes", async () => {
     const { root, configFile } = await makeHost()
-    await writeFile(join(root, "plugins", "beta.ts"), `export function apply() { (globalThis as any).__betaCount = ((globalThis as any).__betaCount ?? 0) + 1 }\n`)
+    await writeFile(
+      join(root, "plugins", "beta.ts"),
+      `export function apply() { (globalThis as any).__betaCount = ((globalThis as any).__betaCount ?? 0) + 1 }\n`,
+    )
     const events: DevWatchEvent[] = []
     const include = includeEntry!.subtree!
     const watch = new DevWatch({
@@ -231,7 +249,9 @@ describe("DevWatch live reload", () => {
     await waitEvent(events, (e) => e.type === "started")
     await new Promise((r) => setTimeout(r, 200))
 
-    const alphaEntry = [...include.entries()].find((e: Entry) => e.options.name === "./plugins/alpha.ts") as Entry
+    const alphaEntry = [...include.entries()].find(
+      (e: Entry) => e.options.name === "./plugins/alpha.ts",
+    ) as Entry
     const registry = (ctx! as unknown as { registry: { size: number } }).registry
     const baselineRegistrySize = registry.size
 
@@ -342,11 +362,16 @@ async function makeSplitHost() {
   c.baseUrl = pathToFileURL(root).href + "/"
   await c.plugin(Loader)
   c.loader.builtins.include = Include
-  const id = await c.loader.create({ name: "cordis:include", config: { path: "./cfg/cordis.yml", enableLogs: false } })
+  const id = await c.loader.create({
+    name: "cordis:include",
+    config: { path: "./cfg/cordis.yml", enableLogs: false },
+  })
   const entry = c.loader.resolve(id)
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    const child = entry.subtree && [...entry.subtree.entries()].find((x) => (x as Entry).options.name === "../plugins/alpha.ts")
+    const child =
+      entry.subtree &&
+      [...entry.subtree.entries()].find((x) => (x as Entry).options.name === "../plugins/alpha.ts")
     if (child && (child as Entry).fiber?.uid != null) break
     await sleep(50)
   }
@@ -463,11 +488,18 @@ describe("DevWatch lifecycle guards", () => {
   test("flushFs reports an unmappable path as watcher-error instead of dying", async () => {
     const { configFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const watch = new DevWatch({ include: includeEntry!.subtree!, configFile, onState: (e) => events.push(e) })
+    const watch = new DevWatch({
+      include: includeEntry!.subtree!,
+      configFile,
+      onState: (e) => events.push(e),
+    })
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
 
-    const internals = watch as unknown as { fsPending: Map<string, string>; flushFs(): Promise<void> }
+    const internals = watch as unknown as {
+      fsPending: Map<string, string>
+      flushFs(): Promise<void>
+    }
     internals.fsPending.set("node:fs", "change") // not a file: path → canonicalization throws
     await internals.flushFs()
     expect(events.some((e) => e.type === "watcher-error")).toBe(true)
@@ -517,7 +549,9 @@ describe("DevWatch lifecycle guards", () => {
   test("a file named ..foo inside a root is matched, not reported unowned", async () => {
     const { root, configFile, pluginDir } = await makeHost()
     const events: DevWatchEvent[] = []
-    const alphaEntry = [...includeEntry!.subtree!.entries()].find((e) => (e as Entry).options.name === "./plugins/alpha.ts") as Entry
+    const alphaEntry = [...includeEntry!.subtree!.entries()].find(
+      (e) => (e as Entry).options.name === "./plugins/alpha.ts",
+    ) as Entry
     const watch = new DevWatch({
       include: includeEntry!.subtree!,
       configFile,
@@ -530,7 +564,10 @@ describe("DevWatch lifecycle guards", () => {
 
     const weird = join(pluginDir, "..foo.ts")
     await writeFile(weird, "export const x = 1\n")
-    const change = await waitEvent(events, (e) => e.type === "change" && e.path.endsWith("..foo.ts"))
+    const change = await waitEvent(
+      events,
+      (e) => e.type === "change" && e.path.endsWith("..foo.ts"),
+    )
     expect(change.type).toBe("change")
     if (change.type !== "change") return
     expect(change.entryIds).toContain(alphaEntry.id)
@@ -546,7 +583,11 @@ describe("DevWatch lifecycle guards", () => {
     await writeFile(gammaFile, `export function apply() {}\n`)
 
     const events: DevWatchEvent[] = []
-    const watch = new DevWatch({ include: includeEntry!.subtree!, configFile, onState: (e) => events.push(e) })
+    const watch = new DevWatch({
+      include: includeEntry!.subtree!,
+      configFile,
+      onState: (e) => events.push(e),
+    })
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
     await sleep(150)
@@ -568,9 +609,11 @@ describe("DevWatch lifecycle guards", () => {
     let reloaded: DevWatchEvent | undefined
     for (let attempt = 0; attempt < 6 && !reloaded; attempt++) {
       await atomicWrite(gammaFile, `export function apply() {}\n// touch ${attempt}\n`)
-      reloaded = await waitEvent(events, (e) => e.type === "reload" && e.entryId === gammaEntryId, 1_500).catch(
-        () => undefined,
-      )
+      reloaded = await waitEvent(
+        events,
+        (e) => e.type === "reload" && e.entryId === gammaEntryId,
+        1_500,
+      ).catch(() => undefined)
     }
     expect(reloaded).toBeDefined()
     if (reloaded?.type !== "reload") return

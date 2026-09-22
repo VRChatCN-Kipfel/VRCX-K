@@ -191,9 +191,9 @@ export function CapabilitySmokePanel() {
                   {view.presses.length === 0 ? (
                     <li>尚未收到按键</li>
                   ) : (
-                    [...view.presses].reverse().map((entry) => (
-                      <li key={entry.seq}>{formatPress(entry)}</li>
-                    ))
+                    [...view.presses]
+                      .reverse()
+                      .map((entry) => <li key={entry.seq}>{formatPress(entry)}</li>)
                   )}
                 </ul>
               </>

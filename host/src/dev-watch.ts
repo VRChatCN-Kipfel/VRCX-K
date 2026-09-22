@@ -26,12 +26,7 @@ import { dirname, isAbsolute, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Context } from "cordis"
 import type { Entry, EntryTree } from "@cordisjs/plugin-loader"
-import {
-  binding,
-  mapPath,
-  watchKey,
-  type EntryBinding,
-} from "./watch-path"
+import { binding, mapPath, watchKey, type EntryBinding } from "./watch-path"
 import { reloadPluginEntry, type ReloadResult } from "./dev-reload"
 
 export type DevWatchEvent =
@@ -250,10 +245,16 @@ export class DevWatch {
       followSymlinks: false,
       ignored: (p: string) => {
         const norm = p.replaceAll("\\", "/")
-        if (norm.includes("/node_modules/") || norm.includes("/.git/") || norm.includes("/dist/")) return true
+        if (norm.includes("/node_modules/") || norm.includes("/.git/") || norm.includes("/dist/"))
+          return true
         // Editor temp/swap artifacts (incl. Include's own temp+rename writes).
         const base = norm.slice(norm.lastIndexOf("/") + 1)
-        return base.endsWith(".tmp") || base.startsWith(".#") || base.endsWith(".swp") || base.startsWith("~$")
+        return (
+          base.endsWith(".tmp") ||
+          base.startsWith(".#") ||
+          base.endsWith(".swp") ||
+          base.startsWith("~$")
+        )
       },
     })
     this.chokidar.on("ready", () => {
@@ -302,7 +303,9 @@ export class DevWatch {
     this.chokidar = undefined
     if (watcher) await watcher.close()
     // Wait for in-flight reloads (bounded by their own timeout).
-    await Promise.allSettled([...this.queues.values()].map((q) => q.running).filter((p): p is Promise<void> => !!p))
+    await Promise.allSettled(
+      [...this.queues.values()].map((q) => q.running).filter((p): p is Promise<void> => !!p),
+    )
     this.queues.clear()
     this.onState?.({ type: "closed" })
   }
@@ -425,7 +428,12 @@ export class DevWatch {
     }
   }
 
-  private async reloadOnce(entryId: string, entry: Entry, roots: string[], paths: string[]): Promise<ReloadResult> {
+  private async reloadOnce(
+    entryId: string,
+    entry: Entry,
+    roots: string[],
+    paths: string[],
+  ): Promise<ReloadResult> {
     // De-duplicate: if the entry was removed or disabled meanwhile, skip.
     const current = this.bindings.get(entryId)
     if (!current || current.entry !== entry) {
@@ -435,7 +443,8 @@ export class DevWatch {
     return reloadPluginEntry(entry, roots, {
       loadEntryModule: async (e) => {
         const exports = await e.parent.tree.import(e.options.name, e.getOuterStack)
-        const loader = (e as unknown as { loader?: { unwrapExports(exports: unknown): unknown } }).loader
+        const loader = (e as unknown as { loader?: { unwrapExports(exports: unknown): unknown } })
+          .loader
         return loader ? loader.unwrapExports(exports) : exports
       },
       pluginOnEntryCtx: async (e, plugin, config) => {
@@ -513,6 +522,8 @@ async function dirWatchRoot(path: string): Promise<string> {
  *     silently dropped that wait.
  */
 export function attachDevWatch(ctx: Context, watch: DevWatch): void {
-  watch.setStoppingGate(() => (ctx as Context & { signal?: { stopping?: boolean } }).signal?.stopping === true)
+  watch.setStoppingGate(
+    () => (ctx as Context & { signal?: { stopping?: boolean } }).signal?.stopping === true,
+  )
   ctx.effect(() => () => watch.close())
 }

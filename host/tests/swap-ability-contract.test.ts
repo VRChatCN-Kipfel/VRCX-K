@@ -35,7 +35,9 @@ describe("dependencies may name a service, not only a plugin id", () => {
     expect(validatePluginManifest({ ...base, dependencies: { storage: "^1.0" } })).toBe(true)
     // unused by v0 resolution, but the spelling must already be legal so that
     // adding third-party implementations later needs no manifest edits.
-    expect(validatePluginManifest({ ...base, dependencies: { storage: "*", "audit-logger": "*" } })).toBe(true)
+    expect(
+      validatePluginManifest({ ...base, dependencies: { storage: "*", "audit-logger": "*" } }),
+    ).toBe(true)
   })
 
   test("still rejects malformed keys", () => {
@@ -49,7 +51,13 @@ describe("service names must not leak an implementation", () => {
   test("rejects names that bake in one implementation", () => {
     // Each of these can only ever be satisfied by the implementation it names,
     // which is exactly what makes a drop-in replacement impossible.
-    for (const name of ["storageImpl", "storageImplementation", "baseStorage", "coreStorage", "vrcxkStorage"]) {
+    for (const name of [
+      "storageImpl",
+      "storageImplementation",
+      "baseStorage",
+      "coreStorage",
+      "vrcxkStorage",
+    ]) {
       expect(validatePluginManifest({ ...base, services: { implements: [name] } })).toBe(false)
       expect(validatePluginManifest({ ...base, services: { required: [name] } })).toBe(false)
     }
@@ -60,7 +68,9 @@ describe("service names must not leak an implementation", () => {
       expect(validatePluginManifest({ ...base, services: { implements: [name] } })).toBe(true)
     }
     // `impl` in the middle is fine — only a trailing Impl/Implementation is a smell.
-    expect(validatePluginManifest({ ...base, services: { implements: ["implTracker"] } })).toBe(true)
+    expect(validatePluginManifest({ ...base, services: { implements: ["implTracker"] } })).toBe(
+      true,
+    )
   })
 
   test("a service name must start lowercase, so it cannot be confused with a plugin id", () => {

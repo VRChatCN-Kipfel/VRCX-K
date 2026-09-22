@@ -333,7 +333,10 @@ export function withWriteFailureObserver(inner: Transport<RPCMessage>) {
  * `options.transport` exists for tests (an in-memory transport pair); the
  * default is the real bun stdio transport.
  */
-export function connectShellStdio(ctx: Context, options: { transport?: Transport<RPCMessage> } = {}): ShellStdioBridge {
+export function connectShellStdio(
+  ctx: Context,
+  options: { transport?: Transport<RPCMessage> } = {},
+): ShellStdioBridge {
   const trayActions = fanout<TrayActionEvent>("tray.action")
   const shortcutPresses = fanout<ShortcutPressEvent>("shortcut.pressed")
   // #33: EOF on the shell's stdin channel means the shell is gone. Its
@@ -363,59 +366,62 @@ export function connectShellStdio(ctx: Context, options: { transport?: Transport
   // `shell.ready` that nothing distinguishes from a genuine startup error.
   // A test-supplied transport is used as-is — it owns its streams.
   const observed = usesDefaultTransport ? withWriteFailureObserver(bunStdioTransport()) : undefined
-  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(observed ? observed.transport : options.transport!, {
-    onClose: watchStdinLoss
-      ? (reason) => {
-          console.error(
-            reason
-              ? `[host] shell stdio broke (${reason.name}: ${reason.message}) — graceful shutdown`
-              : "[host] shell closed its stdio — graceful shutdown",
-          )
-          void stopOnStdinLoss(ctx, "shell")
-        }
-      : undefined,
-    expose: {
-      ping: () => hostWsAPI.ping(),
-      stop: async () => {
-        console.error("[host] stop requested — graceful shutdown")
-        const acquired = await gracefulStopWithTimeout(ctx, "stop")
-        if (!acquired) {
-          // A shutdown is already in progress (e.g. dev-watch restart
-          // requester); the first trigger owns the exit. Do not exit 0 here —
-          // the process is already leaving (0 or 51).
-          return true
-        }
-        setTimeout(() => process.exit(0), 10)
-        return true
-      },
-      restart: async () => {
-        console.error("[host] restart requested — graceful shutdown then exit 51")
-        const acquired = await gracefulStopWithTimeout(ctx, "restart")
-        if (!acquired) {
-          // Already shutting down; the first trigger owns the exit.
-          return true
-        }
-        setTimeout(() => process.exit(HOST_RESTART_EXIT), 10)
-        return true
-      },
-      tray: {
-        // `tray.action` (shell → host): fan out to every registered handler.
-        // A handler throwing must never break the RPC channel.
-        action: (action: TrayActionEvent) => {
-          trayActions.emit(action)
+  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(
+    observed ? observed.transport : options.transport!,
+    {
+      onClose: watchStdinLoss
+        ? (reason) => {
+            console.error(
+              reason
+                ? `[host] shell stdio broke (${reason.name}: ${reason.message}) — graceful shutdown`
+                : "[host] shell closed its stdio — graceful shutdown",
+            )
+            void stopOnStdinLoss(ctx, "shell")
+          }
+        : undefined,
+      expose: {
+        ping: () => hostWsAPI.ping(),
+        stop: async () => {
+          console.error("[host] stop requested — graceful shutdown")
+          const acquired = await gracefulStopWithTimeout(ctx, "stop")
+          if (!acquired) {
+            // A shutdown is already in progress (e.g. dev-watch restart
+            // requester); the first trigger owns the exit. Do not exit 0 here —
+            // the process is already leaving (0 or 51).
+            return true
+          }
+          setTimeout(() => process.exit(0), 10)
           return true
         },
-      },
-      shortcut: {
-        // `shortcut.pressed` (shell → host, issue #6 callback): the shell
-        // already filtered to registered chords and key-down edges.
-        pressed: (event: ShortcutPressEvent) => {
-          shortcutPresses.emit(event)
+        restart: async () => {
+          console.error("[host] restart requested — graceful shutdown then exit 51")
+          const acquired = await gracefulStopWithTimeout(ctx, "restart")
+          if (!acquired) {
+            // Already shutting down; the first trigger owns the exit.
+            return true
+          }
+          setTimeout(() => process.exit(HOST_RESTART_EXIT), 10)
           return true
+        },
+        tray: {
+          // `tray.action` (shell → host): fan out to every registered handler.
+          // A handler throwing must never break the RPC channel.
+          action: (action: TrayActionEvent) => {
+            trayActions.emit(action)
+            return true
+          },
+        },
+        shortcut: {
+          // `shortcut.pressed` (shell → host, issue #6 callback): the shell
+          // already filtered to registered chords and key-down edges.
+          pressed: (event: ShortcutPressEvent) => {
+            shortcutPresses.emit(event)
+            return true
+          },
         },
       },
     },
-  })
+  )
   const remote = channel.getAPI()
   // Build the bridge explicitly. The remote proxy is function-shaped and its
   // `set` trap turns property assignment into an RPC, so own properties must

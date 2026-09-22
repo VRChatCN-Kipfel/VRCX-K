@@ -88,7 +88,12 @@ export function validateGroups(groups: readonly TrayGroup[]): string | undefined
     }
   }
   // Full schema validation (ids, limits, host-target privilege rules, ...).
-  const snapshot = { schemaVersion: TRAY_SCHEMA_VERSION, generation: 0, revision: 0, groups: [...groups] }
+  const snapshot = {
+    schemaVersion: TRAY_SCHEMA_VERSION,
+    generation: 0,
+    revision: 0,
+    groups: [...groups],
+  }
   if (!validateTrayMenuSnapshot(snapshot)) {
     const details = (validateTrayMenuSnapshot.errors ?? [])
       .map((error) => `${error.instancePath} ${error.message}`)
@@ -153,7 +158,9 @@ export class TrayService extends Service {
 
   /** Whether the shell holds the latest accepted content. */
   get inSync(): boolean {
-    return this.contentFingerprint !== undefined && this.contentFingerprint === this.pushedFingerprint
+    return (
+      this.contentFingerprint !== undefined && this.contentFingerprint === this.pushedFingerprint
+    )
   }
 
   // ── shell attachment ────────────────────────────────────────────────────
@@ -166,7 +173,11 @@ export class TrayService extends Service {
   attachShell(push: TrayPush): void {
     if (this.closed) return
     this.push = push
-    if (this.contentFingerprint !== undefined && this.contentFingerprint !== this.pushedFingerprint && this.lastGroups) {
+    if (
+      this.contentFingerprint !== undefined &&
+      this.contentFingerprint !== this.pushedFingerprint &&
+      this.lastGroups
+    ) {
       this.enqueue(this.lastGroups)
     }
   }
@@ -267,7 +278,11 @@ export class TrayService extends Service {
           verdict = { status: "pushed", revision, changed: true }
         } else {
           this.rollbackAccepted(fingerprint)
-          verdict = { status: "error", revision, error: result?.error ?? "shell rejected the tray snapshot" }
+          verdict = {
+            status: "error",
+            revision,
+            error: result?.error ?? "shell rejected the tray snapshot",
+          }
         }
       } catch (error) {
         this.rollbackAccepted(fingerprint)
@@ -283,7 +298,8 @@ export class TrayService extends Service {
    * `unchanged`).
    */
   private rollbackAccepted(failedFingerprint: string): void {
-    if (this.contentFingerprint === failedFingerprint) this.contentFingerprint = this.pushedFingerprint
+    if (this.contentFingerprint === failedFingerprint)
+      this.contentFingerprint = this.pushedFingerprint
   }
 
   // ── action fan-out ──────────────────────────────────────────────────────

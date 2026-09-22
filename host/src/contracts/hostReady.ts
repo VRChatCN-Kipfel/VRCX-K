@@ -22,7 +22,8 @@ import type { VRCXKHostReady } from "./hostReady.generated"
 /** The `schemaVersion` this build speaks. Mirrors the schema's `const`. */
 export const HOST_READY_SCHEMA_VERSION = 1 as const
 
-export const HOST_READY_SCHEMA_ID = "https://vrcx-k.dev/contracts/host-ready/v1/host-ready.schema.json"
+export const HOST_READY_SCHEMA_ID =
+  "https://vrcx-k.dev/contracts/host-ready/v1/host-ready.schema.json"
 
 /** The handshake the host sends and the shell validates. */
 export type HostReady = VRCXKHostReady
@@ -163,7 +164,10 @@ function isPaths(value: unknown): boolean {
 function isCapacity(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
   const group = value as Record<string, unknown>
-  if (Object.keys(group).some((key) => !["capturedAtMs", "cpuCount", "totalMemBytes"].includes(key))) return false
+  if (
+    Object.keys(group).some((key) => !["capturedAtMs", "cpuCount", "totalMemBytes"].includes(key))
+  )
+    return false
   const safe = (v: unknown, min: number): boolean => Number.isSafeInteger(v) && (v as number) >= min
   return (
     safe(group.capturedAtMs, 0) &&

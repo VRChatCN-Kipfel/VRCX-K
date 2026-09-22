@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
-import { binding, canonicalExistingPath, canonicalFileUrl, canonicalPath, mapPath, watchKey } from "../src/watch-path"
+import {
+  binding,
+  canonicalExistingPath,
+  canonicalFileUrl,
+  canonicalPath,
+  mapPath,
+  watchKey,
+} from "../src/watch-path"
 
 const root = join(import.meta.dir, "fixtures", "watcher")
 
@@ -59,7 +66,9 @@ describe("watch path normalization", () => {
 
 describe("URL to entry mapping", () => {
   const alpha = binding("alpha", join(root, "alpha", "index.ts"), [join(root, "alpha")])
-  const nested = binding("nested", join(root, "alpha", "nested", "index.ts"), [join(root, "alpha", "nested")])
+  const nested = binding("nested", join(root, "alpha", "nested", "index.ts"), [
+    join(root, "alpha", "nested"),
+  ])
   const sharedA = binding("shared-a", join(root, "a.ts"), [join(root, "shared")])
   const sharedB = binding("shared-b", join(root, "b.ts"), [join(root, "shared")])
 

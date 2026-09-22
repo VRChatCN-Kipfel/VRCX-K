@@ -153,7 +153,9 @@ test("the shared contract module stays free of host-only globals", async () => {
 test("the extension slot accepts bounded scalar additions", () => {
   // This is what keeps the road from narrowing: a future fact can travel
   // without a schema-version bump, while the named groups stay strict.
-  expect(isHostReady({ ...valid, extra: { buildId: "abc123", beta: true, score: 0.5, none: null } })).toBe(true)
+  expect(
+    isHostReady({ ...valid, extra: { buildId: "abc123", beta: true, score: 0.5, none: null } }),
+  ).toBe(true)
   // Absent/empty is legal — "nothing extra", not "malformed".
   expect(isHostReady({ ...valid, extra: {} })).toBe(true)
 })
@@ -172,7 +174,10 @@ test("the extension slot is bounded, not a free-for-all", () => {
 // the two implementations once disagreed about `extra` — Rust accepted nested
 // objects, arrays, bad keys and oversized maps that this guard rejected — and
 // testing each side against its own hand-written table could not have caught it.
-const corpusPath = new URL("../../contracts/host-ready/v1/guard-parity.corpus.json", import.meta.url)
+const corpusPath = new URL(
+  "../../contracts/host-ready/v1/guard-parity.corpus.json",
+  import.meta.url,
+)
 const corpus = (await Bun.file(corpusPath).json()) as {
   maxProperties: number
   cases: Array<{ name: string; expect: boolean; extra: Record<string, unknown> }>
@@ -186,7 +191,11 @@ test("the shared extra parity corpus agrees with the schema bound", () => {
 test("TS guard agrees with the shared extra parity corpus", () => {
   // Name the offending cases, not just a count, so a drift identifies itself.
   const disagreements = corpus.cases
-    .map((c) => ({ name: c.name, expect: c.expect, got: isHostReady({ ...valid, extra: c.extra }) }))
+    .map((c) => ({
+      name: c.name,
+      expect: c.expect,
+      got: isHostReady({ ...valid, extra: c.extra }),
+    }))
     .filter((r) => r.got !== r.expect)
     .map((d) => `${d.name}: expected ${d.expect}, got ${d.got}`)
   expect(disagreements).toEqual([])

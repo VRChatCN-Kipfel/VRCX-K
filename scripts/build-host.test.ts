@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { bunTargetForTriple, compileFailureMessage, parseArgs, resolveTargetTriple, sidecarName, RUST_TO_BUN_TARGET } from "./build-host"
+import {
+  bunTargetForTriple,
+  compileFailureMessage,
+  parseArgs,
+  resolveTargetTriple,
+  sidecarName,
+  RUST_TO_BUN_TARGET,
+} from "./build-host"
 
 describe("sidecar target mapping", () => {
   test("maps the full supported matrix without hard-coding x64", () => {
@@ -14,7 +21,9 @@ describe("sidecar target mapping", () => {
   })
 
   test("bunTargetForTriple fails fast on unknown triples", () => {
-    expect(() => bunTargetForTriple("sparc64-unknown-linux-gnu")).toThrow(/unsupported Rust target triple/)
+    expect(() => bunTargetForTriple("sparc64-unknown-linux-gnu")).toThrow(
+      /unsupported Rust target triple/,
+    )
   })
 
   test("sidecarName appends .exe only for windows triples", () => {
@@ -41,20 +50,16 @@ describe("target triple resolution", () => {
     }
   })
 
-  test(
-    "falls back to rustc host tuple",
-    () => {
-      const previous = process.env.TAURI_ENV_TARGET_TRIPLE
-      try {
-        delete process.env.TAURI_ENV_TARGET_TRIPLE
-        const triple = resolveTargetTriple()
-        expect(triple).toMatch(/^(x86_64|aarch64|i686)/)
-      } finally {
-        if (previous !== undefined) process.env.TAURI_ENV_TARGET_TRIPLE = previous
-      }
-    },
-    30_000, // first rustc invocation can be a slow cold start on Windows
-  )
+  test("falls back to rustc host tuple", () => {
+    const previous = process.env.TAURI_ENV_TARGET_TRIPLE
+    try {
+      delete process.env.TAURI_ENV_TARGET_TRIPLE
+      const triple = resolveTargetTriple()
+      expect(triple).toMatch(/^(x86_64|aarch64|i686)/)
+    } finally {
+      if (previous !== undefined) process.env.TAURI_ENV_TARGET_TRIPLE = previous
+    }
+  }, 30_000) // first rustc invocation can be a slow cold start on Windows
 
   test("fails fast when no triple source is available", () => {
     const previousEnv = process.env.TAURI_ENV_TARGET_TRIPLE
@@ -79,7 +84,9 @@ describe("CLI argument parsing", () => {
       targetTriple: "aarch64-pc-windows-msvc",
       outDir: "tmp",
     })
-    expect(parseArgs(["--triple", "x86_64-unknown-linux-gnu"])).toEqual({ targetTriple: "x86_64-unknown-linux-gnu" })
+    expect(parseArgs(["--triple", "x86_64-unknown-linux-gnu"])).toEqual({
+      targetTriple: "x86_64-unknown-linux-gnu",
+    })
     expect(parseArgs(["-h"])).toEqual({ help: true })
     expect(parseArgs([])).toEqual({})
   })
@@ -87,7 +94,9 @@ describe("CLI argument parsing", () => {
   test("a valueless --target-triple is an error instead of a silent fallback", () => {
     expect(() => parseArgs(["--target-triple"])).toThrow(/requires a Rust target triple/)
     // A following flag is not a value either.
-    expect(() => parseArgs(["--target-triple", "--out-dir", "x"])).toThrow(/requires a Rust target triple/)
+    expect(() => parseArgs(["--target-triple", "--out-dir", "x"])).toThrow(
+      /requires a Rust target triple/,
+    )
   })
 
   test("a valueless --out-dir is an error", () => {

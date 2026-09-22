@@ -59,7 +59,13 @@ const snapshot: TrayMenuSnapshot = {
           label: "Reload",
           enabled: true,
           visible: true,
-          action: { target: "host", command: "host.reload", args: [], danger: "safe", confirm: false },
+          action: {
+            target: "host",
+            command: "host.reload",
+            args: [],
+            danger: "safe",
+            confirm: false,
+          },
         },
       ],
     },
@@ -102,7 +108,12 @@ describe("host ↔ shell tray protocol", () => {
     const promise = bridge.tray.setSnapshot(snapshot)
     await tick()
 
-    const frame = wire.sent.at(-1) as { id: string; op: string; p: string[]; a: Array<{ v?: unknown }> }
+    const frame = wire.sent.at(-1) as {
+      id: string
+      op: string
+      p: string[]
+      a: Array<{ v?: unknown }>
+    }
     expect(frame.op).toBe("call")
     expect(frame.p).toEqual(["shell", "tray", "setSnapshot"])
     // kkrpc value envelope: the single argument carries the snapshot verbatim.

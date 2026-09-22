@@ -111,7 +111,11 @@ test("shell-attached host stops when the shell end of stdin goes away", async ()
   // host is free to be mid-`await shell.ready` when it lands.
   proc.stdin!.end?.()
 
-  const code = await withDeadline(proc.exited, 20_000, "host did not stop after the shell end closed")
+  const code = await withDeadline(
+    proc.exited,
+    20_000,
+    "host did not stop after the shell end closed",
+  )
   expect(code).toBe(0)
 }, 40_000)
 
@@ -155,7 +159,11 @@ test("shell dying mid-handshake is a clean stop, not a fatal bootstrap error", a
   // exactly the race this test pins.
   proc.stdin!.end?.()
 
-  const code = await withDeadline(proc.exited, 20_000, "host did not stop after the shell end closed")
+  const code = await withDeadline(
+    proc.exited,
+    20_000,
+    "host did not stop after the shell end closed",
+  )
   await collector
   const stderr = seen()
 

@@ -124,7 +124,9 @@ describe("appendLog", () => {
 
 describe("pushSignature", () => {
   test("omitted and explicitly-undefined fields share one signature", () => {
-    expect(pushSignature({ type: "closed" })).toBe(pushSignature({ type: "closed", entryId: undefined }))
+    expect(pushSignature({ type: "closed" })).toBe(
+      pushSignature({ type: "closed", entryId: undefined }),
+    )
   })
 
   test("entry order participates in the signature", () => {
@@ -178,8 +180,12 @@ describe("dedupPush", () => {
 
   test("a different payload is never a duplicate", () => {
     const first = dedupPush(null, reloadPush(), 0)
-    expect(dedupPush(first.state, reloadPush({ status: "kept-old", error: "boom" }), 10).duplicate).toBe(false)
-    expect(dedupPush(first.state, reloadPush({ entryId: "plugin.other" }), 10).duplicate).toBe(false)
+    expect(
+      dedupPush(first.state, reloadPush({ status: "kept-old", error: "boom" }), 10).duplicate,
+    ).toBe(false)
+    expect(dedupPush(first.state, reloadPush({ entryId: "plugin.other" }), 10).duplicate).toBe(
+      false,
+    )
     expect(dedupPush(first.state, { type: "change", path: "src/x.ts" }, 10).duplicate).toBe(false)
     expect(dedupPush(first.state, { type: "change", path: "src/y.ts" }, 10).duplicate).toBe(false)
     expect(dedupPush(null, reloadPush(), 10).duplicate).toBe(false)
@@ -201,7 +207,9 @@ describe("idleHint", () => {
     expect(hint).toContain("本页面尚未收到")
     // The old false-negative wording must be gone: an F5 leaves everReceived
     // false even though the watcher is running (started is emitted once).
-    expect(hint).not.toBe("未收到 dev-watch 事件：宿主需以 VRCXK_DEV_WATCH=1 启动（重启宿主后生效）")
+    expect(hint).not.toBe(
+      "未收到 dev-watch 事件：宿主需以 VRCXK_DEV_WATCH=1 启动（重启宿主后生效）",
+    )
     expect(hint).toContain("刚刷新页面属正常")
     expect(hint).toContain("VRCXK_DEV_WATCH=1")
   })

@@ -68,13 +68,10 @@ const manifest = (over: Record<string, unknown> = {}) =>
 
 describe("loadManifests wiring", () => {
   test("registers a plugin that declares a manifest, keyed by the entry-id SUFFIX", async () => {
-    const f = await bootWith(
-      `- id: with-manifest\n  name: ./plugins/with-manifest.ts\n`,
-      {
-        "plugins/with-manifest.ts": `export function apply() {}\n`,
-        "plugins/.vrcxk/manifest.json": "{}", // unused, keeps the dir creation obvious
-      },
-    )
+    const f = await bootWith(`- id: with-manifest\n  name: ./plugins/with-manifest.ts\n`, {
+      "plugins/with-manifest.ts": `export function apply() {}\n`,
+      "plugins/.vrcxk/manifest.json": "{}", // unused, keeps the dir creation obvious
+    })
     try {
       // The manifest lives beside the plugin FILE's directory, i.e. plugins/.
       const manifestPath = join(f.root, "plugins", ".vrcxk", "manifest.json")
@@ -125,7 +122,10 @@ describe("loadManifests wiring", () => {
       // id is the identity every other layer keys on. If a manifest could claim
       // a different id than its entry, one plugin's declaration would be applied
       // to another's usage — surfacing much later as unexplained warnings.
-      await writeFile(join(f.root, "plugins", ".vrcxk", "manifest.json"), manifest({ id: "some-other-id" }))
+      await writeFile(
+        join(f.root, "plugins", ".vrcxk", "manifest.json"),
+        manifest({ id: "some-other-id" }),
+      )
       const ctx = new Context()
       ctx.baseUrl = pathToFileURL(f.root).href + "/"
       const result = await loadManifests(ctx, { subtree: { entries: f.entries } } as never)
@@ -142,7 +142,10 @@ describe("loadManifests wiring", () => {
       "plugins/.vrcxk/manifest.json": "{}",
     })
     try {
-      await writeFile(join(f.root, "plugins", ".vrcxk", "manifest.json"), manifest({ version: "not-a-version" }))
+      await writeFile(
+        join(f.root, "plugins", ".vrcxk", "manifest.json"),
+        manifest({ version: "not-a-version" }),
+      )
       const ctx = new Context()
       ctx.baseUrl = pathToFileURL(f.root).href + "/"
       const result = await loadManifests(ctx, { subtree: { entries: f.entries } } as never)
