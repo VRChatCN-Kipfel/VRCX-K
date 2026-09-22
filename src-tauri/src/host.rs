@@ -405,6 +405,25 @@ impl HostState {
         inner.lifecycle.last_error = Some("host restart storm cap reached".into());
     }
 
+    /// Record why a spawn attempt failed, so the reason reaches the SNAPSHOT.
+    ///
+    /// Before this existed the cause lived only in `eprintln!` output: the tray
+    /// and the UI showed `phase: backoff`/`failed` with a `lastError` that was
+    /// either `None` or the generic storm-cap message. That is how a rejected
+    /// `ready` handshake surfaced as the misleading "host did not call ready()
+    /// within 10s" — the shell knew the host HAD called ready and had been
+    /// refused, but that knowledge never left stderr.
+    ///
+    /// Kept separate from `mark_failed` because the two carry different text and
+    /// sit on different paths: this records the informative FIRST failure of a
+    /// streak, while `mark_failed` records the terminal giving-up state.
+    fn record_spawn_error(&self, reason: &str) {
+        let mut inner = self.inner.lock().expect("host");
+        // Clamp to the schema's `lastError` maxLength so a long message cannot
+        // produce a snapshot the contract's own guard would reject.
+        inner.lifecycle.last_error = Some(reason.chars().take(4096).collect());
+    }
+
     /// Restore the running intent after a Restart command stopped the current
     /// generation (dispatch already reduced phase=Starting, desired=Running;
     /// the stop helper temporarily latched Stopped/Stopping over it).
@@ -873,6 +892,11 @@ fn run_running_segment_inner(
                 // Spawn failures never reached Ready, so there is no stable
                 // window to forgive them: they always accumulate.
                 state.bump_streak();
+                // Put the reason in the SNAPSHOT, not just stderr: the tray and
+                // the UI read `lastError`, and a reason that never leaves the log
+                // is how a rejected handshake used to present as the misleading
+                // "host did not call ready() within 10s".
+                state.record_spawn_error(&failure.to_string());
                 eprintln!(
                     "[shell] host spawn failed: {failure} ({}/{})",
                     state.fail_streak(),
@@ -1113,13 +1137,16 @@ fn spawn_host_into(state: &HostState, app: Option<&AppHandle>) -> Result<HostRea
     // Destructure before `starting.tree` is moved into `adopt_inflight`, so the
     // wait can still see the ready slot and the refusal reason afterwards.
     let StartingHost {
-        tree, ready_slot, ..
+        tree,
+        ready_slot,
+        ready_error,
+        ..
     } = starting;
     if let Err(mut tree) = state.adopt_inflight(generation, tree, peer) {
         tree.kill_tree();
         return Err("stopped during spawn".into());
     }
-    let wait = wait_until_ready_in_state(state, generation, &ready_slot);
+    let wait = wait_until_ready_in_state(state, generation, &ready_slot, &ready_error);
     let ready = match wait {
         Ok(ready) => ready,
         Err(err) => {
@@ -1158,6 +1185,10 @@ struct StartingHost {
     tree: ProcessTree,
     peer: Arc<Peer>,
     ready_slot: Arc<Mutex<Option<HostReady>>>,
+    /// Why the `ready` handler REFUSED a handshake, if it did. Reported by the
+    /// wait instead of its generic timeout, so a refused handshake is not
+    /// indistinguishable from one that never arrived.
+    ready_error: Arc<Mutex<Option<String>>>,
 }
 
 fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
@@ -1204,9 +1235,17 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
     // The payload is parsed into the versioned contract type and validated
     // before it is stored, so a malformed or version-skewed handshake is refused
     // HERE.
-
+    //
+    // A refusal ALSO records its reason in `ready_error`, which
+    // `wait_until_ready_in_state` reports instead of its generic timeout. Without
+    // that, refusing a handshake looked identical to the host never sending one:
+    // the wait ran out its full 10s and reported "host did not call ready()
+    // within 10s", blaming the host for the shell's own refusal — while the real
+    // cause sat in stderr where the tray and UI cannot see it.
     let ready_slot: Arc<Mutex<Option<HostReady>>> = Arc::new(Mutex::new(None));
+    let ready_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let ready_handler = Arc::clone(&ready_slot);
+    let ready_error_handler = Arc::clone(&ready_error);
     peer.on(
         "ready",
         Arc::new(move |args| {
@@ -1216,8 +1255,8 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
                         *ready_handler.lock().expect("ready slot") = Some(ready);
                     }
                     Ok(ready) => {
-                        eprintln!(
-                            "[shell] host sent an unsupported ready handshake \
+                        let reason = format!(
+                            "host sent an unsupported ready handshake \
                              (schemaVersion={}, expected={}, port={}, token_len={}, hostVersion={:?})",
                             ready.schema_version,
                             crate::host_ready::HOST_READY_SCHEMA_VERSION,
@@ -1225,9 +1264,13 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
                             ready.token.len(),
                             ready.host_version,
                         );
+                        eprintln!("[shell] {reason}");
+                        *ready_error_handler.lock().expect("ready error") = Some(reason);
                     }
                     Err(err) => {
-                        eprintln!("[shell] host sent a malformed ready handshake: {err}");
+                        let reason = format!("host sent a malformed ready handshake: {err}");
+                        eprintln!("[shell] {reason}");
+                        *ready_error_handler.lock().expect("ready error") = Some(reason);
                     }
                 }
             }
@@ -1242,6 +1285,7 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
         tree,
         peer,
         ready_slot,
+        ready_error,
     })
 }
 
@@ -1274,6 +1318,7 @@ fn wait_until_ready_in_state(
     state: &HostState,
     generation: u64,
     ready_slot: &Mutex<Option<HostReady>>,
+    ready_error: &Mutex<Option<String>>,
 ) -> Result<HostReady, SpawnFailure> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1282,6 +1327,13 @@ fn wait_until_ready_in_state(
         }
         if let Some(ready) = ready_slot.lock().expect("ready slot").clone() {
             return Ok(ready);
+        }
+        // The host DID send a handshake and the shell refused it. Report that
+        // immediately and specifically: waiting out the full timeout would
+        // report "did not call ready()", which is false, and would send a reader
+        // looking at the host instead of at the refusal reason.
+        if let Some(reason) = ready_error.lock().expect("ready error").clone() {
+            return Err(SpawnFailure::Retry(reason));
         }
         {
             let mut inner = state.inner.lock().expect("host");
@@ -2406,6 +2458,54 @@ mod tests {
                 .contains("reload requested without a ready host"),
             "unexpected last_error: {:?}",
             snapshot.last_error
+        );
+    }
+
+    /// A refused `ready` handshake must reach the SNAPSHOT, not only stderr.
+    ///
+    /// This is the substance of the review's fourth point: the tray and the UI
+    /// read `lastError`, so a refusal whose reason never leaves `eprintln!` is
+    /// invisible to the user — and the wait then reports the generic "host did
+    /// not call ready() within 10s", which blames the host for the shell's own
+    /// refusal.
+    #[test]
+    fn a_spawn_error_reaches_the_snapshot() {
+        let state = HostState::default();
+        state.record_spawn_error("host sent an unsupported ready handshake (schemaVersion=2)");
+        let snapshot = state.lifecycle_snapshot();
+        assert!(
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("unsupported ready handshake"),
+            "unexpected last_error: {:?}",
+            snapshot.last_error
+        );
+    }
+
+    /// The recorded reason must stay inside the contract's `lastError` bound, or
+    /// the snapshot would carry a value the schema's own guard rejects.
+    #[test]
+    fn a_spawn_error_is_clamped_to_the_contract_bound() {
+        let state = HostState::default();
+        state.record_spawn_error(&"x".repeat(10_000));
+        let snapshot = state.lifecycle_snapshot();
+        let len = snapshot.last_error.as_deref().unwrap_or("").chars().count();
+        assert!(len <= 4096, "lastError must respect maxLength: got {len}");
+
+        // Read the bound out of the SCHEMA rather than trusting the literal
+        // above: if the contract tightens, this test is what notices.
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../contracts/host-lifecycle/v1/host-lifecycle.schema.json"
+        ))
+        .unwrap();
+        let max = schema["properties"]["lastError"]["maxLength"]
+            .as_u64()
+            .expect("lastError.maxLength must be a number");
+        assert!(
+            (len as u64) <= max,
+            "lastError length {len} exceeds the schema bound {max}"
         );
     }
 }
