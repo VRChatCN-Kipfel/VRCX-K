@@ -7,9 +7,9 @@
 //      heartbeat entry (a loose match used to make unrelated plugins break
 //      host startup).
 import { describe, expect, test } from "bun:test"
-import { Context } from "cordis"
 import type { Entry } from "@cordisjs/plugin-loader"
-import { FIBER_ACTIVE, FIBER_FAILED, declaresHeartbeat } from "../src/fiber"
+import { Context } from "cordis"
+import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "../src/fiber"
 
 describe("cordis fiber states used by the readiness check", () => {
   test("ACTIVE is observed on a live plugin fiber", async () => {
@@ -33,8 +33,7 @@ describe("declaresHeartbeat", () => {
   function includeWith(entries: Array<{ id?: string; name?: string }>): Entry {
     return {
       subtree: {
-        entries: () =>
-          entries.map((options) => ({ options })),
+        entries: () => entries.map((options) => ({ options })),
       },
     } as unknown as Entry
   }
@@ -43,9 +42,9 @@ describe("declaresHeartbeat", () => {
     expect(declaresHeartbeat(includeWith([{ id: "heartbeat" }]))).toBe(true)
     expect(declaresHeartbeat(includeWith([{ name: "./plugins/heartbeat.ts" }]))).toBe(true)
     expect(declaresHeartbeat(includeWith([{ name: "plugins\\heartbeat.js" }]))).toBe(true)
-    expect(declaresHeartbeat(includeWith([{ id: "heartbeat", name: "./plugins/heartbeat.ts" }]))).toBe(
-      true,
-    )
+    expect(
+      declaresHeartbeat(includeWith([{ id: "heartbeat", name: "./plugins/heartbeat.ts" }])),
+    ).toBe(true)
   })
 
   test("does not match unrelated plugins that merely contain the word", () => {

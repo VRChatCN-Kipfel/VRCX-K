@@ -50,7 +50,10 @@ describe("host platform / arch mapping", () => {
 describe("compatibility verdicts", () => {
   test("no declaration means pure JS and runs anywhere", () => {
     for (const host of [winX64, winArm, macArm, linuxX64]) {
-      expect(checkPlatformCompatibility({}, host)).toEqual({ compatible: true, reason: "no-declaration" })
+      expect(checkPlatformCompatibility({}, host)).toEqual({
+        compatible: true,
+        reason: "no-declaration",
+      })
     }
   })
 
@@ -65,9 +68,15 @@ describe("compatibility verdicts", () => {
     // With one combined enum this had to be spelled `windows-x64`; splitting the
     // axes is what lets the same fact be stated without mixing them.
     const decl = { platforms: ["windows"] as const, arch: ["x64"] as const }
-    expect(checkPlatformCompatibility(decl, winX64)).toEqual({ compatible: true, reason: "declared" })
+    expect(checkPlatformCompatibility(decl, winX64)).toEqual({
+      compatible: true,
+      reason: "declared",
+    })
     expect(checkPlatformCompatibility(decl, winArm)).toEqual({ compatible: false, reason: "arch" })
-    expect(checkPlatformCompatibility(decl, macArm)).toEqual({ compatible: false, reason: "platform" })
+    expect(checkPlatformCompatibility(decl, macArm)).toEqual({
+      compatible: false,
+      reason: "platform",
+    })
   })
 
   test("arch alone still constrains every platform", () => {
@@ -90,7 +99,9 @@ describe("compatibility verdicts", () => {
       compatible: false,
       reason: "unsupported-host",
     })
-    expect(checkPlatformCompatibility({ platforms: ["windows"] }, { platform: "win32", arch: "ia32" })).toEqual({
+    expect(
+      checkPlatformCompatibility({ platforms: ["windows"] }, { platform: "win32", arch: "ia32" }),
+    ).toEqual({
       compatible: false,
       reason: "unsupported-host",
     })

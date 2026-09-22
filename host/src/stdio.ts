@@ -1,11 +1,11 @@
+import type { Context } from "cordis"
 import { RPCChannel, type RPCMessage, type Transport } from "kkrpc"
 import { nodeStdioTransport } from "kkrpc/stdio"
-import { HOST_RESTART_EXIT, HOST_STDIO_LOST_EXIT, hostWsAPI } from "./api"
+import { HOST_RESTART_EXIT, hostWsAPI } from "./api"
 import { gracefulStopWithTimeout, stopOnStdinLoss } from "./lifecycle"
 import { stdinIsPeerChannel } from "./stdin-watch"
-import type { Context } from "cordis"
-import type { HostWsReady } from "./ws"
 import type { TrayMenuSnapshot } from "./tray-contract.generated"
+import type { HostWsReady } from "./ws"
 
 /** Result of `shell.tray.setSnapshot` (mirrors src-tauri/src/shell_sys.rs). */
 export type TraySetSnapshotResult = {
@@ -333,7 +333,10 @@ export function withWriteFailureObserver(inner: Transport<RPCMessage>) {
  * `options.transport` exists for tests (an in-memory transport pair); the
  * default is the real bun stdio transport.
  */
-export function connectShellStdio(ctx: Context, options: { transport?: Transport<RPCMessage> } = {}): ShellStdioBridge {
+export function connectShellStdio(
+  ctx: Context,
+  options: { transport?: Transport<RPCMessage> } = {},
+): ShellStdioBridge {
   const trayActions = fanout<TrayActionEvent>("tray.action")
   const shortcutPresses = fanout<ShortcutPressEvent>("shortcut.pressed")
   // #33: EOF on the shell's stdin channel means the shell is gone. Its
@@ -363,7 +366,15 @@ export function connectShellStdio(ctx: Context, options: { transport?: Transport
   // `shell.ready` that nothing distinguishes from a genuine startup error.
   // A test-supplied transport is used as-is — it owns its streams.
   const observed = usesDefaultTransport ? withWriteFailureObserver(bunStdioTransport()) : undefined
-  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(observed ? observed.transport : options.transport!, {
+  // Narrow once, so neither consumer below needs a non-null assertion: either we
+  // built the observed wrapper (default transport) or the caller supplied one.
+  // The guard is a real check, not a formality — a caller that passes an
+  // explicit `undefined` would otherwise reach RPCChannel with no transport.
+  const transport = observed ? observed.transport : options.transport
+  if (!transport) {
+    throw new TypeError("host stdio: no transport available (neither default nor supplied)")
+  }
+  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(transport, {
     onClose: watchStdinLoss
       ? (reason) => {
           console.error(

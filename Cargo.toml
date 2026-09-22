@@ -7,6 +7,23 @@ resolver = "2"
 # cargo commands run from the repo root operate on it uniformly.
 
 [profile.release]
+# ⚠ 不要删这一行。它来自 create-tauri-app 模板（注释指向 tauri.app/concept/size），
+#   看起来像"为了体积牺牲编译速度"的包袱，但实测**删掉它会让 android 构建慢一倍**：
+#
+#     保留 codegen-units = 1 : 各 ABI 只重编 ~10 个 crate，build 共 6m20s
+#     删除（即默认 16）      : 各 ABI 重编 ~213 个 crate，build 共 11m25s
+#
+#   机制：codegen-units 是【编译期 codegen 参数，会进入 cargo 的 fingerprint】。
+#   改动它 ⇒ 全部依赖的 fingerprint 失效 ⇒ 每个 target 重编整棵依赖树，rust-cache
+#   形同失效（实测日志里缓存仍报 full match，但产物因指纹变化无法复用）。
+#   保留它时 511 个依赖正常命中缓存，每 target 只需重编本仓库的 ~10 个 crate
+#   再做一次 fat-LTO 链接。
+#
+#   即那 ~45s/target 是 **LTO 链接的固有成本，不是 codegen-units 的代价**。
+#   rustc 文档说 "may be slower to compile" 是在【冷编译】语境下；在有缓存的
+#   CI 上结论相反。改 profile 类参数务必做同缓存的受控实测。
+#
+#   证据：run 35715896263（含本行）vs run 35726109285（曾删除本行）。
 codegen-units = 1
 lto = true
 opt-level = 3

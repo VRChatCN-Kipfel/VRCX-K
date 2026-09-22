@@ -91,8 +91,15 @@ VRCX-K/
 | `bun run dev:host` | 起 Cordis 宿主（host/） |
 | `bun run build:host` | 编译 host |
 | `bun run typecheck` | 前端 + app + host 三套类型检查 |
+| `bun run check:contracts` | schema ↔ 生成镜像逐字节比对（漂移闸门） |
+| `bun run check:js` | JS/TS 格式化 + lint + import 排序（`biome ci`，**只读**） |
+| `bun run format` | 按 biome 配置**写入**格式化（改文件） |
+| `bun run lint` | 按 biome 推荐集**写入** lint 修复（改文件） |
 | `bun run test` | 前端与 host 测试 |
-| **`bun run verify`** | **= typecheck + test + build，提交前必跑** |
+| **`bun run verify`** | **= typecheck + check:contracts + check:js + test + build，提交前必跑** |
+
+> `biome` 已 pin 在 devDependencies（`2.5.14`，与 `biome.json` 的 `$schema` 对齐）。
+> 不要改用 `bunx @biomejs/biome@latest`：上游发新版会在没人改代码的情况下让门控变红。
 
 ### 环境要求
 
@@ -106,9 +113,43 @@ VRCX-K/
 
 ### 交付前自检
 
-- `bun run verify` 全绿；Rust 侧 `cargo fmt --check` + `cargo clippy -- -D warnings` + `cargo test` 全绿。
+> **提交前必须跑完全部五道门控。** CI 侧的 `static-gates` job 就是这五道
+> （见 `.github/workflows/build.yml`），本地命令与 CI 判据**逐条对应**：
+> 本地跑过就等于预演过 CI，不要只跑一部分就提交。
+
+| # | 门控 | 本地命令 | 覆盖 |
+|---|---|---|---|
+| 1 | Rust 格式 | `cargo fmt --all --check` | `src-tauri/` |
+| 2 | Rust lint | `cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings` | `src-tauri/`（警告即失败） |
+| 3 | TS 类型 | `bun run typecheck` | 前端 + host + 五套 tsconfig |
+| 4 | JS/TS 格式 + lint | `bun run check:js` | 见 `biome.json` 的 `files.includes`（biome，含 import 排序）。当前覆盖 **84 个文件**：`src/**`（ts/tsx/css）、`host/src`、`host/tests`、`host/plugins`、`scripts`、`packages`、`examples`、根 `vite.config.ts` / `index.ts` / `index.html`；**不含** `docs/probes/**`（一次性实验代码，见其 README）与 `*.generated.ts`（契约镜像，归 `check:contracts`）。warning 也阻塞（`--error-on-warnings`） |
+| 5 | 契约漂移 | `bun run check:contracts` | schema ↔ 生成镜像逐字节 |
+| 6 | android 冒烟判据 | `bash scripts/android-smoke.test.sh` | `scripts/android-smoke.sh` 的崩溃判据（6 场景，自带假 adb，**无需设备/SDK**；约几百毫秒） |
+
+⚠ **本地自检只要求 1–5 道**（与 `verify` 的原始定义对齐）。第 6 道在 CI 里已接进
+`static-gates` job；改动 `scripts/android-smoke.sh` 的判据时**必须**本地跑它 ——
+它钉住了两个静默失效方向（误报别的进程崩溃、漏报原生崩溃）。
+
+⚠ **`bun run verify` 只等于第 3–5 道加测试与构建**，它的定义是
+`typecheck + check:contracts + check:js + test + build` —— **不含**
+`cargo fmt` / `cargo clippy` / `cargo test` 三道 Rust 门控。**"verify 全绿"不等于
+自检通过**，那三道必须单独跑（或用下面的一行脚本）。
+
+一行跑完全部五道（PowerShell / bash 通用）：
+
+```bash
+cargo fmt --all --check \
+  && cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings \
+  && cargo test --locked --manifest-path src-tauri/Cargo.toml \
+  && bun run verify
+```
+
 - 新增行为**必须有测试钉住**（回归测试优先于断言强度：宁可多写一条会失败的用例，也别把断言放宽）。
 - 纯格式化/漂移修复**单独提交**，不与功能 diff 混在一起。
+- **尽力而为，不要卡死**：若某道门控因**环境原因**（缺系统库、平台不支持、
+  工具未装）在本地跑不起来，**照实说明跑不了哪一道、为什么**，不要把"没跑"
+  说成"通过"，也不要为了让它通过而放宽断言或屏蔽规则。能让 CI 兜住的
+  就交给 CI，但**必须在提交信息里写明**哪一道未在本地验证。
 
 ## Git 约定
 
@@ -124,6 +165,29 @@ VRCX-K/
 
 示例：`feat(host): 接入上游 plugin-timer，去掉手写定时器`
 - `.gitignore` 只放通用忽略（node_modules/dist//target/ 等）。
+
+### ⚠ 旧 clone 必须先刷一次行尾（否则门控 4 会一直红）
+
+本仓库在 `.gitattributes` 落地**之前** clone 出来的工作区，文件是 **CRLF**
+（受 `core.autocrlf=true` 影响），而 `biome.json` 的 `formatter.lineEnding: "lf"`
+会让 `bun run check:js` 在这些机器上**持续报错**，且报错信息**不会**说明这是检出问题。
+
+**在仓库根执行一次**（已实测：工作区 CRLF 2 → 0，且未提交改动被保留）：
+
+```bash
+git stash            # 收起未提交改动（关键，见下）
+git rm --cached -r . > /dev/null
+git reset --hard
+git stash pop
+```
+
+⚠ **不要用 `git add --renormalize .` 代替** —— 实测它是**空操作**：工作区 CRLF 数
+**2 → 2 不变**。它只重写索引，不重新检出工作区。先前有说法称"`--renormalize`
+实测 0 个文件被改动，所以安全" —— 那 **0 改动恰恰是"它什么也没做"的证据**，不是
+安全性证据。（`git reset --hard` 单独用确实能修好行尾，但会**丢弃未提交改动**，
+故上面的 `stash` / `stash pop` 不能省。）
+
+**更省心的替代**：直接重新 clone。
 
 ## 临时工作区（agent 专用）
 

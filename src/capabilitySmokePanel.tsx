@@ -16,13 +16,12 @@
 // `cancelled` + `unlisten`, so React 19 StrictMode double-invoke neither
 // double-subscribes nor leaks the listener.
 
-import { useEffect, useReducer, useState } from "react"
 import { invoke, isTauri } from "@tauri-apps/api/core"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
+import { useEffect, useReducer, useState } from "react"
 import {
   CAPABILITIES,
   CAPABILITY_LABEL,
-  SMOKE_BUTTONS,
   describeValue,
   formatPress,
   formatRedirect,
@@ -30,14 +29,15 @@ import {
   parseRedirectEvent,
   parseShortcutPress,
   parseSmokeReport,
+  type RedirectEvent,
   reduceSmoke,
   registeredAccelerator,
+  type ShortcutPress,
+  SMOKE_BUTTONS,
+  type SmokeButton,
   shortcutHint,
   singleInstanceHint,
   summarizeCapability,
-  type RedirectEvent,
-  type ShortcutPress,
-  type SmokeButton,
 } from "./capabilitySmokeCore"
 
 export function CapabilitySmokePanel() {
@@ -191,9 +191,9 @@ export function CapabilitySmokePanel() {
                   {view.presses.length === 0 ? (
                     <li>尚未收到按键</li>
                   ) : (
-                    [...view.presses].reverse().map((entry) => (
-                      <li key={entry.seq}>{formatPress(entry)}</li>
-                    ))
+                    [...view.presses]
+                      .reverse()
+                      .map((entry) => <li key={entry.seq}>{formatPress(entry)}</li>)
                   )}
                 </ul>
               </>
@@ -207,7 +207,7 @@ export function CapabilitySmokePanel() {
                   ) : (
                     view.redirects
                       .map((event, index) => (
-                        <li key={index}>{formatRedirect(event, index + 1)}</li>
+                        <li key={event.seq}>{formatRedirect(event, index + 1)}</li>
                       ))
                       .reverse()
                   )}

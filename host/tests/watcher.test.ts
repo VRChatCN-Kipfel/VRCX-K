@@ -26,7 +26,8 @@ function waitFor<T>(items: T[], predicate: (item: T) => boolean, timeout = 3_000
     const poll = () => {
       const found = items.find(predicate)
       if (found) return resolve(found)
-      if (Date.now() - started >= timeout) return reject(new Error("timed out waiting for watcher event"))
+      if (Date.now() - started >= timeout)
+        return reject(new Error("timed out waiting for watcher event"))
       setTimeout(poll, 10)
     }
     poll()
@@ -184,7 +185,9 @@ describe("HostWatcher", () => {
       debounceMs: 100,
       bindings: [binding("plugin", entry, [pluginRoot])],
       onEvent: (event) => events.push(event),
-      onChange: () => { callbackCount++ },
+      onChange: () => {
+        callbackCount++
+      },
     })
     await watcher.start()
     await writeFile(entry, "pending")
@@ -236,7 +239,9 @@ describe("HostWatcher", () => {
     await writeFile(join(pluginRoot, "util.ts"), "shared")
     await waitFor(changes, (path) => path === join(pluginRoot, "util.ts"))
     // The change mapped to the NEW binding id.
-    const reloadEvent = events.find((event) => event.type === "change") as { mapping?: { kind: string; entryIds: string[] } } | undefined
+    const reloadEvent = events.find((event) => event.type === "change") as
+      | { mapping?: { kind: string; entryIds: string[] } }
+      | undefined
     expect(reloadEvent?.mapping?.entryIds).toEqual(["renamed"])
     await watcher.close()
   })
@@ -245,7 +250,9 @@ describe("HostWatcher", () => {
     const { root, entry, pluginRoot } = await fixture()
     const events: WatcherEvent[] = []
     let release!: () => void
-    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
     let entered = false
     const watcher = new HostWatcher({
       roots: [root],

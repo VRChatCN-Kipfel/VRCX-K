@@ -9,6 +9,26 @@
 - **`docs/probes/` cannot resolve `host/node_modules`**: reference host-only dependencies explicitly as `../../host/node_modules/...` (existing convention; see `probe11`). **Check the depth**: a probe in a subdirectory needs one more `../` (`../../../host/node_modules/...`, as `stdio-lifecycle/*` does).
 - **Not every bare specifier is a hoisting accident — check `package.json` before "fixing" one.** A dependency declared in the **root** `package.json` (e.g. `kkrpc`, used by `src/host.ts` and also by probes) resolves from the repo root legitimately, so `import ... from "kkrpc"` in a probe is not itself a violation. The rule above exists for **host-only** dependencies (`cordis`, `@cordisjs/*`, `isomorphic-git`), which are absent from the root and would only resolve by luck.
 - **`bun -e` resolves bare specifiers against the CWD, not against your probe file.** A probe that spawns `bun -e "<code>"` (see `stdio-lifecycle/13-final-matrix.ts`) breaks the moment it is run from another directory, and the failure is **silent**: the child dies on import, prints nothing, and the probe reports "nothing fired" instead of "never ran". Resolve such modules in the parent with `Bun.resolveSync` / `pathToFileURL(...)` and inline the absolute `file://` URL. When a child can fail this way, assert on the child's own `shapeHonored`-style echo and exit non-zero rather than printing a table of `undefined`.
+- **Files under `docs/probes/` are NOT covered by the `biome` gate.** `biome.json`'s
+  `files.includes` lists `src/` (ts/tsx/**css**), `host/src/`, `host/tests/`,
+  `host/plugins/`, `scripts/`, `packages/`, `examples/`, and the root
+  `vite.config.ts` / `index.ts` / `index.html` — so `bun run check:js` reports
+  "Checked 84 files" while the repo holds ~124 `.ts`/`.tsx` files (plus CSS/HTML).
+  **A probe here can be unformatted, unsorted, and lint-dirty without CI noticing.**
+  This is deliberate (probes are throwaway experiment code, and they carry their own
+  conventions above), not an oversight — but do not read a green `check:js` as
+  "the whole repo is clean". If a probe gets **promoted** to durable code (moved into
+  `host/tests/`, `scripts/`, …), it enters the gate at that moment and must be formatted
+  then. Still outside `includes`: `contracts/*.schema.json` (has its own semantic check
+  in `check:contracts`), `docs/**/*.html` (generated arch diagram), and the local-state
+  JSON under `.agent-teams/` / `.mnemon/`.
+- **`.sh` files are never in the `biome` gate.** `biome` has no shell support and
+  `scripts/` only lists `**/*.ts`, so the three Android scripts
+  (`android-smoke.sh`, `android-debug-sign.sh`, `android-smoke.test.sh`) are **not**
+  covered by `check:js`. They are covered by **`bash -n` + shellcheck locally** and by
+  **CI's `static-gates` step 13** (`bash scripts/android-smoke.test.sh`, which pins the
+  crash-criteria of `android-smoke.sh`). Two different concerns — a green `check:js`
+  says nothing about shell scripts.
 
 ## `stdio-lifecycle/` (subdirectory)
 

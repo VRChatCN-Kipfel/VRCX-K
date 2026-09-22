@@ -166,7 +166,9 @@ export async function gracefulStopWithTimeout(
   // first trigger owns cleanup and the process exit.
   const acquired = signal.begin(initialMs, hardCapMs, reason)
   if (!acquired) {
-    console.error(`[host] graceful stop requested (${reason}) but a shutdown is already in progress — ignoring`)
+    console.error(
+      `[host] graceful stop requested (${reason}) but a shutdown is already in progress — ignoring`,
+    )
     return false
   }
 
@@ -179,12 +181,17 @@ export async function gracefulStopWithTimeout(
     console.error("[host] graceful cleanup completed with an error after timeout", err)
   })
 
+  // `begin()` returning true guarantees a deadline exists (`begin` assigns
+  // `_deadline` before returning true), but the accessor still admits null, so
+  // check instead of asserting. The `?? neverSettles` arm is unreachable in
+  // practice; it exists so the race below cannot be handed a bare `null`.
+  const deadline = signal.deadlinePromise
   const outcome = await Promise.race([
     cleanup.then(() => "done" as const),
     // Use the captured reference: `gracefulStop` above may already have torn
     // down the service, and re-reading `ctx.signal` here would dereference
     // `undefined` for the same reason guarded against at the top.
-    signal.deadlinePromise!,
+    deadline ?? new Promise<never>(() => {}),
   ])
 
   if (outcome === "timeout") {
@@ -231,7 +238,9 @@ export async function stopOnStdinLoss(ctx: Context, origin: "shell" | "launcher"
  * stands — the first trigger owns the exit.
  */
 export async function stopOnShellLost(ctx: Context): Promise<void> {
-  console.error("[host] shell went away during the ready handshake — graceful shutdown (stdio lost)")
+  console.error(
+    "[host] shell went away during the ready handshake — graceful shutdown (stdio lost)",
+  )
   const acquired = await gracefulStopWithTimeout(ctx, "stop")
   if (acquired) setTimeout(() => process.exit(HOST_STDIO_LOST_EXIT), 10)
 }

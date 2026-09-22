@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto"
 import type { AddressInfo } from "node:net"
+import type { Context } from "cordis"
 import { expose } from "kkrpc"
 import { webSocketTransport } from "kkrpc/ws"
 import { WebSocketServer } from "ws"
-import type { Context } from "cordis"
-import { hostWsAPI, HOST_VERSION } from "./api"
+import { HOST_VERSION, hostWsAPI } from "./api"
 import { HOST_READY_SCHEMA_VERSION, type HostReady } from "./contracts/hostReady"
 import { collectHostEnvironment } from "./host-environment"
 

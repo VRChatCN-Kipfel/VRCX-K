@@ -16,9 +16,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { Context } from "cordis"
 import Include from "@cordisjs/plugin-include"
 import Loader from "@cordisjs/plugin-loader"
+import { Context } from "cordis"
 import { createShellCapabilities, ShellHandle } from "../src/capability"
 import type { ShellStdioBridge } from "../src/stdio"
 
@@ -58,7 +58,7 @@ describe("capability attribution through the real loader", () => {
   test("callers audit as distinct identities, not the enclosing Include", async () => {
     const audit: string[] = []
     const ctx = new Context()
-    ctx.baseUrl = pathToFileURL(root).href + "/"
+    ctx.baseUrl = `${pathToFileURL(root).href}/`
     const handle = new ShellHandle((line) => audit.push(line))
     createShellCapabilities(ctx, handle)
     // Only `notify` is reached; the rest of the bridge is irrelevant here.

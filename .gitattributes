@@ -1,0 +1,23 @@
+# 统一行尾为 LF。
+#
+# 为什么必须有这个文件（根因，不是风格偏好）：
+#   本仓库此前【没有】.gitattributes，而本机 core.autocrlf=true —— 同一份文件
+#   在 Windows 工作区被检出为 CRLF、在 git 对象与 CI(Linux) 中是 LF。
+#   实测（同一文件 src/host.ts）：git 对象 LF=27 / 工作区 CRLF=27。
+#   这会让任何"格式检查"在本地与 CI 得到相反结论：biome 三种 lineEnding
+#   取值下（lf / crlf / auto）都无法同时通过两边，见下表（实测）：
+#     lineEnding=lf   + LF 文件   -> PASS ；+ CRLF 文件 -> FAIL
+#     lineEnding=crlf + CRLF 文件 -> PASS ；+ LF 文件   -> FAIL
+#     lineEnding=auto 跟随各自工作区，故 CI 与本地【必然一过一挂】
+#   ⇒ 显式声明 eol=lf，让"仓库里存什么、检出什么"一致，格式门控才有确定语义。
+* text=auto eol=lf
+
+# 二进制：显式声明，避免被当文本做行尾转换/差异比较。
+# （icon/图片由 Tauri 打包使用，被改一个字节就是坏资源。）
+*.png  binary
+*.ico  binary
+*.icns binary
+
+# 锁文件按文本处理（LF），便于 diff 阅读；不要用 binary 让它在 review 里消失。
+bun.lock text eol=lf
+Cargo.lock text eol=lf

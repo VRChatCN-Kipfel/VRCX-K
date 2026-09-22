@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, expect, test } from "bun:test"
 import { join } from "node:path"
-import { wrap, dispose } from "kkrpc"
+import { dispose, wrap } from "kkrpc"
 import { webSocketClientTransport } from "kkrpc/ws"
 import type { HostWsAPI } from "../src/api"
 import { HOST_VERSION } from "../src/api"

@@ -10,7 +10,9 @@ export const validateTrayMenuSnapshot: ValidateFunction<TrayMenuSnapshot> = ajv.
 
 export function assertTrayMenuSnapshot(value: unknown): asserts value is TrayMenuSnapshot {
   if (!validateTrayMenuSnapshot(value)) {
-    const details = (validateTrayMenuSnapshot.errors ?? []).map((error) => `${error.instancePath} ${error.message}`).join("; ")
+    const details = (validateTrayMenuSnapshot.errors ?? [])
+      .map((error) => `${error.instancePath} ${error.message}`)
+      .join("; ")
     throw new Error(`invalid tray menu snapshot: ${details}`)
   }
 }

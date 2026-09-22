@@ -19,10 +19,10 @@
 //     `setGroups` returns a `no-shell` verdict and the pending content is pushed
 //     once a shell attaches (`attachShell`).
 
-import { Service, type Context } from "cordis"
-import { validateTrayMenuSnapshot, TRAY_SCHEMA_VERSION } from "./tray_contract"
-import type { TrayGroup, TrayMenuSnapshot } from "./tray-contract.generated"
+import { type Context, Service } from "cordis"
 import type { TrayActionEvent, TraySetSnapshotResult } from "./stdio"
+import { TRAY_SCHEMA_VERSION, validateTrayMenuSnapshot } from "./tray_contract"
+import type { TrayGroup, TrayMenuSnapshot } from "./tray-contract.generated"
 
 declare module "cordis" {
   interface Context {
@@ -88,7 +88,12 @@ export function validateGroups(groups: readonly TrayGroup[]): string | undefined
     }
   }
   // Full schema validation (ids, limits, host-target privilege rules, ...).
-  const snapshot = { schemaVersion: TRAY_SCHEMA_VERSION, generation: 0, revision: 0, groups: [...groups] }
+  const snapshot = {
+    schemaVersion: TRAY_SCHEMA_VERSION,
+    generation: 0,
+    revision: 0,
+    groups: [...groups],
+  }
   if (!validateTrayMenuSnapshot(snapshot)) {
     const details = (validateTrayMenuSnapshot.errors ?? [])
       .map((error) => `${error.instancePath} ${error.message}`)
@@ -153,7 +158,9 @@ export class TrayService extends Service {
 
   /** Whether the shell holds the latest accepted content. */
   get inSync(): boolean {
-    return this.contentFingerprint !== undefined && this.contentFingerprint === this.pushedFingerprint
+    return (
+      this.contentFingerprint !== undefined && this.contentFingerprint === this.pushedFingerprint
+    )
   }
 
   // ── shell attachment ────────────────────────────────────────────────────
@@ -166,7 +173,11 @@ export class TrayService extends Service {
   attachShell(push: TrayPush): void {
     if (this.closed) return
     this.push = push
-    if (this.contentFingerprint !== undefined && this.contentFingerprint !== this.pushedFingerprint && this.lastGroups) {
+    if (
+      this.contentFingerprint !== undefined &&
+      this.contentFingerprint !== this.pushedFingerprint &&
+      this.lastGroups
+    ) {
       this.enqueue(this.lastGroups)
     }
   }
@@ -262,12 +273,16 @@ export class TrayService extends Service {
     } else {
       try {
         const result = await this.push(snapshot)
-        if (result && result.ok) {
+        if (result?.ok) {
           this.pushedFingerprint = fingerprint
           verdict = { status: "pushed", revision, changed: true }
         } else {
           this.rollbackAccepted(fingerprint)
-          verdict = { status: "error", revision, error: result?.error ?? "shell rejected the tray snapshot" }
+          verdict = {
+            status: "error",
+            revision,
+            error: result?.error ?? "shell rejected the tray snapshot",
+          }
         }
       } catch (error) {
         this.rollbackAccepted(fingerprint)
@@ -283,7 +298,8 @@ export class TrayService extends Service {
    * `unchanged`).
    */
   private rollbackAccepted(failedFingerprint: string): void {
-    if (this.contentFingerprint === failedFingerprint) this.contentFingerprint = this.pushedFingerprint
+    if (this.contentFingerprint === failedFingerprint)
+      this.contentFingerprint = this.pushedFingerprint
   }
 
   // ── action fan-out ──────────────────────────────────────────────────────

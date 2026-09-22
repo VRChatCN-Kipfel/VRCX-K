@@ -15,13 +15,13 @@
 // too — use `parseHostLifecyclePayload`/`isHostLifecycleEnvelope` for IPC
 // payloads.
 
+import type { HostSnapshot } from "../host/src/contracts/hostLifecycle"
 import {
   HOST_LIFECYCLE_SCHEMA_ID,
   HOST_LIFECYCLE_SCHEMA_VERSION,
-  MAX_SAFE_INTEGER,
   isHostSnapshot,
+  MAX_SAFE_INTEGER,
 } from "../host/src/contracts/hostLifecycle"
-import type { HostSnapshot } from "../host/src/contracts/hostLifecycle"
 
 export type {
   HostCommand,
@@ -33,7 +33,7 @@ export type {
   HostSnapshot,
 } from "../host/src/contracts/hostLifecycle"
 
-export { HOST_LIFECYCLE_SCHEMA_ID, HOST_LIFECYCLE_SCHEMA_VERSION, MAX_SAFE_INTEGER, isHostSnapshot }
+export { HOST_LIFECYCLE_SCHEMA_ID, HOST_LIFECYCLE_SCHEMA_VERSION, isHostSnapshot, MAX_SAFE_INTEGER }
 
 /** Response of the Tauri command `get_host_lifecycle` and payload of the `host-lifecycle` event. */
 export type HostLifecycleEnvelope = { snapshot: HostSnapshot }
@@ -197,22 +197,24 @@ export function subscribeHostLifecycle(deps: HostLifecycleSubscribeDeps): () => 
         applyIfLive({ kind: "unsupported", reason: `get_host_lifecycle 不可用：${String(err)}` }),
     )
 
-  void deps.listen((raw) => applyIfLive({ kind: "event", raw })).then(
-    (fn) => {
-      if (cancelled) {
-        fn()
-        return
-      }
-      unlisten = fn
-      return seed()
-    },
-    (err: unknown) => {
-      deps.onListenError?.(err)
-      return seed().then(() =>
-        applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
-      )
-    },
-  )
+  void deps
+    .listen((raw) => applyIfLive({ kind: "event", raw }))
+    .then(
+      (fn) => {
+        if (cancelled) {
+          fn()
+          return
+        }
+        unlisten = fn
+        return seed()
+      },
+      (err: unknown) => {
+        deps.onListenError?.(err)
+        return seed().then(() =>
+          applyIfLive({ kind: "error", message: `无法监听 host-lifecycle：${String(err)}` }),
+        )
+      },
+    )
 
   return () => {
     cancelled = true
@@ -234,7 +236,11 @@ export function formatHostSnapshot(snapshot: HostSnapshot): HostLifecycleField[]
     { key: "generation", label: "generation", value: String(snapshot.generation) },
     { key: "attempt", label: "attempt", value: String(snapshot.attempt) },
     { key: "pid", label: "pid", value: snapshot.pid === null ? HOST_ABSENT : String(snapshot.pid) },
-    { key: "port", label: "port", value: snapshot.port === null ? HOST_ABSENT : String(snapshot.port) },
+    {
+      key: "port",
+      label: "port",
+      value: snapshot.port === null ? HOST_ABSENT : String(snapshot.port),
+    },
     {
       key: "nextRetryMs",
       label: "nextRetryMs",

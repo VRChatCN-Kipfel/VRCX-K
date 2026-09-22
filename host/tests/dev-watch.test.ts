@@ -6,16 +6,35 @@ import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { Context } from "cordis"
-import type { Entry } from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
+import type { Entry } from "@cordisjs/plugin-loader"
 import Loader from "@cordisjs/plugin-loader"
-import { DevWatch, attachDevWatch, type DevWatchEvent, type IncludeTree } from "../src/dev-watch"
+import { Context } from "cordis"
+import { attachDevWatch, DevWatch, type DevWatchEvent, type IncludeTree } from "../src/dev-watch"
 import { watchKey } from "../src/watch-path"
 
 const roots: string[] = []
 let ctx: Context | undefined
 let includeEntry: Entry | undefined
+
+/**
+ * The include entry created by the most recent `makeHost()`.
+ *
+ * Every test calls this immediately after `makeHost()`, so a missing entry means
+ * the fixture wiring broke — that is worth throwing over, not silently asserting
+ * away. Using a checked accessor keeps the `!` out of the call sites and turns a
+ * would-be `undefined` dereference into a named failure.
+ */
+function includeId(): string {
+  if (!includeEntry) throw new Error("makeHost() produced no include entry")
+  return includeEntry.id
+}
+
+/** The include entry's subtree; see `includeId()` for the failure policy. */
+function includeSubtree(): Entry {
+  if (!includeEntry?.subtree) throw new Error("include entry has no subtree")
+  return includeEntry.subtree
+}
 
 beforeAll(() => {}, 60_000)
 
@@ -55,15 +74,22 @@ async function makeHost() {
   )
 
   const c = new Context()
-  c.baseUrl = pathToFileURL(root).href + "/"
+  c.baseUrl = `${pathToFileURL(root).href}/`
   await c.plugin(Loader)
   c.loader.builtins.include = Include
-  const id = await c.loader.create({ name: "cordis:include", config: { path: "./cordis.yml", enableLogs: false } })
+  const id = await c.loader.create({
+    name: "cordis:include",
+    config: { path: "./cordis.yml", enableLogs: false },
+  })
   const entry = c.loader.resolve(id)
   // Wait for the include subtree + first plugin fiber.
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    const e = entry.subtree && [...entry.subtree.entries()].find((x: unknown) => (x as Entry).options.name === "./plugins/alpha.ts")
+    const e =
+      entry.subtree &&
+      [...entry.subtree.entries()].find(
+        (x: unknown) => (x as Entry).options.name === "./plugins/alpha.ts",
+      )
     if (e && (e as Entry).fiber?.uid != null) break
     await new Promise((r) => setTimeout(r, 50))
   }
@@ -72,7 +98,11 @@ async function makeHost() {
   return { root, pluginDir, configFile, entryFile, utilFile }
 }
 
-function waitEvent(events: DevWatchEvent[], predicate: (e: DevWatchEvent) => boolean, timeoutMs = 8_000): Promise<DevWatchEvent> {
+function waitEvent(
+  events: DevWatchEvent[],
+  predicate: (e: DevWatchEvent) => boolean,
+  timeoutMs = 8_000,
+): Promise<DevWatchEvent> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs
     const poll = () => {
@@ -87,7 +117,7 @@ function waitEvent(events: DevWatchEvent[], predicate: (e: DevWatchEvent) => boo
 
 /** Editor-style atomic write: temp file + rename (folded by chokidar atomic). */
 async function atomicWrite(target: string, content: string): Promise<void> {
-  const tmp = target + ".tmp"
+  const tmp = `${target}.tmp`
   await writeFile(tmp, content)
   await rename(tmp, target)
 }
@@ -96,11 +126,11 @@ describe("DevWatch live reload", () => {
   test("reloads an entry when its source file changes (single apply per change)", async () => {
     const { root, configFile, entryFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      devMap: { [`${includeId()}:alpha`]: [join(root, "plugins")] },
       onState: (e) => events.push(e),
     })
     await watch.start()
@@ -109,10 +139,12 @@ describe("DevWatch live reload", () => {
     // Let the initial scan settle before we change files.
     await new Promise((r) => setTimeout(r, 150))
 
-    const alphaEntry = [...include.entries()].find((e: Entry) => e.options.name === "./plugins/alpha.ts") as Entry
+    const alphaEntry = [...include.entries()].find(
+      (e: Entry) => e.options.name === "./plugins/alpha.ts",
+    ) as Entry
     const uidBefore = alphaEntry.fiber?.uid
 
-    await atomicWrite(entryFile, (await Bun.file(entryFile).text()) + "// touched\n")
+    await atomicWrite(entryFile, `${await Bun.file(entryFile).text()}// touched\n`)
     const reloadEvent = await waitEvent(events, (e) => e.type === "reload")
     expect(reloadEvent.type).toBe("reload")
     if (reloadEvent.type !== "reload") return
@@ -141,11 +173,11 @@ describe("DevWatch live reload", () => {
   test("shared-util change reloads the entry mapped to that root", async () => {
     const { root, configFile, utilFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      devMap: { [`${includeId()}:alpha`]: [join(root, "plugins")] },
       onState: (e) => events.push(e),
     })
     await watch.start()
@@ -164,18 +196,20 @@ describe("DevWatch live reload", () => {
   test("keeps old fiber when a syntax error is written (strong rollback)", async () => {
     const { root, configFile, entryFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      devMap: { [`${includeId()}:alpha`]: [join(root, "plugins")] },
       onState: (e) => events.push(e),
     })
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
     await new Promise((r) => setTimeout(r, 150))
 
-    const alphaEntry = [...include.entries()].find((e: Entry) => e.options.name === "./plugins/alpha.ts") as Entry
+    const alphaEntry = [...include.entries()].find(
+      (e: Entry) => e.options.name === "./plugins/alpha.ts",
+    ) as Entry
     const uidBefore = alphaEntry.fiber?.uid
     const countBefore = (globalThis as Record<string, unknown>).__alphaCount as number
 
@@ -193,9 +227,12 @@ describe("DevWatch live reload", () => {
 
   test("include refresh picks up a new entry after cordis.yml changes", async () => {
     const { root, configFile } = await makeHost()
-    await writeFile(join(root, "plugins", "beta.ts"), `export function apply() { (globalThis as any).__betaCount = ((globalThis as any).__betaCount ?? 0) + 1 }\n`)
+    await writeFile(
+      join(root, "plugins", "beta.ts"),
+      `export function apply() { (globalThis as any).__betaCount = ((globalThis as any).__betaCount ?? 0) + 1 }\n`,
+    )
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
@@ -212,7 +249,7 @@ describe("DevWatch live reload", () => {
     const refreshed = await waitEvent(events, (e) => e.type === "config-refreshed")
     expect(refreshed.type).toBe("config-refreshed")
     if (refreshed.type !== "config-refreshed") return
-    expect(refreshed.entries).toContain(includeEntry!.id + ":beta")
+    expect(refreshed.entries).toContain(`${includeId()}:beta`)
     expect((globalThis as Record<string, unknown>).__betaCount).toBe(1)
     await watch.close()
   }, 30_000)
@@ -220,24 +257,26 @@ describe("DevWatch live reload", () => {
   test("N reloads keep registry/fiber counts at baseline (leak regression)", async () => {
     const { root, configFile, entryFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      devMap: { [`${includeId()}:alpha`]: [join(root, "plugins")] },
       onState: (e) => events.push(e),
     })
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
     await new Promise((r) => setTimeout(r, 200))
 
-    const alphaEntry = [...include.entries()].find((e: Entry) => e.options.name === "./plugins/alpha.ts") as Entry
-    const registry = (ctx! as unknown as { registry: { size: number } }).registry
+    const alphaEntry = [...include.entries()].find(
+      (e: Entry) => e.options.name === "./plugins/alpha.ts",
+    ) as Entry
+    const registry = (ctx as unknown as { registry: { size: number } }).registry
     const baselineRegistrySize = registry.size
 
     const initialContent = await Bun.file(entryFile).text()
     for (let i = 0; i < 5; i++) {
-      await atomicWrite(entryFile, initialContent + `// edit ${i}\n`)
+      await atomicWrite(entryFile, `${initialContent}// edit ${i}\n`)
       await waitEvent(events, (e) => e.type === "reload" && e.result?.status === "reloaded", 10_000)
       // allow the (possibly doubled) Windows event pair to settle
       await new Promise((r) => setTimeout(r, 500))
@@ -255,7 +294,7 @@ describe("DevWatch live reload", () => {
   test("invalid YAML reports config-error and keeps the running tree", async () => {
     const { configFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
@@ -285,11 +324,11 @@ describe("DevWatch live reload", () => {
   test("close discards pending file events and emits closed once", async () => {
     const { root, configFile, entryFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      devMap: { [`${includeId()}:alpha`]: [join(root, "plugins")] },
       onState: (e) => events.push(e),
       debounceMs: 5000, // long debounce so the pending event never flushes
     })
@@ -297,7 +336,7 @@ describe("DevWatch live reload", () => {
     await waitEvent(events, (e) => e.type === "started")
     await new Promise((r) => setTimeout(r, 200))
 
-    await atomicWrite(entryFile, (await Bun.file(entryFile).text()) + "// close-race\n")
+    await atomicWrite(entryFile, `${await Bun.file(entryFile).text()}// close-race\n`)
     // Close immediately: the debounce timer is cancelled, the event dropped.
     await watch.close()
     await new Promise((r) => setTimeout(r, 300))
@@ -339,14 +378,19 @@ async function makeSplitHost() {
   )
 
   const c = new Context()
-  c.baseUrl = pathToFileURL(root).href + "/"
+  c.baseUrl = `${pathToFileURL(root).href}/`
   await c.plugin(Loader)
   c.loader.builtins.include = Include
-  const id = await c.loader.create({ name: "cordis:include", config: { path: "./cfg/cordis.yml", enableLogs: false } })
+  const id = await c.loader.create({
+    name: "cordis:include",
+    config: { path: "./cfg/cordis.yml", enableLogs: false },
+  })
   const entry = c.loader.resolve(id)
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    const child = entry.subtree && [...entry.subtree.entries()].find((x) => (x as Entry).options.name === "../plugins/alpha.ts")
+    const child =
+      entry.subtree &&
+      [...entry.subtree.entries()].find((x) => (x as Entry).options.name === "../plugins/alpha.ts")
     if (child && (child as Entry).fiber?.uid != null) break
     await sleep(50)
   }
@@ -359,11 +403,11 @@ describe("DevWatch lifecycle guards", () => {
   test("attachDevWatch gates routing on ctx.signal.stopping and returns close()'s promise", async () => {
     const { root, configFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const include = includeEntry!.subtree!
+    const include = includeSubtree()
     const watch = new DevWatch({
       include,
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      devMap: { [`${includeId()}:alpha`]: [join(root, "plugins")] },
       onState: (e) => events.push(e),
     })
     await watch.start()
@@ -394,7 +438,10 @@ describe("DevWatch lifecycle guards", () => {
     expect(events.some((e) => e.type === "reload")).toBe(false)
 
     // The disposer must RETURN close()'s promise (gracefulStop awaits it).
-    const result = disposer!()
+    // Check rather than assert: `effect` above is invoked by attachDevWatch, so
+    // a missing disposer means the wiring under test never registered at all.
+    if (!disposer) throw new Error("attachDevWatch did not register an effect")
+    const result = disposer()
     expect(result).toBeInstanceOf(Promise)
     await result
     expect(events.filter((e) => e.type === "closed")).toHaveLength(1)
@@ -402,7 +449,7 @@ describe("DevWatch lifecycle guards", () => {
 
   test("close() during start() does not leak a watcher", async () => {
     const { configFile } = await makeHost()
-    const watch = new DevWatch({ include: includeEntry!.subtree!, configFile })
+    const watch = new DevWatch({ include: includeSubtree(), configFile })
     const starting = watch.start()
     const closing = watch.close() // races the async root scan
     await Promise.all([starting, closing])
@@ -416,7 +463,7 @@ describe("DevWatch lifecycle guards", () => {
     await mkdir(extra, { recursive: true })
     const events: DevWatchEvent[] = []
     const watch = new DevWatch({
-      include: includeEntry!.subtree!,
+      include: includeSubtree(),
       configFile,
       roots: [extra],
       onState: (e) => events.push(e),
@@ -431,9 +478,9 @@ describe("DevWatch lifecycle guards", () => {
     const { root, configFile, entryFile } = await makeHost()
     const events: DevWatchEvent[] = []
     const watch = new DevWatch({
-      include: includeEntry!.subtree!,
+      include: includeSubtree(),
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [join(root, "plugins")] },
+      devMap: { [`${includeId()}:alpha`]: [join(root, "plugins")] },
       onState: (e) => events.push(e),
       debounceMs: 250,
       maxWaitMs: 400,
@@ -448,7 +495,7 @@ describe("DevWatch lifecycle guards", () => {
     // bump); DevWatch's initial-replay filter keys on that, so the injected
     // event must reflect a real write or it would be dropped as a scan replay.
     const timer = setInterval(async () => {
-      await writeFile(entryFile, (await Bun.file(entryFile).text()) + "// burst\n")
+      await writeFile(entryFile, `${await Bun.file(entryFile).text()}// burst\n`)
       internals.handleFsEvent("change", entryFile)
     }, 60)
     try {
@@ -463,11 +510,18 @@ describe("DevWatch lifecycle guards", () => {
   test("flushFs reports an unmappable path as watcher-error instead of dying", async () => {
     const { configFile } = await makeHost()
     const events: DevWatchEvent[] = []
-    const watch = new DevWatch({ include: includeEntry!.subtree!, configFile, onState: (e) => events.push(e) })
+    const watch = new DevWatch({
+      include: includeSubtree(),
+      configFile,
+      onState: (e) => events.push(e),
+    })
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
 
-    const internals = watch as unknown as { fsPending: Map<string, string>; flushFs(): Promise<void> }
+    const internals = watch as unknown as {
+      fsPending: Map<string, string>
+      flushFs(): Promise<void>
+    }
     internals.fsPending.set("node:fs", "change") // not a file: path → canonicalization throws
     await internals.flushFs()
     expect(events.some((e) => e.type === "watcher-error")).toBe(true)
@@ -488,10 +542,11 @@ describe("DevWatch lifecycle guards", () => {
     internals.runQueue = async (_entryId, q) => {
       const paths = [...q.pendingPaths]
       q.pendingPaths.clear()
-      let finish!: () => void
+      let finish: (() => void) | undefined
       const gate = new Promise<void>((resolve) => {
         finish = resolve
       })
+      if (!finish) throw new Error("gate promise did not capture its resolve")
       runs.push({ paths, finish })
       await gate
     }
@@ -505,23 +560,30 @@ describe("DevWatch lifecycle guards", () => {
 
     runs[0].finish()
     await sleep(0)
-    const queue = internals.queues.get("alpha")!
+    const queue = internals.queues.get("alpha")
+    if (!queue) throw new Error("no queue for entry 'alpha'")
     expect(runs).toHaveLength(2)
     expect(queue.running).not.toBeNull() // tracked, so close() can await it
 
     runs[1].finish()
     await sleep(0)
-    expect(internals.queues.get("alpha")!.running).toBeNull()
+    // Checked, not asserted: the queue is keyed by entry id and only exists once
+    // that entry has been enqueued, so a miss means the fixture never ran it.
+    const alphaQueue = internals.queues.get("alpha")
+    if (!alphaQueue) throw new Error("no queue for entry 'alpha'")
+    expect(alphaQueue.running).toBeNull()
   }, 30_000)
 
   test("a file named ..foo inside a root is matched, not reported unowned", async () => {
     const { root, configFile, pluginDir } = await makeHost()
     const events: DevWatchEvent[] = []
-    const alphaEntry = [...includeEntry!.subtree!.entries()].find((e) => (e as Entry).options.name === "./plugins/alpha.ts") as Entry
+    const alphaEntry = [...includeSubtree().entries()].find(
+      (e) => (e as Entry).options.name === "./plugins/alpha.ts",
+    ) as Entry
     const watch = new DevWatch({
-      include: includeEntry!.subtree!,
+      include: includeSubtree(),
       configFile,
-      devMap: { [includeEntry!.id + ":alpha"]: [pluginDir] },
+      devMap: { [`${includeId()}:alpha`]: [pluginDir] },
       onState: (e) => events.push(e),
     })
     await watch.start()
@@ -530,7 +592,10 @@ describe("DevWatch lifecycle guards", () => {
 
     const weird = join(pluginDir, "..foo.ts")
     await writeFile(weird, "export const x = 1\n")
-    const change = await waitEvent(events, (e) => e.type === "change" && e.path.endsWith("..foo.ts"))
+    const change = await waitEvent(
+      events,
+      (e) => e.type === "change" && e.path.endsWith("..foo.ts"),
+    )
     expect(change.type).toBe("change")
     if (change.type !== "change") return
     expect(change.entryIds).toContain(alphaEntry.id)
@@ -546,7 +611,11 @@ describe("DevWatch lifecycle guards", () => {
     await writeFile(gammaFile, `export function apply() {}\n`)
 
     const events: DevWatchEvent[] = []
-    const watch = new DevWatch({ include: includeEntry!.subtree!, configFile, onState: (e) => events.push(e) })
+    const watch = new DevWatch({
+      include: includeSubtree(),
+      configFile,
+      onState: (e) => events.push(e),
+    })
     await watch.start()
     await waitEvent(events, (e) => e.type === "started")
     await sleep(150)
@@ -568,9 +637,11 @@ describe("DevWatch lifecycle guards", () => {
     let reloaded: DevWatchEvent | undefined
     for (let attempt = 0; attempt < 6 && !reloaded; attempt++) {
       await atomicWrite(gammaFile, `export function apply() {}\n// touch ${attempt}\n`)
-      reloaded = await waitEvent(events, (e) => e.type === "reload" && e.entryId === gammaEntryId, 1_500).catch(
-        () => undefined,
-      )
+      reloaded = await waitEvent(
+        events,
+        (e) => e.type === "reload" && e.entryId === gammaEntryId,
+        1_500,
+      ).catch(() => undefined)
     }
     expect(reloaded).toBeDefined()
     if (reloaded?.type !== "reload") return

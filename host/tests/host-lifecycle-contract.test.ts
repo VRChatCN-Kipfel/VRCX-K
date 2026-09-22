@@ -2,9 +2,9 @@ import { expect, test } from "bun:test"
 import {
   HOST_LIFECYCLE_SCHEMA_ID,
   HOST_LIFECYCLE_SCHEMA_VERSION,
-  MAX_SAFE_INTEGER,
-  isHostSnapshot,
   type HostSnapshot,
+  isHostSnapshot,
+  MAX_SAFE_INTEGER,
 } from "../src/contracts/hostLifecycle"
 
 const validSnapshot: HostSnapshot = {

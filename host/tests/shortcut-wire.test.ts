@@ -103,7 +103,12 @@ describe("host ↔ shell shortcut protocol", () => {
     const promise = bridge.shortcut.register("CommandOrControl+Shift+K")
     await tick()
 
-    const frame = wire.sent.at(-1) as { id: string; op: string; p: string[]; a: Array<{ v?: unknown }> }
+    const frame = wire.sent.at(-1) as {
+      id: string
+      op: string
+      p: string[]
+      a: Array<{ v?: unknown }>
+    }
     expect(frame.op).toBe("call")
     expect(frame.p).toEqual(["shell", "shortcut", "register"])
     expect(frame.a[0]?.v).toBe("CommandOrControl+Shift+K")

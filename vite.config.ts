@@ -1,8 +1,9 @@
-import { defineConfig, type Plugin } from "vite";
-import react from "@vitejs/plugin-react";
 // @ts-expect-error type error without @types/node package
-import process from "node:process";
-const host = process.env.TAURI_DEV_HOST;
+import process from "node:process"
+import react from "@vitejs/plugin-react"
+import { defineConfig, type Plugin } from "vite"
+
+const host = process.env.TAURI_DEV_HOST
 
 // Safety net for the case the `ignored` list below does not cover: chokidar's
 // FSWatcher emits 'error' with no listener when a watch throws, and Node turns
@@ -22,10 +23,10 @@ function watcherErrorGuard(): Plugin {
         console.error(
           "[vite] watcher error (dev server kept alive; the path may no longer be watched — fix the cause and restart):",
           error,
-        );
-      });
+        )
+      })
     },
-  };
+  }
 }
 
 // https://vite.dev/config/
@@ -69,4 +70,4 @@ export default defineConfig(() => ({
       ],
     },
   },
-}));
+}))

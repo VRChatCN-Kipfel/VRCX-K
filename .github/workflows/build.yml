@@ -1,4 +1,4 @@
-# VRCX-K CI：桌面三平台 + 移动端（当前 Android）构建验证
+# VRCX-K CI：桌面三平台构建 + 平台无关静态门控 + 移动端（当前 Android）
 #
 # 桌面：在干净 checkout 上验证"新克隆直接可构建"承诺 + 三端跨架构兼容性
 #       （Windows x64 / Linux x64 / macOS arm64，均为原生 runner）。
@@ -32,10 +32,135 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 平台无关的静态门控（single-CPU runner）。
+  static-gates:
+    name: static gates (ubuntu-slim)
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      # 缓存全局包缓存而非 node_modules（理由见 desktop job 注释）
+      - name: Cache bun package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies (frozen)
+        run: bun install --frozen-lockfile
+
+      # dtolnay/rust-toolchain 走 --profile minimal，【不含 rustfmt/clippy】——
+      # 必须显式声明 components，否则 cargo fmt / clippy 直接 "no such command"。
+      - name: Install Rust stable (rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # rust-cache 必须在工具链【之后】：它的 key 取自当前 rustc 版本。
+      #
+      # ⚠ 这里刻意让本 job 的 key 与 desktop 的 ubuntu 条目【逐字一致】，以便直接
+      #   复用其热缓存。三个参数缺一不可，先说清"为什么需要"：
+      #
+      #   本 job 与 desktop-ubuntu 【都是 Linux x64 + 同一 rustc + 同一 Cargo.lock】，
+      #   依赖树完全相同，唯一差别是 rust-cache 默认把 GITHUB_JOB 写进 key，于是
+      #   本 job 得到 v0-rust-static-gates-…、desktop 得到 v0-rust-desktop-…，两者
+      #   互不可见 ⇒ 本 job 每次都得冷编整棵依赖树。实测这条差别的代价（本机 24 核）：
+      #     cargo check 冷编 212 crate ≈63s → 紧接着 clippy 只编 1 crate ≈8s
+      #   即"依赖产物已在"时 clippy 几乎免费；1 vCPU 冷编则是分钟级，可能撞上
+      #   平台 15 分钟硬杀（本 job 未设 timeout-minutes，正是为了先测出这个数）。
+      #
+      #   降 key 的办法：`shared-key: desktop` 会【替换掉】自动的 job 段，使本 job
+      #   得到前缀 v0-rust-desktop-Linux-x64 —— 与 desktop 那条【逐字相同】
+      #   （desktop 的实测 key 为 v0-rust-desktop-Linux-x64-6ff13d87-c2c5085e；
+      #   上游 config.ts 里 shared-key 与 "key + add-job-id-key:false" 两条路径
+      #   产出同一前缀，这里取更短的那个写法，减少参数面）。
+      #   ⚠ 维护约束：若将来重命名 desktop job，这里必须同步改，否则本 job 静默
+      #   退回冷编译（只是变慢，不会失败 —— 这类"静默变慢"正是要靠注释防的）。
+      #
+      #   save-if: false 同样必需，不能省：本 job 跑在 desktop【之前】（desktop 有
+      #   needs: static-gates），而 GitHub 对已存在的 key【不覆盖】。若本 job 也写
+      #   缓存，它会以自己较薄的产物（只有 clippy 的 dev 产物）抢先冻结该条目，
+      #   desktop 更丰富的产物（check + test）反而永远存不进去 —— 那会把 desktop
+      #   现有良好缓存拖退化。只恢复不保存 = 白嫖 desktop 的热缓存，且不污染它。
+      #   （上游 save.ts 实测：save-if=false 只跳过 save，restore 不受影响。）
+      #
+      #   命中的时序（诚实说明，避免误以为首次就快）：第一轮 static-gates 仍然
+      #   冷编（此时 desktop 尚未写过新 key），随后 desktop 写入；从第二轮起
+      #   本 job 才命中。即收益在【第二次及以后】的 run 兑现。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop
+          save-if: "false"
+
+      # clippy 与 cargo check 不同：它要真正构建依赖树，Linux 上必须能
+      # pkg-config 到 webkit2gtk 等库（与 desktop job 的 Linux 依赖同源）。
+      - name: Linux system deps (webkit2gtk etc.)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Rust format check
+        run: cargo fmt --all --check
+
+      - name: Rust clippy
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: Frontend + host typecheck
+        run: bun run typecheck
+
+      # JS/TS 侧的格式化 + lint 单一判据。用 `biome ci` 而不是
+      # `format --check` + `lint` 两条命令：ci 是同一次遍历里同时判
+      # format、lint 与 assist（organizeImports），语义就是"CI 语境"，且
+      # 它【只读】—— 绝不会顺手改文件而让门控变成"改了就算过"。
+      # 版本已 pin 在 package.json（@biomejs/biome 2.5.14），biome.json 的
+      # $schema 与之对齐；不要用 bunx 拉 latest，否则上游发新版会突然红。
+      - name: JS/TS format + lint (biome)
+        run: bun run check:js
+
+      # 契约漂移闸门（M2-2 决定 D3）：生成的 TS 镜像与 schema 必须同步。
+      # 在本闸门出现前，仓库里【没有任何】机制能发现两者不一致——直接后果已经
+      # 发生过：host/src/contracts/hostLifecycle.ts 头部写着 "Generated ...
+      # Do not hand-edit"，却从来没有脚本或 CI 步骤生成过它。
+      # 该步骤【不依赖】cargo 生成的 src-tauri/gen/schemas，故本 job 无需先跑
+      # cargo check（已验证：移走 gen/schemas 后三个门控仍全绿）。
+      #
+      # ⚠ 顺序有讲究：biome 必须【先】于本闸门且【排除 *.generated.ts】。
+      # 那 4 个生成物由 json2ts 产出、被本闸门逐字节比对，实测它们全都会被
+      # biome 改动；一旦让 biome 纳入它们，这里就会以"镜像与 schema 不一致"
+      # 的面目报错，掩盖真实原因。排除规则在 biome.json 的 files.includes。
+      - name: Contract drift gate (schemas <-> generated TS mirrors)
+        run: bun run check:contracts
+
+      # android 冒烟脚本的崩溃判据回归测试。
+      #
+      # 为什么放在【门控 job】而不是 mobile：它自带假 adb，不需要设备、不需要
+      # Android SDK、不需要 JDK，纯粹是 shell 逻辑测试（几百毫秒）。放进 mobile
+      # 意味着只有走到 android 那一步才跑，且要先等 6 分钟构建；放在这里能在
+      # desktop/mobile 之前就拦下判据回归。
+      #
+      # 为什么必须有它：崩溃判据有两个静默失效方向，且都不会报错 ——
+      #   ① 误报：全量裸匹配会把别的进程的 `FATAL EXCEPTION` 算到本应用头上；
+      #   ② 漏报：按 app pid 过滤会整类丢掉原生崩溃（tombstone 由 `crash_dump`
+      #      写出，其条目 pid 不是应用的 pid）。
+      # 6 个场景里 `app-native-crash` 与 `bare-signal-noise` 分别钉死这两个方向。
+      # ⚠ 没有这条接线时它只是仓库里的死代码 —— 将来有人把判据改回 pid 过滤，
+      # 不会有任何东西变红。这正是它必须接进 CI 的原因。
+      - name: Android smoke crash-criteria regression
+        run: bash scripts/android-smoke.test.sh
+
   desktop:
     name: desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    needs: static-gates
     strategy:
       fail-fast: false
       matrix:
@@ -73,8 +198,19 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      # 跨 job / 跨 workflow 共享的 cargo 缓存（key 自动含 Cargo.lock/rustc/OS；
-      # 三平台矩阵各自隔离 key，但同平台不同 job 命中同一缓存）
+      # cargo 缓存（key 自动含 Cargo.lock/rustc/OS/arch，【以及 GITHUB_JOB】）。
+      #
+      # ⚠ 修正一条曾在此处的错误说法："同平台不同 job 命中同一缓存" —— 与实测不符。
+      #   rust-cache 默认把 job 名写进 key（add-job-id-key 默认 true），实测两条
+      #   key 为 v0-rust-desktop-Linux-x64-6ff13d87-c2c5085e 与
+      #   v0-rust-mobile-Linux-x64-6ff13d87-c2c5085e，只差 job 段，【从不互相命中】。
+      #   真正跨 job 共享的是 bun 包缓存（其 key 由我们手写、不含 job 名）。
+      #
+      # static-gates 用 `shared-key: desktop`（配 save-if: false）有意对齐本 job
+      # 的 key 前缀以便只读复用（见该 job 注释）；本 job 自己不设参数，保持默认的
+      # "可读可写"。
+      # （上游 config.ts 里 `shared-key` 与 "key + add-job-id-key: false" 两条路径
+      # 产出同一前缀；本项目取前者。此处曾误写成后者，与本 job 的实际配置不符。）
       # workspace 根在仓库根，target 在 /target/ —— 用默认 `. -> target`
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -89,15 +225,9 @@ jobs:
       - name: Cargo check (spawns host sidecar self-heal)
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml
 
-      - name: Frontend + host typecheck
-        run: bun run typecheck
-
-      # 契约漂移闸门（M2-2 决定 D3）：生成的 TS 镜像与 schema 必须同步。
-      # 在此之前仓库里【没有任何】机制能发现两者不一致——直接后果已经发生：
-      # host/src/contracts/hostLifecycle.ts 头部写着 "Generated ... Do not
-      # hand-edit"，却从来没有脚本或 CI 步骤生成过它。
-      - name: Contract drift gate (schemas <-> generated TS mirrors)
-        run: bun run check:contracts
+      # 注意：typecheck 与 check:contracts 已【移出】本矩阵 → static-gates job。
+      # 二者输出与 OS 无关，本矩阵原先各平台跑一遍属于重复计算。此处不再重复，
+      # 平台无关的门控统一归 static-gates（见该 job 注释）。
 
       - name: Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
@@ -111,6 +241,7 @@ jobs:
   mobile:
     name: mobile (${{ matrix.platform.name }})
     runs-on: ${{ matrix.platform.os }}
+    needs: static-gates
     timeout-minutes: 60
     # 曾经是 continue-on-error（调通期：android 高频修错，失败不阻塞 desktop）。
     # 2026-09-11 去掉：桌面专属 API 已按平台门控（run 34561905131，android job
@@ -199,3 +330,104 @@ jobs:
           echo "APK: $APK"
           # 构建成功但找不到 APK 视为失败（防止静默通过）
           test -n "$APK"
+
+      # release APK 默认是 **unsigned** 的，而 Android 平台层【强制要求已签名】
+      # 才能安装 —— adb 没有任何"忽略签名"的开关（pm install 的 -r/-t/-d/-g/-i
+      # 全都不涉及签名；已核对本地 `pm help` 与 install 选项列表）。所以不签名就
+      # 装不上，这也是模拟器冒烟第一次运行时暴露的问题：
+      #   adb: failed to install .../app-universal-release-unsigned.apk
+      #
+      # 这里用【一次性 debug 证书】现场签名，只为让模拟器能装上并验证"应用能跑"：
+      #   - 不引入任何 Secrets（keytool 现场生成，密码为惯例值 android）；
+      #   - 不改 src-tauri/gen/android 的 gradle（那是 gitignore 的生成物，
+      #     往里写 signingConfigs 无法持久化）；
+      #   - ⚠ 产物是 debug 签名的，【不可用于分发】。release 分发签名属于 M5，
+      #     届时需用 Secrets 注入正式 keystore。注意：docs/mobile-feasibility.md
+      #     目前【尚无】签名/keystore 章节（此前本行误指该文件为出处），届时先补
+      #     那一节再照做，不要以为那里已有现成流程。
+      - name: Debug-sign the APK (smoke only, not for distribution)
+        id: sign
+        run: bash scripts/android-debug-sign.sh "${{ steps.apk.outputs.apk }}"
+
+      # ── 模拟器冒烟：安装 + 启动 + 抓 logcat ───────────────────────────────
+      #
+      # 这一步回答"壳+脸能编译打包"之外的第二个问题：**装到设备上能不能跑起来**。
+      # 此前的 mobile job 只 find 到 APK 就结束，从不安装、不启动、不看日志。
+      #
+      # 历史：c9d948fb 曾写下等价步骤（mobile-compat.yml），但在 8f34872d 被
+      # **暂缓**（提交信息原文 "drop the emulator smoke for now (slowest/fragile
+      # step); current goal is proving shell+face compile to an APK"）。关键事实：
+      # 那 4 次 run 里该步骤**全部是 skipped**（卡在前面的 Java/SDK/构建步骤），
+      # 即那段脚本【从未真正执行过】。所以本步不是"把删掉的代码加回来"，而是
+      # **第一次真正调试它**。据此对原脚本做了四处修正，逐条说明为什么：
+      #
+      #  ① 原脚本写 `am start -n com.vrcxk.app/.MainActivity` —— 该 Activity 全名
+      #     从未经实测（gen/android 是 gitignore 的生成物，仓库里查不到）。写死一个
+      #     未验证的名字等于给自己埋一个假失败源。改用 `monkey` 触发 LAUNCHER
+      #     intent，由系统解析实际 Activity 名。
+      #  ② 原脚本 `sleep 8` 后断言前台 Activity —— 冷启一个 Tauri WebView 应用在
+      #     模拟器上很可能超过 8 秒。改为轮询进程出现（上限 90s），且不断言具体
+      #     Activity 名，改为"进程存活 + 无崩溃日志"这两个更稳的判据。
+      #  ③ 原脚本只做 dumpsys 断言，**完全没有留日志**。失败时无从诊断。本步把
+      #     logcat 落盘并在最后（if: always）上传为 artifact —— 这是本次的**主要
+      #     产出**：即便断言失败，也能拿到崩溃栈/原生信号。
+      #  ④ `target` 用 google_apis 而非 default：Tauri 依赖系统 WebView，AOSP 镜像
+      #     的 WebView 供给不确定；google_apis 是 WebView 类应用的常规选择。
+      #
+      # KVM：Linux runner 上模拟器要硬件加速就必须先放行 /dev/kvm（否则退回纯软件
+      # 模拟，慢到可能撞 timeout）。下面按上游 README 的官方配方开启。
+      # 先跑一步 pre-check 把事实打印出来：首次运行需要据此判断这台 runner 到底有没有
+      # 嵌套虚拟化（没有的话 `disable-linux-hw-accel: auto` 会自动降级，耗时会暴露）。
+      - name: Check KVM availability
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "KVM device present: $(ls -l /dev/kvm)"
+          else
+            echo "::warning::/dev/kvm absent — emulator falls back to software rendering (slow)"
+          fi
+          echo "cpu virt flags: $(egrep -c '(vmx|svm)' /proc/cpuinfo || true)"
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Emulator smoke (install + launch + logcat)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_5
+          # 冷启本身要几分钟；给足余量，避免把"慢"误报成"挂"。
+          emulator-boot-timeout: 900
+          disable-animations: true
+          # -no-snapshot：每次全新启动，避免快照掩盖只在首次启动出现的问题。
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          # ⚠ 脚本主体放在 scripts/android-smoke.sh —— 不能内联多行。
+          # reactivecircus/android-emulator-runner 会把 script 输入【逐行拆开】，
+          # 每行交给独立的 /usr/bin/sh -c 进程（实测日志形态），于是变量不跨行、
+          # if/fi 与 while/done 直接语法错误：
+          #   /usr/bin/sh: 1: Syntax error: end of file unexpected (expecting "fi")
+          # 落成文件后整段在同一 shell 进程内运行；本行只做转发。
+          script: bash scripts/android-smoke.sh "${{ steps.sign.outputs.signed_apk }}" android-smoke
+      # APK 与日志都留存：断言失败时 logcat 是唯一的诊断入口；
+      # APK 留存则让人能把这个包手工装到真机上复核。
+      #
+      # ⚠ 两个 APK 都传：`signed_apk` 在【签名失败】时为空字符串，而那正是最需要
+      # 拿产物排障的场景（要看签名步骤到底产出了什么）。只传它会让失败时反而
+      # 拿不到 APK；`apk`（unsigned，由 Locate APK 提供）此时仍然存在。
+      # if-no-files-found: warn 让"签名失败导致该项缺失"不掩盖真正的错误。
+      - name: Upload smoke artifacts (APK + logcat)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-smoke-${{ matrix.platform.name }}
+          path: |
+            ${{ steps.apk.outputs.apk }}
+            ${{ steps.sign.outputs.signed_apk }}
+            android-smoke/logcat.txt
+            android-smoke/logcat-app.txt
+            android-smoke/device-state.txt
+          if-no-files-found: warn

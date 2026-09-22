@@ -7,12 +7,12 @@
 //      copies is known-good, not merely plausible-looking.
 import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
-import { Context } from "cordis"
-import Loader from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
+import Loader from "@cordisjs/plugin-loader"
 import Timer from "@cordisjs/plugin-timer"
-import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
+import { Context } from "cordis"
 import { assertPluginManifest } from "../src/contracts/pluginContract"
+import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
 
 const repoRoot = join(import.meta.dir, "..", "..")
 const exampleDir = join(repoRoot, "examples", "hello-plugin")

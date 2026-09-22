@@ -1,19 +1,18 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  assertPluginIndexEntry,
   assertPluginManifest,
   assertSupportedRestartClass,
-  validatePluginIndexEntry,
-  validatePluginManifest,
   RESTART_CLASSES,
   SUPPORTED_RESTART_CLASSES,
+  validatePluginIndexEntry,
+  validatePluginManifest,
 } from "../src/contracts/pluginContract"
-import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
-import type { VRCXKPluginManifest } from "../src/contracts/pluginManifest.generated"
 import type { VRCXKPluginIndexEntry } from "../src/contracts/pluginIndexEntry.generated"
+import type { VRCXKPluginManifest } from "../src/contracts/pluginManifest.generated"
+import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
 
 const minimalManifest: VRCXKPluginManifest = {
   id: "friend-presence",
@@ -109,7 +108,11 @@ describe("plugin manifest contract (schema <-> TS mirror)", () => {
   test("arch is a separate axis", () => {
     expect(validatePluginManifest({ ...minimalManifest, arch: ["x64"] })).toBe(true)
     expect(
-      validatePluginManifest({ ...minimalManifest, platforms: ["windows", "linux"], arch: ["x64", "arm64"] }),
+      validatePluginManifest({
+        ...minimalManifest,
+        platforms: ["windows", "linux"],
+        arch: ["x64", "arm64"],
+      }),
     ).toBe(true)
     for (const wrong of ["ia32", "arm", "x86_64", "AMD64", "arm64-v8a"]) {
       expect(validatePluginManifest({ ...minimalManifest, arch: [wrong] })).toBe(false)
@@ -117,14 +120,20 @@ describe("plugin manifest contract (schema <-> TS mirror)", () => {
   })
 
   test("shell permissions accept only known sub-domains", () => {
-    expect(validatePluginManifest({ ...minimalManifest, permissions: { shell: ["window"] } })).toBe(true)
+    expect(validatePluginManifest({ ...minimalManifest, permissions: { shell: ["window"] } })).toBe(
+      true,
+    )
     expect(validatePluginManifest({ ...minimalManifest, permissions: { shell: true } })).toBe(true)
-    expect(validatePluginManifest({ ...minimalManifest, permissions: { shell: ["window.show"] } })).toBe(false)
+    expect(
+      validatePluginManifest({ ...minimalManifest, permissions: { shell: ["window.show"] } }),
+    ).toBe(false)
     expect(validatePluginManifest({ ...minimalManifest, permissions: { nope: true } })).toBe(false)
   })
 
   test("frontend.entry cannot escape the plugin directory", () => {
-    expect(validatePluginManifest({ ...minimalManifest, frontend: { entry: "ui/index.js" } })).toBe(true)
+    expect(validatePluginManifest({ ...minimalManifest, frontend: { entry: "ui/index.js" } })).toBe(
+      true,
+    )
     for (const entry of ["../outside.js", "/abs/path.js", "ui/../../escape.js"]) {
       expect(validatePluginManifest({ ...minimalManifest, frontend: { entry } })).toBe(false)
     }
@@ -142,16 +151,25 @@ describe("plugin manifest contract (schema <-> TS mirror)", () => {
     // drive letter, or a UNC path, so schema validation alone is not a containment
     // guarantee: whoever resolves the path must verify the result stays inside the
     // plugin directory.
-    for (const entry of ["ui/%2e%2e/x.js", "..%2foutside.js", "C:/abs.js", "\\\\server\\share\\x.js"]) {
+    for (const entry of [
+      "ui/%2e%2e/x.js",
+      "..%2foutside.js",
+      "C:/abs.js",
+      "\\\\server\\share\\x.js",
+    ]) {
       expect(validatePluginManifest({ ...minimalManifest, frontend: { entry } })).toBe(true)
     }
   })
 
   test("dependencies accept ranges but never a source", () => {
-    expect(validatePluginManifest({ ...minimalManifest, dependencies: { a: "*", b: "~2.1.0" } })).toBe(true)
+    expect(
+      validatePluginManifest({ ...minimalManifest, dependencies: { a: "*", b: "~2.1.0" } }),
+    ).toBe(true)
     // A non-string value (e.g. an object naming a source) must not validate: the
     // author cannot know which sources the user has configured.
-    expect(validatePluginManifest({ ...minimalManifest, dependencies: { a: { version: "1" } } })).toBe(false)
+    expect(
+      validatePluginManifest({ ...minimalManifest, dependencies: { a: { version: "1" } } }),
+    ).toBe(false)
   })
 })
 
@@ -183,7 +201,15 @@ describe("restartClass vocabulary vs the supported subset", () => {
 describe("plugin index entry contract", () => {
   test("accepts the minimal entry and rejects missing required fields", () => {
     expect(validatePluginIndexEntry(minimalIndexEntry)).toBe(true)
-    for (const field of ["id", "type", "source", "name", "description", "author", "repository"] as const) {
+    for (const field of [
+      "id",
+      "type",
+      "source",
+      "name",
+      "description",
+      "author",
+      "repository",
+    ] as const) {
       const candidate = { ...minimalIndexEntry } as Record<string, unknown>
       delete candidate[field]
       expect(validatePluginIndexEntry(candidate)).toBe(false)
@@ -208,7 +234,10 @@ describe("plugin index entry contract", () => {
   })
 
   test("source.path cannot escape the repository", () => {
-    const withPath = (path: string) => ({ ...minimalIndexEntry, source: { ...minimalIndexEntry.source, path } })
+    const withPath = (path: string) => ({
+      ...minimalIndexEntry,
+      source: { ...minimalIndexEntry.source, path },
+    })
     expect(validatePluginIndexEntry(withPath("packages/a"))).toBe(true)
     for (const path of ["../outside", "/abs", "a/../../b"]) {
       expect(validatePluginIndexEntry(withPath(path))).toBe(false)
@@ -230,10 +259,19 @@ describe("plugin index entry contract", () => {
   })
 
   test("tags carry an optional colour and are presentation-only", () => {
-    expect(validatePluginIndexEntry({ ...minimalIndexEntry, tags: [{ label: "好友", color: "#ea5252" }] })).toBe(true)
+    expect(
+      validatePluginIndexEntry({
+        ...minimalIndexEntry,
+        tags: [{ label: "好友", color: "#ea5252" }],
+      }),
+    ).toBe(true)
     expect(validatePluginIndexEntry({ ...minimalIndexEntry, tags: [{ label: "好友" }] })).toBe(true)
-    expect(validatePluginIndexEntry({ ...minimalIndexEntry, tags: [{ label: "x", color: "red" }] })).toBe(false)
-    expect(validatePluginIndexEntry({ ...minimalIndexEntry, tags: [{ color: "#ea5252" }] })).toBe(false)
+    expect(
+      validatePluginIndexEntry({ ...minimalIndexEntry, tags: [{ label: "x", color: "red" }] }),
+    ).toBe(false)
+    expect(validatePluginIndexEntry({ ...minimalIndexEntry, tags: [{ color: "#ea5252" }] })).toBe(
+      false,
+    )
   })
 
   test("the index carries NO version, checksum or permissions (P3)", () => {

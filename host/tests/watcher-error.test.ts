@@ -1,12 +1,14 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { binding } from "../src/watch-path"
 import { HostWatcher, type WatcherEvent } from "../src/watcher"
 
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
 
 function waitFor<T>(items: T[], predicate: (item: T) => boolean): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -32,7 +34,9 @@ test("reports onChange failure and continues watching", async () => {
     debounceMs: 20,
     bindings: [binding("entry", entry, [root])],
     onEvent: (event) => events.push(event),
-    onChange: () => { throw new Error("reload failed") },
+    onChange: () => {
+      throw new Error("reload failed")
+    },
   })
   await watcher.start()
   await waitFor(events, (event) => event.type === "started")

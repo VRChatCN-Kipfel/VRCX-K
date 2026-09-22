@@ -1,6 +1,6 @@
-import { watch, type FSWatcher, type ChokidarOptions } from "chokidar"
 import { statSync } from "node:fs"
 import { isAbsolute, resolve, sep } from "node:path"
+import { type ChokidarOptions, type FSWatcher, watch } from "chokidar"
 import type { EntryBinding, MappingResult } from "./watch-path"
 import { canonicalPath, mapPath } from "./watch-path"
 
@@ -40,19 +40,30 @@ export class HostWatcher {
 
   async start() {
     if (this.watcher || this.closed) return
-    const { roots, onEvent, onChange: _onChange, bindings: _bindings, debounceMs: _debounceMs, ...watchOptions } = this.options
-    const watchRoots = roots.map((root) => isAbsolute(root) ? root : resolve(root))
+    const {
+      roots,
+      onEvent,
+      onChange: _onChange,
+      bindings: _bindings,
+      debounceMs: _debounceMs,
+      ...watchOptions
+    } = this.options
+    const watchRoots = roots.map((root) => (isAbsolute(root) ? root : resolve(root)))
     const watcher = watch(watchRoots, {
       ignoreInitial: true,
       atomic: 100,
       followSymlinks: false,
       ...watchOptions,
-      ignored: watchOptions.ignored ?? ((path) => {
-        const normalized = canonicalPath(path)
-        return normalized.includes(`${sep}node_modules${sep}`)
-          || normalized.includes(`${sep}.git${sep}`)
-          || normalized.includes(`${sep}dist${sep}`)
-      }),
+      ignored:
+        watchOptions.ignored ??
+        ((path) => {
+          const normalized = canonicalPath(path)
+          return (
+            normalized.includes(`${sep}node_modules${sep}`) ||
+            normalized.includes(`${sep}.git${sep}`) ||
+            normalized.includes(`${sep}dist${sep}`)
+          )
+        }),
     })
     this.watcher = watcher
     watcher.on("ready", () => {

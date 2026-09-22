@@ -10,7 +10,7 @@
 // Rust mirrors the resulting shape in `src-tauri/src/host_ready.rs`.
 
 import { cpus, totalmem } from "node:os"
-import { toArch, toPlatform, type HostReady } from "./contracts/hostReady"
+import { type HostReady, toArch, toPlatform } from "./contracts/hostReady"
 
 /**
  * The environment half of the handshake, read from the running process.
@@ -30,7 +30,10 @@ import { toArch, toPlatform, type HostReady } from "./contracts/hostReady"
  * not need a schema bump; pre-populating it with speculative fields would defeat
  * the point of having named groups.
  */
-export function collectHostEnvironment(): Pick<HostReady, "runtime" | "host" | "paths" | "capacity"> {
+export function collectHostEnvironment(): Pick<
+  HostReady,
+  "runtime" | "host" | "paths" | "capacity"
+> {
   return {
     runtime: {
       bunVersion: Bun.version,

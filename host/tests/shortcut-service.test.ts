@@ -10,21 +10,14 @@
 //   - with no shell attached nothing pretends to be registered.
 import { describe, expect, test } from "bun:test"
 import { Context } from "cordis"
-import {
-  ShortcutService,
-  normalizePress,
-  type ShortcutServiceOptions,
-} from "../src/shortcut"
-import type {
-  ShellShortcutBridge,
-  ShortcutPressEvent,
-  ShortcutRegistration,
-} from "../src/stdio"
+import { normalizePress, ShortcutService, type ShortcutServiceOptions } from "../src/shortcut"
+import type { ShellShortcutBridge, ShortcutPressEvent, ShortcutRegistration } from "../src/stdio"
 
 // ShortcutService is a cordis `Service` (M2-1 attribution), so it needs a
 // Context to register on. Each service gets its own root Context — a shared one
 // would reject the second "shortcut" registration.
-const makeShortcut = (options?: ShortcutServiceOptions) => new ShortcutService(new Context(), options)
+const makeShortcut = (options?: ShortcutServiceOptions) =>
+  new ShortcutService(new Context(), options)
 
 /** Canonical spelling a real shell returns for `CommandOrControl+Shift+K`. */
 const CANONICAL = "shift+control+KeyK"
