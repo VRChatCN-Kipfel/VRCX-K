@@ -24,8 +24,8 @@ import { afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { HOST_SPAWN_DETACHED, killTree, resolveBun, warmBun } from "./helpers"
 import { watchKey } from "../src/watch-path"
+import { HOST_SPAWN_DETACHED, killTree, resolveBun, warmBun } from "./helpers"
 
 const hostDir = join(import.meta.dir, "..")
 const entryScript = join(hostDir, "src", "index.ts")
@@ -143,7 +143,12 @@ describe("real host entry wiring", () => {
     // Deterministic half of the regression: the watch roots come from
     // dirname(configFile). With `.pathname` they were "/e:/..." → canonicalized
     // to "E:\E:\..." instead of the real directory.
-    const rootsLine = watching.match(/dev watch watching: (.+)/)![1].trim()
+    // `wait` above resolves only on a match, so the capture group is present;
+    // check rather than assert so a future change to that pattern fails loudly
+    // here instead of silently reading index 0 of `null`.
+    const rootsMatch = watching.match(/dev watch watching: (.+)/)
+    if (!rootsMatch) throw new Error(`no watch-roots line in: ${watching}`)
+    const rootsLine = rootsMatch[1].trim()
     const watched = rootsLine.split(",").map((path) => watchKey(path.trim()))
     expect(watched).toContain(watchKey(root))
 

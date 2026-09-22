@@ -225,13 +225,26 @@ export type PressLogEntry = ShortcutPress & {
   matched: boolean
 }
 
+/**
+ * One single-instance redirect kept in the panel log.
+ *
+ * Carries its own `seq` for the same reason `PressLogEntry` does: the panel
+ * renders the list with `.reverse()`, so a positional array index is not a
+ * stable identity — React would reuse the wrong `<li>` when a new redirect
+ * shifts every position. The reducer already allocated a `seq` for this
+ * action; keeping it here is what makes the key stable.
+ */
+export type RedirectLogEntry = RedirectEvent & {
+  seq: number
+}
+
 export type SmokeView = {
   /** Latest result per capability. */
   results: Partial<Record<Capability, SmokeReport>>
   /** Most recent presses, newest last. */
   presses: PressLogEntry[]
   /** Most recent single-instance redirects, newest last. */
-  redirects: RedirectEvent[]
+  redirects: RedirectLogEntry[]
   /** Canonical spelling the shell returned for this panel's registration. */
   boundShortcut: string | null
   seq: number
@@ -361,7 +374,8 @@ export function reduceSmoke(view: SmokeView, action: SmokeViewAction): SmokeView
     }
     case "redirect": {
       const seq = view.seq + 1
-      return { ...view, redirects: [...view.redirects, action.event].slice(-MAX_PRESSES), seq }
+      const entry: RedirectLogEntry = { ...action.event, seq }
+      return { ...view, redirects: [...view.redirects, entry].slice(-MAX_PRESSES), seq }
     }
   }
 }

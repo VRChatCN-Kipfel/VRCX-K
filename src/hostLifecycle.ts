@@ -15,13 +15,13 @@
 // too — use `parseHostLifecyclePayload`/`isHostLifecycleEnvelope` for IPC
 // payloads.
 
+import type { HostSnapshot } from "../host/src/contracts/hostLifecycle"
 import {
   HOST_LIFECYCLE_SCHEMA_ID,
   HOST_LIFECYCLE_SCHEMA_VERSION,
-  MAX_SAFE_INTEGER,
   isHostSnapshot,
+  MAX_SAFE_INTEGER,
 } from "../host/src/contracts/hostLifecycle"
-import type { HostSnapshot } from "../host/src/contracts/hostLifecycle"
 
 export type {
   HostCommand,
@@ -33,7 +33,7 @@ export type {
   HostSnapshot,
 } from "../host/src/contracts/hostLifecycle"
 
-export { HOST_LIFECYCLE_SCHEMA_ID, HOST_LIFECYCLE_SCHEMA_VERSION, MAX_SAFE_INTEGER, isHostSnapshot }
+export { HOST_LIFECYCLE_SCHEMA_ID, HOST_LIFECYCLE_SCHEMA_VERSION, isHostSnapshot, MAX_SAFE_INTEGER }
 
 /** Response of the Tauri command `get_host_lifecycle` and payload of the `host-lifecycle` event. */
 export type HostLifecycleEnvelope = { snapshot: HostSnapshot }

@@ -16,9 +16,9 @@
 //  - Single reload timeout is 10s (below the 25s host stop hard cap).
 
 import { realpathSync } from "node:fs"
+import { createRequire } from "node:module"
 import { dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import { createRequire } from "node:module"
 import type { Entry } from "@cordisjs/plugin-loader"
 
 export const RELOAD_TIMEOUT_MS = 10_000
@@ -100,7 +100,7 @@ function realPath(input: string): string {
   for (;;) {
     try {
       const real = realpathSync(cursor)
-      return tail.length ? real + "/" + tail.reverse().join("/") : real
+      return tail.length ? `${real}/${tail.reverse().join("/")}` : real
     } catch {
       const parent = dirname(cursor)
       if (parent === cursor) return input
@@ -137,7 +137,7 @@ export function collectCacheKeysUnderRoots(
     const lexical = fold(key)
     const real = fold(realPath(key))
     const inSpace = (space: string[], probe: string) =>
-      space.some((root) => probe.startsWith(root + "/") || probe === root)
+      space.some((root) => probe.startsWith(`${root}/`) || probe === root)
     if (inSpace(lexicalRoots, lexical) || inSpace(realRoots, real)) {
       keys.push(key)
     }

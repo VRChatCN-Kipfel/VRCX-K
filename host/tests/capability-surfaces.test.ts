@@ -13,14 +13,14 @@
 import { describe, expect, test } from "bun:test"
 import { Context } from "cordis"
 import { createShellCapabilities, ShellHandle } from "../src/capability"
-import { TrayService } from "../src/tray"
-import { ShortcutService } from "../src/shortcut"
-import { ShutdownSignal } from "../src/signal"
 import {
   HOST_SERVICES,
   REQUESTABLE_CAPABILITIES,
   SHELL_SUBDOMAINS,
 } from "../src/contracts/capabilityInventory"
+import { ShortcutService } from "../src/shortcut"
+import { ShutdownSignal } from "../src/signal"
+import { TrayService } from "../src/tray"
 
 /** Build a context carrying exactly the services the host provides at boot. */
 function bootServices(): Context {

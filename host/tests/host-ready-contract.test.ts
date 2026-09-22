@@ -25,7 +25,7 @@ const schema = (await Bun.file(schemaPath).json()) as {
   $id: string
   additionalProperties: boolean
   required: string[]
-  properties: Record<string, any>
+  properties: Record<string, unknown>
 }
 
 const env = collectHostEnvironment()

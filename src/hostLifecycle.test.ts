@@ -3,6 +3,9 @@
 import { describe, expect, test } from "bun:test"
 import {
   formatHostSnapshot,
+  type HostLifecycleAction,
+  type HostLifecycleView,
+  type HostSnapshot,
   hostLifecycleSummary,
   initialHostLifecycleView,
   isHostLifecycleEnvelope,
@@ -11,9 +14,6 @@ import {
   parseHostLifecyclePayload,
   reduceHostLifecycle,
   subscribeHostLifecycle,
-  type HostLifecycleAction,
-  type HostLifecycleView,
-  type HostSnapshot,
 } from "./hostLifecycle"
 
 const snapshot = (over: Partial<HostSnapshot> = {}): HostSnapshot => ({

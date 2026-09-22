@@ -7,9 +7,9 @@
 //      heartbeat entry (a loose match used to make unrelated plugins break
 //      host startup).
 import { describe, expect, test } from "bun:test"
-import { Context } from "cordis"
 import type { Entry } from "@cordisjs/plugin-loader"
-import { FIBER_ACTIVE, FIBER_FAILED, declaresHeartbeat } from "../src/fiber"
+import { Context } from "cordis"
+import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "../src/fiber"
 
 describe("cordis fiber states used by the readiness check", () => {
   test("ACTIVE is observed on a live plugin fiber", async () => {

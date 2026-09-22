@@ -18,21 +18,21 @@
 // watcher is off: the hint below distinguishes "this page received nothing"
 // from "the host is not pushing at all".
 
+import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
-import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import {
   appendLog,
-  dedupPush,
   DEV_WATCH_DEDUP_WINDOW_MS,
-  idleHint,
-  MAX_LOG,
-  summarize,
-  toastPlan,
   type DevWatchListenState,
   type DevWatchLog,
   type DevWatchPush,
+  dedupPush,
+  idleHint,
+  MAX_LOG,
   type PushDedupState,
+  summarize,
+  toastPlan,
 } from "./devWatchCore"
 
 function showToast(push: DevWatchPush) {
@@ -158,7 +158,7 @@ export function DevWatchPanel() {
               {push.status ? <span className="devwatch-status">{push.status}</span> : null}
               <span className="devwatch-summary" title={push.error ?? undefined}>
                 {summarize(push)}
-                {push.error ? " — " + push.error : ""}
+                {push.error ? ` — ${push.error}` : ""}
               </span>
             </li>
           ))}

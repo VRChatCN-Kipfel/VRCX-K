@@ -1,27 +1,27 @@
 import "./log"
-import { fileURLToPath, pathToFileURL } from "node:url"
 import { readFile } from "node:fs/promises"
+import { fileURLToPath, pathToFileURL } from "node:url"
+import Group from "@cordisjs/plugin-group"
+import Include from "@cordisjs/plugin-include"
+import type { Entry } from "@cordisjs/plugin-loader"
+import Loader from "@cordisjs/plugin-loader"
+import LoggerConsole from "@cordisjs/plugin-logger-console"
+import Timer from "@cordisjs/plugin-timer"
 import { Context } from "cordis"
 import { RPCTransportClosedError } from "kkrpc"
-import type { Entry } from "@cordisjs/plugin-loader"
-import Include from "@cordisjs/plugin-include"
-import Loader from "@cordisjs/plugin-loader"
-import Group from "@cordisjs/plugin-group"
-import Timer from "@cordisjs/plugin-timer"
-import LoggerConsole from "@cordisjs/plugin-logger-console"
-import { log } from "./log"
-import { ShutdownSignal } from "./signal"
-import { makeRestartRequester } from "./restart"
-import { stopOnShellLost, stopOnStdinLoss } from "./lifecycle"
-import { watchStdinClose } from "./stdin-watch"
-import { connectShellStdio, type DevWatchPush } from "./stdio"
-import { listenHostWs } from "./ws"
+import { createShellCapabilities, ShellHandle } from "./capability"
 import { attachDevWatch, DevWatch, type DevWatchEvent } from "./dev-watch"
 import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "./fiber"
-import { TrayService } from "./tray"
-import { ShortcutService } from "./shortcut"
-import { createShellCapabilities, ShellHandle } from "./capability"
+import { stopOnShellLost, stopOnStdinLoss } from "./lifecycle"
+import { log } from "./log"
 import { loadManifests } from "./manifests"
+import { makeRestartRequester } from "./restart"
+import { ShortcutService } from "./shortcut"
+import { ShutdownSignal } from "./signal"
+import { watchStdinClose } from "./stdin-watch"
+import { connectShellStdio, type DevWatchPush } from "./stdio"
+import { TrayService } from "./tray"
+import { listenHostWs } from "./ws"
 
 export { HOST_RESTART_EXIT as EXIT_RESTART } from "./api"
 
@@ -165,7 +165,7 @@ async function waitForIncludeReady(ctx: Context, includeEntry: Entry): Promise<v
 async function bootstrap() {
   log("starting Cordis...")
   const ctx = new Context()
-  ctx.baseUrl = pathToFileURL(process.cwd()).href + "/"
+  ctx.baseUrl = `${pathToFileURL(process.cwd()).href}/`
 
   // Provide the shutdown signal service so plugins can participate in
   // graceful shutdown cooperatively via ctx.signal (see signal.ts).

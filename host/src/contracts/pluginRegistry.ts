@@ -1,6 +1,6 @@
 import type { Entry } from "@cordisjs/plugin-loader"
-import type { VRCXKPluginManifest } from "./pluginManifest.generated"
 import { assertPluginManifest, assertSupportedRestartClass } from "./pluginContract"
+import type { VRCXKPluginManifest } from "./pluginManifest.generated"
 
 /**
  * The host-side manifest registry (M2-2).

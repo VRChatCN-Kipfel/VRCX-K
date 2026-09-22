@@ -16,6 +16,20 @@ beforeAll(async () => {
 
 let child: ReturnType<typeof spawn> | undefined
 
+/**
+ * The pipe end of the spawned child, checked.
+ *
+ * `spawn` types these as optional (they depend on `stdio`), but this test always
+ * passes `["pipe","pipe","pipe"]`. Throwing names a mis-spawned fixture instead
+ * of crashing on `undefined` inside the transport.
+ */
+function pipe<T>(end: T | undefined | null, name: string): T {
+  if (end === undefined || end === null) {
+    throw new Error(`spawned host has no ${name} pipe (was it spawned with "pipe"?)`)
+  }
+  return end
+}
+
 afterEach(() => {
   if (child?.pid) killTree(child.pid)
   child = undefined
@@ -36,9 +50,9 @@ test("host stdio ready then ping and stop", async () => {
   })
 
   const transport = stdioJsonTransport({
-    readable: child.stdout!,
-    writable: child.stdin!,
-    lifecycle: child.stdout!,
+    readable: pipe(child.stdout, "stdout"),
+    writable: pipe(child.stdin, "stdin"),
+    lifecycle: pipe(child.stdout, "stdout"),
   })
   const channel = new RPCChannel<ShellSysAPI, HostStdioAPI>(transport, {
     expose: {
@@ -56,7 +70,8 @@ test("host stdio ready then ping and stop", async () => {
   expect(await host.stop()).toBe(true)
 
   const code = await new Promise<number | null>((resolve) => {
-    child!.once("exit", (exitCode) => resolve(exitCode))
+    if (!child) throw new Error("test did not spawn a host")
+    child.once("exit", (exitCode) => resolve(exitCode))
   })
   expect(code).toBe(0)
   channel.destroy()

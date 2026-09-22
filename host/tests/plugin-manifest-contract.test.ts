@@ -1,19 +1,18 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  assertPluginIndexEntry,
   assertPluginManifest,
   assertSupportedRestartClass,
-  validatePluginIndexEntry,
-  validatePluginManifest,
   RESTART_CLASSES,
   SUPPORTED_RESTART_CLASSES,
+  validatePluginIndexEntry,
+  validatePluginManifest,
 } from "../src/contracts/pluginContract"
-import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
-import type { VRCXKPluginManifest } from "../src/contracts/pluginManifest.generated"
 import type { VRCXKPluginIndexEntry } from "../src/contracts/pluginIndexEntry.generated"
+import type { VRCXKPluginManifest } from "../src/contracts/pluginManifest.generated"
+import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
 
 const minimalManifest: VRCXKPluginManifest = {
   id: "friend-presence",

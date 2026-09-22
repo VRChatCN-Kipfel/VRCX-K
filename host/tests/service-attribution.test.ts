@@ -7,9 +7,9 @@
 // fail and the caller test reads `null`.
 import { describe, expect, test } from "bun:test"
 import { Context, Service } from "cordis"
-import { TrayService } from "../src/tray"
-import { ShortcutService } from "../src/shortcut"
 import { callerName } from "../src/capability"
+import { ShortcutService } from "../src/shortcut"
+import { TrayService } from "../src/tray"
 import type { TrayGroup } from "../src/tray-contract.generated"
 
 const group = (id: string): TrayGroup => ({

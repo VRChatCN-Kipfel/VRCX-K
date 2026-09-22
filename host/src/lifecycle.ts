@@ -181,12 +181,17 @@ export async function gracefulStopWithTimeout(
     console.error("[host] graceful cleanup completed with an error after timeout", err)
   })
 
+  // `begin()` returning true guarantees a deadline exists (`begin` assigns
+  // `_deadline` before returning true), but the accessor still admits null, so
+  // check instead of asserting. The `?? neverSettles` arm is unreachable in
+  // practice; it exists so the race below cannot be handed a bare `null`.
+  const deadline = signal.deadlinePromise
   const outcome = await Promise.race([
     cleanup.then(() => "done" as const),
     // Use the captured reference: `gracefulStop` above may already have torn
     // down the service, and re-reading `ctx.signal` here would dereference
     // `undefined` for the same reason guarded against at the top.
-    signal.deadlinePromise!,
+    deadline ?? new Promise<never>(() => {}),
   ])
 
   if (outcome === "timeout") {

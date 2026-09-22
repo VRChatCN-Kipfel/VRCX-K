@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import {
   assertTrayMenuSnapshot,
-  validateTrayMenuSnapshot,
   type TrayMenuSnapshot,
+  validateTrayMenuSnapshot,
 } from "../src/tray_contract"
 
 const action = (id: string, target: "host" | "core" | "app" = "host") => ({

@@ -11,11 +11,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { Context } from "cordis"
-import Loader from "@cordisjs/plugin-loader"
 import Include from "@cordisjs/plugin-include"
-import { loadManifests } from "../src/manifests"
+import Loader from "@cordisjs/plugin-loader"
+import { Context } from "cordis"
 import { PluginManifestRegistry } from "../src/contracts/pluginRegistry"
+import { loadManifests } from "../src/manifests"
 
 type Fixture = {
   root: string
@@ -35,7 +35,7 @@ async function bootWith(yml: string, files: Record<string, string>): Promise<Fix
   await writeFile(join(root, "cordis.yml"), yml)
 
   const ctx = new Context()
-  ctx.baseUrl = pathToFileURL(root).href + "/"
+  ctx.baseUrl = `${pathToFileURL(root).href}/`
   await ctx.plugin(Loader)
   ctx.loader.builtins.include = Include
   const includeId = await ctx.loader.create({
@@ -43,7 +43,11 @@ async function bootWith(yml: string, files: Record<string, string>): Promise<Fix
     config: { path: "./cordis.yml", enableLogs: false },
   })
   const includeEntry = ctx.loader.resolve(includeId)
-  const subtree = includeEntry.subtree!
+  // Checked, not asserted: the include entry has no subtree until cordis mounts
+  // it, so a missing one means the loader wiring is broken — a named failure
+  // beats iterating an `undefined` and reporting "nothing to do".
+  const subtree = includeEntry.subtree
+  if (!subtree) throw new Error("include entry has no subtree — cordis did not mount it")
 
   // The entries do not exist until the include tree settles — the real host
   // waits in `waitForIncludeReady` before calling us. Without this the iteration
@@ -82,12 +86,14 @@ describe("loadManifests wiring", () => {
       // The real host sets baseUrl to a file URL of its cwd (index.ts). A bare
       // Context has no usable baseUrl, and discovering that is what made this
       // test fail before `resolvePluginDir` reported the two cases separately.
-      ctx.baseUrl = pathToFileURL(f.root).href + "/"
+      ctx.baseUrl = `${pathToFileURL(f.root).href}/`
       const result = await loadManifests(ctx, { subtree: { entries: f.entries } } as never)
 
       expect(result.skipped).toEqual([])
       expect(result.loaded).toEqual(["with-manifest"])
-      const registry = (await import("../src/manifests")).manifestRegistryOf(ctx)!
+      const manifestModule = await import("../src/manifests")
+      const registry = manifestModule.manifestRegistryOf(ctx)
+      if (!registry) throw new Error("manifests did not register their registry on the ctx")
       expect(registry).toBeInstanceOf(PluginManifestRegistry)
       // Reachable through ANY run's prefix, because the key is the suffix.
       expect(registry.get("deadbeef:with-manifest")?.id).toBe("with-manifest")
@@ -102,7 +108,7 @@ describe("loadManifests wiring", () => {
     })
     try {
       const ctx = new Context()
-      ctx.baseUrl = pathToFileURL(f.root).href + "/"
+      ctx.baseUrl = `${pathToFileURL(f.root).href}/`
       const result = await loadManifests(ctx, { subtree: { entries: f.entries } } as never)
       // Absent declaration simply means nothing to compare against (design P2);
       // refusing to load is a decision made BEFORE the entry exists.
@@ -127,7 +133,7 @@ describe("loadManifests wiring", () => {
         manifest({ id: "some-other-id" }),
       )
       const ctx = new Context()
-      ctx.baseUrl = pathToFileURL(f.root).href + "/"
+      ctx.baseUrl = `${pathToFileURL(f.root).href}/`
       const result = await loadManifests(ctx, { subtree: { entries: f.entries } } as never)
       expect(result.loaded).toEqual([])
       expect(result.skipped.length).toBe(1)
@@ -147,7 +153,7 @@ describe("loadManifests wiring", () => {
         manifest({ version: "not-a-version" }),
       )
       const ctx = new Context()
-      ctx.baseUrl = pathToFileURL(f.root).href + "/"
+      ctx.baseUrl = `${pathToFileURL(f.root).href}/`
       const result = await loadManifests(ctx, { subtree: { entries: f.entries } } as never)
       expect(result.loaded).toEqual([])
       expect(result.skipped.length).toBe(1)

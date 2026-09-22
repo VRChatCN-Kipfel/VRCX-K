@@ -47,9 +47,18 @@ test("a write failure during the handshake stops the host with the dedicated cod
   })
 
   const stderr: string[] = []
-  child.stderr!.on("data", (c: Buffer) => stderr.push(c.toString()))
+  // Checked rather than asserted: `spawn` types the pipes as optional (they come
+  // from `stdio`), while this test always passes ["pipe","pipe","pipe"].
+  const errPipe = child.stderr
+  const outPipe = child.stdout
+  if (!errPipe || !outPipe) {
+    throw new Error('spawned host has no stdio pipes (spawn needs stdio: ["pipe","pipe","pipe"])')
+  }
+  errPipe.on("data", (c: Buffer) => stderr.push(c.toString()))
 
-  const exited = new Promise<number | null>((resolve) => child!.once("exit", resolve))
+  const exited = new Promise<number | null>((resolve) =>
+    child.once("exit", (exitCode) => resolve(exitCode)),
+  )
 
   // Break our read end of the host's stdout IMMEDIATELY, before it writes the
   // `ready` frame.
@@ -65,7 +74,7 @@ test("a write failure during the handshake stops the host with the dedicated cod
   // We deliberately do NOT close the host's stdin, so the READ-side detector
   // (`onClose`) stays silent and cannot mask the result: whatever exit code we
   // observe is attributable to the WRITE path alone.
-  child.stdout!.destroy()
+  outPipe.destroy()
 
   const code = await Promise.race([
     exited,

@@ -31,6 +31,32 @@ beforeAll(async () => {
 
 let proc: ReturnType<typeof Bun.spawn> | undefined
 
+/**
+ * The host process spawned by the current test.
+ *
+ * Every test assigns `proc` before using it, so an absent one means the fixture
+ * got out of order — worth throwing over rather than asserting past.
+ */
+function hostProc(): ReturnType<typeof Bun.spawn> {
+  if (!proc) throw new Error("test did not spawn a host process")
+  return proc
+}
+
+/**
+ * The pipe end of a spawn result, checked.
+ *
+ * `Bun.spawn` types `stdin`/`stdout`/`stderr` as optional because they depend on
+ * the `stdin`/`stdout`/`stderr` options; these tests always pass `"pipe"`, which
+ * the type system cannot see. Throwing keeps a mis-spawned fixture from turning
+ * into a confusing "cannot read property of undefined".
+ */
+function pipe<T>(end: T | undefined, name: string): T {
+  if (end === undefined || end === null) {
+    throw new Error(`spawned host has no ${name} pipe (was it spawned with "pipe"?)`)
+  }
+  return end
+}
+
 afterEach(() => {
   if (proc) killTree(proc.pid)
   proc = undefined
@@ -60,7 +86,7 @@ test("shell-less host stops itself when the launcher's stdin pipe closes", async
   await new Promise((r) => setTimeout(r, 300))
 
   // The launcher disappearing IS the write end going away.
-  proc.stdin!.end?.()
+  pipe(hostProc().stdin, "stdin").end?.()
 
   const code = await withDeadline(proc.exited, 20_000, "host did not stop after stdin closed")
   expect(code).toBe(0)
@@ -109,7 +135,7 @@ test("shell-attached host stops when the shell end of stdin goes away", async ()
 
   // No stop RPC — closing the write end is the "shell died" signal (#33). The
   // host is free to be mid-`await shell.ready` when it lands.
-  proc.stdin!.end?.()
+  pipe(hostProc().stdin, "stdin").end?.()
 
   const code = await withDeadline(
     proc.exited,
@@ -140,7 +166,7 @@ test("shell dying mid-handshake is a clean stop, not a fatal bootstrap error", a
   const stderrChunks: string[] = []
   const collector = (async () => {
     try {
-      for await (const chunk of proc!.stderr as ReadableStream<Uint8Array>) {
+      for await (const chunk of pipe(hostProc().stderr, "stderr") as ReadableStream<Uint8Array>) {
         stderrChunks.push(new TextDecoder().decode(chunk))
       }
     } catch {
@@ -157,7 +183,7 @@ test("shell dying mid-handshake is a clean stop, not a fatal bootstrap error", a
 
   // Pull the pipe immediately: `shell.ready` is outstanding right now, which is
   // exactly the race this test pins.
-  proc.stdin!.end?.()
+  pipe(hostProc().stdin, "stdin").end?.()
 
   const code = await withDeadline(
     proc.exited,
@@ -197,15 +223,15 @@ test("a genuine startup failure still exits loudly instead of being swallowed", 
     windowsHide: true,
   })
   const stderrChunks: string[] = []
-  child.stderr!.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()))
+  pipe(child.stderr, "stderr").on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()))
 
   try {
     // Attach as the shell, but expose nothing — `ready` is therefore unknown,
     // and the peer answers the call with an error frame.
     const transport = stdioJsonTransport({
-      readable: child.stdout!,
-      writable: child.stdin!,
-      lifecycle: child.stdout!,
+      readable: pipe(child.stdout, "stdout"),
+      writable: pipe(child.stdin, "stdin"),
+      lifecycle: pipe(child.stdout, "stdout"),
     })
     const channel = new RPCChannel(transport, { expose: {} })
 
@@ -219,7 +245,10 @@ test("a genuine startup failure still exits loudly instead of being swallowed", 
     expect(code).toBe(1)
     channel.destroy()
   } finally {
-    killTree(child.pid!)
+    // No throw here on purpose: this is a `finally`, and throwing would replace
+    // whatever the test actually failed on. A missing pid is reported by the
+    // assertion path instead of being escalated into a teardown error.
+    if (child.pid !== undefined) killTree(child.pid)
   }
 }, 40_000)
 
@@ -242,7 +271,7 @@ test("stdinIsPeerChannel classifies the real fd 0 (pipe vs ignore)", async () =>
 
   const piped = ask("pipe")
   const pipedFacts = JSON.parse((await new Response(piped.stdout).text()).trim())
-  piped.stdin!.end?.()
+  pipe(piped.stdin, "stdin").end?.()
   expect(pipedFacts.peer, `piped fd 0 facts: ${JSON.stringify(pipedFacts)}`).toBe(true)
   await piped.exited
 

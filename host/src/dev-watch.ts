@@ -20,14 +20,14 @@
 //     reloads, so the caller MUST return its promise from the disposer
 //     (`attachDevWatch` does exactly that).
 
-import { watch } from "chokidar"
 import { statSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import type { Context } from "cordis"
 import type { Entry, EntryTree } from "@cordisjs/plugin-loader"
-import { binding, mapPath, watchKey, type EntryBinding } from "./watch-path"
-import { reloadPluginEntry, type ReloadResult } from "./dev-reload"
+import { watch } from "chokidar"
+import type { Context } from "cordis"
+import { type ReloadResult, reloadPluginEntry } from "./dev-reload"
+import { binding, type EntryBinding, mapPath, watchKey } from "./watch-path"
 
 export type DevWatchEvent =
   | { type: "started"; roots: string[] }

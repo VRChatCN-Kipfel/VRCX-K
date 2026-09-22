@@ -8,9 +8,9 @@
 // attached we reuse the existing exit-51 path (graceful stop, then 51); the
 // shell supervisor owns the actual restart — we never spawn or supervise.
 
+import type { Context } from "cordis"
 import { HOST_RESTART_EXIT } from "./api"
 import { gracefulStopWithTimeout } from "./lifecycle"
-import type { Context } from "cordis"
 
 /** How long a dev `restart-required` outcome is suppressed after boot. */
 export const RESTART_GRACE_MS = 10_000

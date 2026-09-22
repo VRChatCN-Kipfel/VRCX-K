@@ -2,15 +2,15 @@
 import { describe, expect, test } from "bun:test"
 import {
   appendLog,
-  dedupPush,
   DEV_WATCH_DEDUP_WINDOW_MS,
+  type DevWatchLog,
+  type DevWatchPush,
+  dedupPush,
   idleHint,
   MAX_LOG,
   pushSignature,
   summarize,
   toastPlan,
-  type DevWatchLog,
-  type DevWatchPush,
 } from "./devWatchCore"
 
 const reload = (status: string | undefined, error?: string): DevWatchPush => ({

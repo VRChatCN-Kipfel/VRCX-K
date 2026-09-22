@@ -1,8 +1,8 @@
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020"
-import manifestSchema from "../../../contracts/plugin-manifest/v1/plugin-manifest.schema.json"
 import indexEntrySchema from "../../../contracts/plugin-index/v1/plugin-index-entry.schema.json"
-import type { VRCXKPluginManifest } from "./pluginManifest.generated"
+import manifestSchema from "../../../contracts/plugin-manifest/v1/plugin-manifest.schema.json"
 import type { VRCXKPluginIndexEntry } from "./pluginIndexEntry.generated"
+import type { VRCXKPluginManifest } from "./pluginManifest.generated"
 
 /** Canonical schema revision for the author-owned plugin manifest. */
 export const PLUGIN_MANIFEST_SCHEMA_VERSION = 1 as const

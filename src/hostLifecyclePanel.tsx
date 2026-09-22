@@ -15,17 +15,17 @@
 // `cancelled` + `unlisten` so React 19 StrictMode double-invoke neither
 // double-subscribes nor leaks the listener.
 
-import { useEffect, useState } from "react"
 import { invoke, isTauri } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
+import { useEffect, useState } from "react"
 import {
   formatHostSnapshot,
+  type HostLifecycleAction,
+  type HostLifecycleView,
   hostLifecycleSummary,
   initialHostLifecycleView,
   reduceHostLifecycle,
   subscribeHostLifecycle,
-  type HostLifecycleAction,
-  type HostLifecycleView,
 } from "./hostLifecycle"
 
 export function HostLifecyclePanel() {

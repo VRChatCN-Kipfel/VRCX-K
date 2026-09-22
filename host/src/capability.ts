@@ -1,4 +1,4 @@
-import { Service, symbols, type Context } from "cordis"
+import { type Context, Service, symbols } from "cordis"
 import type { AppInfo, PathKind, ShellStdioBridge, ShellSysAPI } from "./stdio"
 
 type ShellApi = ShellSysAPI["shell"]
@@ -126,6 +126,12 @@ function describe(value: unknown): string {
  */
 class CapabilityNode extends Service {}
 
+// `any[]` is deliberate and must stay: the curated specs below rely on
+// parameter contravariance, so `unknown[]` makes every one of them fail to
+// assign (`Argument of type 'unknown' is not assignable to 'string'`). The
+// wrapper forwards arguments verbatim and never inspects them, so this is the
+// one place where `any` buys real flexibility rather than hiding a mistake.
+// biome-ignore lint/suspicious/noExplicitAny: contravariance needs `any`, see above
 type CapabilityMethod = (shell: ShellApi | undefined, ...args: any[]) => unknown
 type CapabilitySpec = { [key: string]: CapabilityMethod | CapabilitySpec }
 

@@ -18,10 +18,10 @@
  * loads, which is why the template must declare it.
  */
 import { describe, expect, test } from "bun:test"
-import { Context } from "cordis"
-import Loader from "@cordisjs/plugin-loader"
 import Group from "@cordisjs/plugin-group"
+import Loader from "@cordisjs/plugin-loader"
 import Timer from "@cordisjs/plugin-timer"
+import { Context } from "cordis"
 
 const FIBER_ACTIVE = 2
 const FIBER_FAILED = 3
@@ -35,7 +35,11 @@ describe("host wiring of adopted upstream plugins", () => {
     expect(typeof timer.timeout).toBe("function")
 
     let fired = false
-    timer.timeout!(() => {
+    // The `typeof` check above already proves this is a function; re-check so
+    // the call site needs no assertion (and a regression fails with a message
+    // rather than "timer.timeout is not a function").
+    if (typeof timer.timeout !== "function") throw new Error("ctx.timeout is not callable")
+    timer.timeout(() => {
       fired = true
     }, 20)
     await new Promise((r) => setTimeout(r, 200))

@@ -14,16 +14,25 @@ export type MappingResult =
   | { kind: "ambiguous"; path: string; entryIds: string[] }
 
 function lexicalPath(input: string | URL): string {
-  const raw = typeof input === "string" ? input : undefined
-  const url = input instanceof URL ? input : /^file:/i.test(raw!) ? new URL(raw!) : undefined
-  if (url && url.protocol !== "file:") {
-    throw new TypeError(`watch paths must use the file: protocol, received ${url.protocol}`)
+  // Narrow up front instead of asserting later: `raw` and `url` are the two
+  // mutually exclusive spellings, and keeping them as a discriminated pair makes
+  // the two "cannot happen" branches below statically impossible rather than
+  // merely asserted. (Also removes the non-null assertions biome flagged.)
+  if (input instanceof URL) {
+    if (input.protocol !== "file:") {
+      throw new TypeError(`watch paths must use the file: protocol, received ${input.protocol}`)
+    }
+    return normalize(resolve(fileURLToPath(input)))
   }
-  if (!url && raw !== undefined && /^[a-z][a-z\d+.-]*:/i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) {
+
+  const raw = input
+  if (/^file:/i.test(raw)) {
+    return normalize(resolve(fileURLToPath(new URL(raw))))
+  }
+  if (/^[a-z][a-z\d+.-]*:/i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) {
     throw new TypeError(`watch paths must use the file: protocol, received ${raw}`)
   }
-  const value = url ? fileURLToPath(url) : raw!
-  return normalize(resolve(value))
+  return normalize(resolve(raw))
 }
 
 /** Platform-neutral comparison key; Windows paths are case-insensitive. */

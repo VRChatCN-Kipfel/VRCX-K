@@ -8,23 +8,23 @@ import { describe, expect, test } from "bun:test"
 import {
   CAPABILITIES,
   DEFAULT_SHORTCUT,
-  MAX_PRESSES,
-  SMOKE_BUTTONS,
   describeDelivery,
   describeValue,
   formatPress,
   formatRedirect,
   initialSmokeView,
+  MAX_PRESSES,
   parseRedirectEvent,
   parseShortcutPress,
   parseSmokeReport,
   reduceSmoke,
   registeredAccelerator,
+  type ShortcutPress,
+  SMOKE_BUTTONS,
+  type SmokeReport,
   shortcutHint,
   singleInstanceHint,
   summarizeCapability,
-  type ShortcutPress,
-  type SmokeReport,
 } from "./capabilitySmokeCore"
 
 const CANONICAL = "shift+control+KeyK"
@@ -338,6 +338,23 @@ describe("panel state", () => {
       view = reduceSmoke(view, { kind: "redirect", event: { focused: true } })
     }
     expect(view.redirects).toHaveLength(MAX_PRESSES)
+  })
+
+  test("every redirect log entry carries its own stable seq", () => {
+    // The panel renders this list with `.reverse()`, so a positional index is
+    // not a stable React key: when a new redirect arrives every position shifts
+    // and React would reuse the wrong <li>. The entry therefore has to carry the
+    // seq the reducer allocated for it. Regression for the `key={index}` that
+    // biome's noArrayIndexKey caught.
+    let view = initialSmokeView()
+    for (let i = 0; i < 3; i += 1) {
+      view = reduceSmoke(view, { kind: "redirect", event: { focused: true } })
+    }
+    expect(view.redirects.map((entry) => entry.seq)).toEqual([1, 2, 3])
+    // Distinct keys are what React needs; duplicates would defeat the point.
+    expect(new Set(view.redirects.map((entry) => entry.seq)).size).toBe(3)
+    // The payload fields must survive the wrap unchanged.
+    expect(view.redirects.every((entry) => entry.focused === true)).toBe(true)
   })
 
   test("reset clears results, presses, redirects and the binding", () => {

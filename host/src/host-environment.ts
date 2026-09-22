@@ -10,7 +10,7 @@
 // Rust mirrors the resulting shape in `src-tauri/src/host_ready.rs`.
 
 import { cpus, totalmem } from "node:os"
-import { toArch, toPlatform, type HostReady } from "./contracts/hostReady"
+import { type HostReady, toArch, toPlatform } from "./contracts/hostReady"
 
 /**
  * The environment half of the handshake, read from the running process.

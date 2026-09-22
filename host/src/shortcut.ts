@@ -17,7 +17,7 @@
 // `register` returns `no-shell` instead of throwing, and presses are simply
 // never delivered.
 
-import { Service, type Context } from "cordis"
+import { type Context, Service } from "cordis"
 import type { ShellShortcutBridge, ShortcutPressEvent, ShortcutRegistration } from "./stdio"
 
 declare module "cordis" {

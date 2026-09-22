@@ -3,9 +3,9 @@ import {
   bunTargetForTriple,
   compileFailureMessage,
   parseArgs,
+  RUST_TO_BUN_TARGET,
   resolveTargetTriple,
   sidecarName,
-  RUST_TO_BUN_TARGET,
 } from "./build-host"
 
 describe("sidecar target mapping", () => {

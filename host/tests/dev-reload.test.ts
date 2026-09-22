@@ -10,8 +10,8 @@ import {
   collectCacheKeysUnderRoots,
   invalidateCache,
   moduleCache,
-  reloadPluginEntry,
   type ReloadDeps,
+  reloadPluginEntry,
 } from "../src/dev-reload"
 
 const roots: string[] = []

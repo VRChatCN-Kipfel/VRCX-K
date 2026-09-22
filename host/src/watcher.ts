@@ -1,6 +1,6 @@
-import { watch, type FSWatcher, type ChokidarOptions } from "chokidar"
 import { statSync } from "node:fs"
 import { isAbsolute, resolve, sep } from "node:path"
+import { type ChokidarOptions, type FSWatcher, watch } from "chokidar"
 import type { EntryBinding, MappingResult } from "./watch-path"
 import { canonicalPath, mapPath } from "./watch-path"
 

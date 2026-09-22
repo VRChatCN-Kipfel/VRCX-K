@@ -16,14 +16,14 @@
  *      itself pinned against the RUNNING host by `capability-surfaces.test.ts`.
  */
 import { describe, expect, test } from "bun:test"
-import { validatePluginManifest } from "../src/contracts/pluginContract"
+import manifestSchema from "../../contracts/plugin-manifest/v1/plugin-manifest.schema.json"
 import {
   HOST_SERVICES,
+  isHostService,
   REQUESTABLE_CAPABILITIES,
   SHELL_SUBDOMAINS,
-  isHostService,
 } from "../src/contracts/capabilityInventory"
-import manifestSchema from "../../contracts/plugin-manifest/v1/plugin-manifest.schema.json"
+import { validatePluginManifest } from "../src/contracts/pluginContract"
 
 const base = { id: "x", version: "1.0.0", author: "a", name: "X" }
 

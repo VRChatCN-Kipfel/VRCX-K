@@ -10,7 +10,7 @@
 //   - with no shell attached nothing pretends to be registered.
 import { describe, expect, test } from "bun:test"
 import { Context } from "cordis"
-import { ShortcutService, normalizePress, type ShortcutServiceOptions } from "../src/shortcut"
+import { normalizePress, ShortcutService, type ShortcutServiceOptions } from "../src/shortcut"
 import type { ShellShortcutBridge, ShortcutPressEvent, ShortcutRegistration } from "../src/stdio"
 
 // ShortcutService is a cordis `Service` (M2-1 attribution), so it needs a

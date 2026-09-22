@@ -19,10 +19,10 @@
 //     `setGroups` returns a `no-shell` verdict and the pending content is pushed
 //     once a shell attaches (`attachShell`).
 
-import { Service, type Context } from "cordis"
-import { validateTrayMenuSnapshot, TRAY_SCHEMA_VERSION } from "./tray_contract"
-import type { TrayGroup, TrayMenuSnapshot } from "./tray-contract.generated"
+import { type Context, Service } from "cordis"
 import type { TrayActionEvent, TraySetSnapshotResult } from "./stdio"
+import { TRAY_SCHEMA_VERSION, validateTrayMenuSnapshot } from "./tray_contract"
+import type { TrayGroup, TrayMenuSnapshot } from "./tray-contract.generated"
 
 declare module "cordis" {
   interface Context {
@@ -273,7 +273,7 @@ export class TrayService extends Service {
     } else {
       try {
         const result = await this.push(snapshot)
-        if (result && result.ok) {
+        if (result?.ok) {
           this.pushedFingerprint = fingerprint
           verdict = { status: "pushed", revision, changed: true }
         } else {

@@ -6,10 +6,10 @@
 // absent (clean checkout before the build step) these tests skip instead of
 // failing; CI/dev must run `bun run build:host` first for real coverage.
 
+import { afterAll, beforeAll, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { existsSync, statSync } from "node:fs"
 import { join } from "node:path"
-import { afterAll, beforeAll, expect, test } from "bun:test"
 import { HOST_SPAWN_DETACHED, killTree, readReady, warmBun } from "./helpers"
 
 const repoRoot = join(import.meta.dir, "..", "..")
@@ -101,10 +101,14 @@ test.skipIf(!available)(
     expect(ready.hostVersion).toBe("0.0.1")
 
     // Graceful stop via the stdio RPC (compact protocol the Rust Peer speaks).
-    const frame = JSON.stringify({ t: "q", id: "smoke-stop", op: "call", p: ["stop"] }) + "\n"
-    proc.stdin!.write(frame)
-    await proc.stdin!.flush?.()
-    proc.stdin!.end?.()
+    const frame = `${JSON.stringify({ t: "q", id: "smoke-stop", op: "call", p: ["stop"] })}\n`
+    // Checked, not asserted: the sidecar is spawned with `stdin: "pipe"`, which
+    // the type system cannot see. A missing pipe means the spawn options drifted.
+    const stdin = proc.stdin
+    if (!stdin) throw new Error('sidecar has no stdin pipe (spawn needs stdin: "pipe")')
+    stdin.write(frame)
+    await stdin.flush?.()
+    stdin.end?.()
     const exited = await proc.exited
     expect(exited).toBe(0)
   },

@@ -3,15 +3,15 @@
 // no-shell behaviour and action fan-out. No real shell is involved.
 import { describe, expect, test } from "bun:test"
 import { Context } from "cordis"
+import type { TraySetSnapshotResult } from "../src/stdio"
 import {
-  TrayService,
   fingerprintGroups,
   type TrayPush,
+  TrayService,
   type TrayServiceOptions,
   type TrayVerdict,
 } from "../src/tray"
 import type { TrayGroup, TrayMenuSnapshot } from "../src/tray-contract.generated"
-import type { TraySetSnapshotResult } from "../src/stdio"
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
