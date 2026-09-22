@@ -10,9 +10,10 @@
 - **Not every bare specifier is a hoisting accident — check `package.json` before "fixing" one.** A dependency declared in the **root** `package.json` (e.g. `kkrpc`, used by `src/host.ts` and also by probes) resolves from the repo root legitimately, so `import ... from "kkrpc"` in a probe is not itself a violation. The rule above exists for **host-only** dependencies (`cordis`, `@cordisjs/*`, `isomorphic-git`), which are absent from the root and would only resolve by luck.
 - **`bun -e` resolves bare specifiers against the CWD, not against your probe file.** A probe that spawns `bun -e "<code>"` (see `stdio-lifecycle/13-final-matrix.ts`) breaks the moment it is run from another directory, and the failure is **silent**: the child dies on import, prints nothing, and the probe reports "nothing fired" instead of "never ran". Resolve such modules in the parent with `Bun.resolveSync` / `pathToFileURL(...)` and inline the absolute `file://` URL. When a child can fail this way, assert on the child's own `shapeHonored`-style echo and exit non-zero rather than printing a table of `undefined`.
 - **Files under `docs/probes/` are NOT covered by the `biome` gate.** `biome.json`'s
-  `files.includes` lists `src/` (ts/tsx/**css**), `host/src/`, `host/tests/`, `scripts/`,
-  `packages/`, `examples/` and the root `index.html` — so `bun run check:js` reports
-  "Checked 81 files" while the repo holds ~124 `.ts`/`.tsx` files (plus CSS/HTML).
+  `files.includes` lists `src/` (ts/tsx/**css**), `host/src/`, `host/tests/`,
+  `host/plugins/`, `scripts/`, `packages/`, `examples/`, and the root
+  `vite.config.ts` / `index.ts` / `index.html` — so `bun run check:js` reports
+  "Checked 84 files" while the repo holds ~124 `.ts`/`.tsx` files (plus CSS/HTML).
   **A probe here can be unformatted, unsorted, and lint-dirty without CI noticing.**
   This is deliberate (probes are throwaway experiment code, and they carry their own
   conventions above), not an oversight — but do not read a green `check:js` as

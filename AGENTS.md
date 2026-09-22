@@ -122,7 +122,7 @@ VRCX-K/
 | 1 | Rust 格式 | `cargo fmt --all --check` | `src-tauri/` |
 | 2 | Rust lint | `cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings` | `src-tauri/`（警告即失败） |
 | 3 | TS 类型 | `bun run typecheck` | 前端 + host + 五套 tsconfig |
-| 4 | JS/TS 格式 + lint | `bun run check:js` | `.ts/.tsx`（biome，含 import 排序） |
+| 4 | JS/TS 格式 + lint | `bun run check:js` | 见 `biome.json` 的 `files.includes`（biome，含 import 排序）。当前覆盖 **84 个文件**：`src/**`（ts/tsx/css）、`host/src`、`host/tests`、`host/plugins`、`scripts`、`packages`、`examples`、根 `vite.config.ts` / `index.ts` / `index.html`；**不含** `docs/probes/**`（一次性实验代码，见其 README）与 `*.generated.ts`（契约镜像，归 `check:contracts`）。warning 也阻塞（`--error-on-warnings`） |
 | 5 | 契约漂移 | `bun run check:contracts` | schema ↔ 生成镜像逐字节 |
 
 ⚠ **`bun run verify` 只等于第 3–5 道加测试与构建**，它的定义是
