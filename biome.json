@@ -9,12 +9,14 @@
     "includes": [
       "src/**/*.ts",
       "src/**/*.tsx",
+      "src/**/*.css",
       "host/src/**/*.ts",
       "host/tests/**/*.ts",
       "scripts/**/*.ts",
       "packages/**/*.ts",
       "packages/**/*.tsx",
       "examples/**/*.ts",
+      "index.html",
       "!**/*.generated.ts"
     ]
   },
