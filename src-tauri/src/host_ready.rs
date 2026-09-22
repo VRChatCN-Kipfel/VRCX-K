@@ -138,6 +138,69 @@ impl HostReady {
             && self.capacity.cpu_count >= 1
             && self.capacity.total_mem_bytes >= 1
             && self.capacity.total_mem_bytes <= MAX_SAFE_INTEGER
+            && self.has_valid_extra()
+    }
+
+    /// Whether the forward-compatibility slot respects its bounds.
+    ///
+    /// The schema states these (`maxProperties: 32`, a camelCase `propertyNames`
+    /// rule, and scalar-only values), and `host/src/contracts/hostReady.ts`
+    /// enforces them in `isExtra`. Serde CANNOT: `extra` is a
+    /// `BTreeMap<String, serde_json::Value>`, so nothing about a key's spelling
+    /// or a value's shape is visible to the derive. Before this method existed,
+    /// Rust accepted a nested object, an array, a `bad-key`, or 40 keys while the
+    /// TS guard and the schema both rejected them — and `extra` is the ONLY open
+    /// surface in this contract, so leaving it unchecked undercut the entire
+    /// "the open surface must stay narrow" argument.
+    ///
+    /// Mirrors the TS guard clause for clause; keep the two in step. The
+    /// `extra_bounds_*` tests below are what fail if they drift.
+    pub fn has_valid_extra(&self) -> bool {
+        if self.extra.len() > MAX_EXTRA_ENTRIES {
+            return false;
+        }
+        self.extra
+            .iter()
+            .all(|(key, value)| is_extra_key(key) && is_extra_value(value))
+    }
+}
+
+/// Cap on the extension slot, mirroring the schema's `maxProperties: 32`.
+pub const MAX_EXTRA_ENTRIES: usize = 32;
+
+/// The extension slot's key rule: 1..=64 chars, `^[a-z][a-zA-Z0-9]*$`.
+///
+/// Written out rather than pulled in as a regex dependency: the pattern is tiny
+/// and fixed, and `regress` is already in the tree only for typify's generated
+/// regexes, not for this module's hand-written checks.
+///
+/// Note the ordering: the first character is consumed BEFORE the length check, so
+/// an empty key fails on the `None` arm rather than needing a separate case.
+/// Length is compared in bytes, which is safe because every accepted character is
+/// ASCII — a non-ASCII byte fails the `is_ascii_alphanumeric` test anyway.
+fn is_extra_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    key.len() <= 64 && chars.all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Scalar-only value rule: null, bool, string, or a FINITE number.
+///
+/// `Array` and `Object` are deliberately excluded — that is the substantive part
+/// of this check, because `extra` is the contract's only open surface and an
+/// unbounded sub-schema there would defeat the reason the top level can stay
+/// strict. The finiteness clause mirrors the TS guard's `Number.isFinite`;
+/// `serde_json` cannot represent a non-finite number coming off the wire, but
+/// keeping the two implementations literally equivalent means neither side can
+/// drift into accepting something the other rejects.
+fn is_extra_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::String(_) => true,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(f64::is_finite),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
     }
 }
 
@@ -305,6 +368,130 @@ mod tests {
         value.as_object_mut().unwrap().remove("extra");
         let ready: HostReady = serde_json::from_value(value).expect("absent extra must parse");
         assert!(ready.extra.is_empty());
+        // Absent extra must still be a USABLE handshake, not merely parseable.
+        assert!(ready.is_supported());
+    }
+
+    /// These are the bounds serde cannot express. Before `has_valid_extra`
+    /// existed, EVERY case below was accepted by Rust while the schema and the TS
+    /// guard both rejected it — a producer-drift check that silently did not check
+    /// the one open surface in the contract.
+    #[test]
+    fn extra_bounds_reject_more_than_32_entries() {
+        let mut ready = valid();
+        for i in 0..=MAX_EXTRA_ENTRIES {
+            ready.extra.insert(format!("k{i}"), serde_json::json!(1));
+        }
+        assert_eq!(ready.extra.len(), MAX_EXTRA_ENTRIES + 1);
+        assert!(
+            !ready.is_supported(),
+            "33 entries must exceed maxProperties: 32"
+        );
+        // Exactly at the cap is still fine — the bound is inclusive.
+        ready.extra.remove(&format!("k{MAX_EXTRA_ENTRIES}"));
+        assert_eq!(ready.extra.len(), MAX_EXTRA_ENTRIES);
+        assert!(
+            ready.is_supported(),
+            "32 entries is at the cap, not over it"
+        );
+    }
+
+    #[test]
+    fn extra_bounds_reject_non_camel_case_keys() {
+        for bad in ["bad-key", "Bad", "_x", "1abc", ""] {
+            let mut ready = valid();
+            ready.extra.insert(bad.into(), serde_json::json!(1));
+            assert!(!ready.is_supported(), "key {bad:?} must be rejected");
+        }
+        // A >64-char key is out of range too.
+        let mut ready = valid();
+        ready.extra.insert("a".repeat(65), serde_json::json!(1));
+        assert!(!ready.is_supported());
+        // ...but a 64-char one is exactly at the limit.
+        let mut ready = valid();
+        ready.extra.insert("a".repeat(64), serde_json::json!(1));
+        assert!(ready.is_supported());
+    }
+
+    /// The substantive one: `extra` is an open EXTENSION POINT, not an unbounded
+    /// sub-schema. Structure must be promoted to a named field instead of being
+    /// smuggled through here.
+    #[test]
+    fn extra_bounds_reject_structured_values() {
+        let mut ready = valid();
+        ready
+            .extra
+            .insert("nested".into(), serde_json::json!({"deep": true}));
+        assert!(!ready.is_supported(), "a nested object must be rejected");
+
+        let mut ready = valid();
+        ready.extra.insert("list".into(), serde_json::json!([1, 2]));
+        assert!(!ready.is_supported(), "an array must be rejected");
+
+        // Every scalar form stays welcome.
+        for ok in [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!("s"),
+            serde_json::json!(1),
+            serde_json::json!(0.5),
+            serde_json::json!(-3),
+        ] {
+            let mut ready = valid();
+            ready.extra.insert("value".into(), ok.clone());
+            assert!(ready.is_supported(), "scalar {ok} must be accepted");
+        }
+    }
+
+    /// The shared corpus, driven through BOTH guards.
+    ///
+    /// This file is read by this test AND by
+    /// `host/tests/host-ready-contract.test.ts`. Testing each side against its own
+    /// hand-written table is what let the two disagree in the first place — Rust
+    /// accepted nested objects, arrays, bad keys and oversized maps while the TS
+    /// guard and the schema rejected them. One corpus, both readers, so a drift
+    /// fails on whichever side moved.
+    #[test]
+    fn guard_parity_corpus_matches_this_mirror() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../contracts/host-ready/v1/guard-parity.corpus.json"
+        ))
+        .unwrap();
+
+        // The corpus's cap must match the schema's `maxProperties`, or the fixture
+        // itself would be asserting a stale bound.
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../contracts/host-ready/v1/host-ready.schema.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            corpus["maxProperties"], schema["properties"]["extra"]["maxProperties"],
+            "corpus and schema disagree about maxProperties"
+        );
+
+        let cases = corpus["cases"].as_array().expect("cases must be an array");
+        assert!(!cases.is_empty(), "corpus must not be empty");
+
+        let mut failures: Vec<String> = Vec::new();
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("?");
+            let expect = case["expect"].as_bool().expect("expect must be a bool");
+
+            // Go through the WIRE rather than building the map directly, so this
+            // exercises what actually arrives over stdio.
+            let mut payload = serde_json::to_value(valid()).unwrap();
+            payload["extra"] = case["extra"].clone();
+
+            let got = match serde_json::from_value::<HostReady>(payload) {
+                Ok(ready) => ready.is_supported(),
+                // A parse error is a rejection too; count it as `false`.
+                Err(_) => false,
+            };
+            if got != expect {
+                failures.push(format!("{name}: expected {expect}, got {got}"));
+            }
+        }
+        assert_eq!(failures, Vec::<String>::new(), "corpus disagreements");
     }
 
     #[test]

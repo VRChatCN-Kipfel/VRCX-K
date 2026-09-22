@@ -1,0 +1,22 @@
+{
+  "description": "Shared parity corpus for the host-ready `extra` slot. BOTH guards read this same file — host/tests/host-ready-contract.test.ts (TypeScript) and src-tauri/src/host_ready.rs (Rust, via include_str!) — because the two once DISAGREED: Rust accepted nested objects, arrays, non-camelCase keys and >32 entries that the TS guard and the schema both rejected. Testing each side against its own hand-written table would not have caught that; testing both against this one does. Add a case here when the bounds change, and both implementations must agree on it.",
+  "maxProperties": 32,
+  "cases": [
+    { "name": "empty object", "expect": true, "extra": {} },
+    { "name": "four scalars", "expect": true, "extra": { "buildId": "abc", "betaChannel": true, "probeScore": 0.5, "nothing": null } },
+    { "name": "negative number", "expect": true, "extra": { "n": -3 } },
+    { "name": "zero", "expect": true, "extra": { "n": 0 } },
+    { "name": "nested object", "expect": false, "extra": { "a": { "b": 1 } } },
+    { "name": "array", "expect": false, "extra": { "list": [1, 2] } },
+    { "name": "kebab key", "expect": false, "extra": { "bad-key": 1 } },
+    { "name": "uppercase first", "expect": false, "extra": { "Bad": 1 } },
+    { "name": "leading digit", "expect": false, "extra": { "1abc": 1 } },
+    { "name": "empty key", "expect": false, "extra": { "": 1 } },
+    { "name": "underscore start", "expect": false, "extra": { "_x": 1 } },
+    { "name": "dot separator", "expect": false, "extra": { "a.b": 1 } },
+    { "name": "key 64 chars", "expect": true, "extra": { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": 1 } },
+    { "name": "key 65 chars", "expect": false, "extra": { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": 1 } },
+    { "name": "32 entries", "expect": true, "extra": { "k0": 1, "k1": 1, "k2": 1, "k3": 1, "k4": 1, "k5": 1, "k6": 1, "k7": 1, "k8": 1, "k9": 1, "k10": 1, "k11": 1, "k12": 1, "k13": 1, "k14": 1, "k15": 1, "k16": 1, "k17": 1, "k18": 1, "k19": 1, "k20": 1, "k21": 1, "k22": 1, "k23": 1, "k24": 1, "k25": 1, "k26": 1, "k27": 1, "k28": 1, "k29": 1, "k30": 1, "k31": 1 } },
+    { "name": "33 entries", "expect": false, "extra": { "k0": 1, "k1": 1, "k2": 1, "k3": 1, "k4": 1, "k5": 1, "k6": 1, "k7": 1, "k8": 1, "k9": 1, "k10": 1, "k11": 1, "k12": 1, "k13": 1, "k14": 1, "k15": 1, "k16": 1, "k17": 1, "k18": 1, "k19": 1, "k20": 1, "k21": 1, "k22": 1, "k23": 1, "k24": 1, "k25": 1, "k26": 1, "k27": 1, "k28": 1, "k29": 1, "k30": 1, "k31": 1, "k32": 1 } }
+  ]
+}

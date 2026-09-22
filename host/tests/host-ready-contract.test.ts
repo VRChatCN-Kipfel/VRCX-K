@@ -167,3 +167,27 @@ test("the extension slot is bounded, not a free-for-all", () => {
   expect(isHostReady({ ...valid, extra: { nested: { a: 1 } } })).toBe(false)
   expect(isHostReady({ ...valid, extra: { list: [1, 2] } })).toBe(false)
 })
+
+// The Rust mirror reads this SAME corpus (via include_str!). That is the point:
+// the two implementations once disagreed about `extra` — Rust accepted nested
+// objects, arrays, bad keys and oversized maps that this guard rejected — and
+// testing each side against its own hand-written table could not have caught it.
+const corpusPath = new URL("../../contracts/host-ready/v1/guard-parity.corpus.json", import.meta.url)
+const corpus = (await Bun.file(corpusPath).json()) as {
+  maxProperties: number
+  cases: Array<{ name: string; expect: boolean; extra: Record<string, unknown> }>
+}
+
+test("the shared extra parity corpus agrees with the schema bound", () => {
+  expect(corpus.maxProperties).toBe(schema.properties.extra.maxProperties)
+  expect(corpus.cases.length).toBeGreaterThan(0)
+})
+
+test("TS guard agrees with the shared extra parity corpus", () => {
+  // Name the offending cases, not just a count, so a drift identifies itself.
+  const disagreements = corpus.cases
+    .map((c) => ({ name: c.name, expect: c.expect, got: isHostReady({ ...valid, extra: c.extra }) }))
+    .filter((r) => r.got !== r.expect)
+    .map((d) => `${d.name}: expected ${d.expect}, got ${d.got}`)
+  expect(disagreements).toEqual([])
+})
