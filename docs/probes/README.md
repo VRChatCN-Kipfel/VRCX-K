@@ -187,6 +187,37 @@ carries an empty `[workspace]` table so `cargo build` cannot touch the root
 ⚠ `02-…` and `03-…` import `kkrpc/streaming`, which resolves from the **root**
 `package.json` (see the bare-specifier rule above).
 
+## `hands-e2e/` (subdirectory, includes a Rust crate)
+
+The **end-to-end** counterpart to `hand-io/`: the same real-child-on-real-pipes
+shape, but driving the **shipped** capability code
+(`src-tauri/src/hands.rs` + `kkrpc_peer.rs`) rather than a throwaway probe peer.
+The Rust binary pulls those two files in with `#[path]`, so it compiles the real
+sources — it cannot drift from what ships.
+
+```bash
+cargo build --release --manifest-path docs/probes/hands-e2e/rust/Cargo.toml
+node docs/probes/hands-e2e/run.mjs      # 9/9 checks, ~2 s
+```
+
+It is driven by the real `kkrpc` 2.1.0 `StreamingRPCChannel`, so a pass means our
+hand-written Rust peer interoperates with stock kkrpc — not that it agrees with
+itself. Covered: `stat` (including the null-for-missing contract), `read` with a
+resumption offset, `write` with a deferred reply, `watch` on a path that does
+**not exist yet** (the parent-directory fallback), and early termination.
+
+⚠ **Why not run the Tauri app itself**: it needs a webview and a window, so it
+cannot run headless in CI. The file capability has no Tauri dependency at all, so
+mounting it on a bare stdio loop is strictly more focused — a pass cannot come
+from an unrelated part of the app happening to work.
+
+⚠ **The chunk carrier must be base64, and this is the trap the first run hit.**
+kkrpc's stock transport JSON-stringifies and JSON has no bytes, so yielding a raw
+`Uint8Array` does NOT send binary — it sends `{"0":65,"1":66,…}` at **11.4x** the
+payload ([`hand-io/FINDINGS.md`](hand-io/FINDINGS.md) §2). The probe now sends
+base64 on purpose and says so in a comment; the peer decodes all three shapes so
+a host that forgets still transfers correctly rather than silently corrupting.
+
 ## `probe-hand-attribution.ts` (single-file, root of `docs/probes/`)
 
 Does a **streaming** Service method keep its caller attribution? Written to test a
