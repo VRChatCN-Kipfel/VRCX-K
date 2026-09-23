@@ -187,6 +187,22 @@ carries an empty `[workspace]` table so `cargo build` cannot touch the root
 ⚠ `02-…` and `03-…` import `kkrpc/streaming`, which resolves from the **root**
 `package.json` (see the bare-specifier rule above).
 
+## `probe-hand-attribution.ts` (single-file, root of `docs/probes/`)
+
+Does a **streaming** Service method keep its caller attribution? Written to test a
+claim in [`../hands-capability-proposal.md`](../hands-capability-proposal.md) §6.2 —
+and it **overturned that claim**: all three shapes (sync method / record inside an
+async generator body / record then return a generator) resolve the caller fine. The
+real rule is about audit *volume*, not attribution.
+
+```bash
+bun run docs/probes/probe-hand-attribution.ts
+```
+
+It also demonstrated a separate, harder constraint by crashing on the first run:
+**`this` inside a Service method is a per-caller shadow object, not the instance**, so
+`this.#privateMethod()` throws. See the proposal §6.2a and cordis `lib/index.js:136-143`.
+
 ## Re-running
 
 ```
