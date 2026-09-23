@@ -1280,6 +1280,10 @@ fn start_host_process(app: Option<&AppHandle>) -> Result<StartingHost, String> {
     if let Some(app) = app {
         register_shell_handlers(&peer, app.clone());
     }
+    // The file capabilities are registered unconditionally: unlike the tray
+    // surface they have no Tauri dependency, and a `hands.*` method that is
+    // simply absent would be indistinguishable from a typo'd name at the host.
+    crate::hands::register_hands_handlers(&peer);
     peer.start_reader(stdout);
     Ok(StartingHost {
         tree,

@@ -30,6 +30,19 @@ tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
+# File bytes on the wire. `kkrpc`'s stock transport is JSON text, so binary must
+# ride a text carrier; base64 costs 1.33x and is far faster than the
+# numeric-keyed JSON that a raw `Uint8Array` degrades into (docs/probes/hand-io/
+# FINDINGS.md §2 — measured 9.4-10.4x smaller and 112-155x faster).
+base64 = "0.22"
+# File watching — the one file capability with no std equivalent. Stable 8.x, not
+# the 9.0.0-rc line: the rc-only fixes could NOT be reproduced here, so they are
+# not evidence (docs/probes/hand-io/rust-crates/FINDINGS.md §4.6-4.7).
+notify = "8"
+# Stable file identity across rename/rotation. On Windows this is the u128
+# high-resolution id (correct on ReFS), unlike `same-file`'s low-res index, which
+# its own source warns is not unique there (rust-crates/FINDINGS.md §4.2).
+file-id = "0.2"
 typify = { version = "0.7.0", features = ["macro"] }
 # Runtime support emitted by typify for schema regex constraints.
 regress = "0.11.1"

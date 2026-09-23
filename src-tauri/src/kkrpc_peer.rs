@@ -29,10 +29,11 @@
 //!
 //! One JSON object per line, newline-terminated, in both directions.
 
+use base64::Engine as _;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -43,6 +44,261 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// kkrpc wraps callback-style arguments in a value envelope; the host expects
 /// the inner value, not the envelope (official interop rule).
 const ARG_ENVELOPE: &str = "__kkrpc_next_arg__";
+
+/// kkrpc's stream-reference envelope. A method result (or argument) shaped like
+/// `{__kkrpc_next_stream__:"async-iterable", id}` is decoded by the host into an
+/// async iterable, and pulling then happens over `t:"sq"` / `t:"sr"` frames
+/// rather than inside the original reply.
+pub const STREAM_REF: &str = "__kkrpc_next_stream__";
+
+/// Credit window. Both numbers are copied from kkrpc's own consumer
+/// (`createRemoteAsyncIterable`: it opens with `sendStreamPull(sid, 32)` and then
+/// replenishes 16 per 16 values delivered), so the host's window and our
+/// producer's bound agree by construction. Measured behaviour of this window:
+/// `docs/probes/transport-lab/FINDINGS.md` §4 — a consumer that stops taking
+/// values stops the producer at exactly 32 chunks.
+pub const INITIAL_CREDIT: usize = 32;
+pub const REPLENISH: usize = 16;
+
+/// One step of a producer-side stream.
+pub enum StreamStep {
+    /// One chunk of bytes. The peer base64-encodes it onto the wire.
+    Chunk(Vec<u8>),
+    /// Clean end. The peer sends the terminal frame and forgets the stream.
+    Done,
+    /// Failure. The peer sends an error frame and forgets the stream.
+    Failed(String),
+}
+
+/// A byte source the peer pumps on the host's credit.
+///
+/// `next_chunk` runs on the peer's reader thread, so credit is what keeps a fast
+/// disk from outrunning a slow consumer — not a background thread.
+pub trait StreamProducer: Send {
+    fn next_chunk(&mut self) -> StreamStep;
+    /// Called when the stream stops for any reason other than a clean end
+    /// (host cancelled, transport died). Releases handles.
+    fn close(&mut self) {}
+}
+
+/// The receiving half of a host-produced stream.
+pub trait StreamSink: Send {
+    /// One decoded chunk. Returning `Err` aborts the stream and fails the
+    /// pending deferred reply with that message.
+    fn write(&mut self, bytes: &[u8]) -> Result<(), String>;
+    /// Called exactly once: `Ok` on a clean end, `Err` on error or cancellation.
+    fn finish(&mut self, outcome: Result<(), String>);
+}
+
+/// An **unsolicited** value source: values arrive when the world changes, not
+/// when the consumer asks.
+///
+/// This is deliberately NOT the [`StreamProducer`] shape. A producer is pumped
+/// on the peer's **reader thread**, which is fine for a file read (bounded work)
+/// but fatal for a watch: blocking there would stop the peer from processing
+/// *any* frame, including the very `return` meant to cancel the watch. So an
+/// event stream gets its own thread, and `next_value` may block on that thread
+/// only.
+///
+/// `next_value` takes a timeout and must honour it: the thread notices a
+/// cancellation request only between calls, so an implementation that blocked
+/// forever would make `unwatch` hang until the next filesystem event.
+pub trait StreamSource: Send {
+    /// The next value, or `None` once the source is exhausted. `None` is also
+    /// the correct answer for "nothing happened within `timeout`" — the caller
+    /// re-invokes it, so a quiet stream is a series of `None`s, not a stop.
+    fn next_value(&mut self, timeout: Duration) -> Option<Value>;
+    /// Release the underlying watch. Called on cancel and on transport loss.
+    fn close(&mut self) {}
+}
+
+/// How long a dedicated event thread waits on the source before re-checking
+/// whether it should stop. Small enough that a cancelled watch ends promptly,
+/// large enough that an idle watch costs one wake-up per tick.
+const EVENT_POLL: Duration = Duration::from_millis(100);
+
+/// A reply the handler did not produce synchronously.
+///
+/// `hands.write` must not answer until the incoming stream has ended, so the
+/// request is answered from the stream's completion instead of from the handler
+/// body. Handed to a handler registered through [`Peer::on_deferred`].
+#[derive(Clone)]
+pub struct DeferredReply {
+    peer: Arc<Peer>,
+    id: String,
+}
+
+impl DeferredReply {
+    fn new(peer: Arc<Peer>, id: String) -> Self {
+        Self { peer, id }
+    }
+
+    /// The request id this reply will answer.
+    ///
+    /// Needed by [`Peer::open_stream`]: the stream reference must be written as
+    /// *this* request's reply, so the id has to travel with the reply handle.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Send the request's successful result.
+    pub fn send(&self, value: Value) {
+        let _ = self
+            .peer
+            .write(&json!({ "t": "r", "id": self.id, "v": value }));
+    }
+
+    /// Fail the request. The host maps `e.m` to the rejection's message.
+    pub fn fail(&self, message: impl Into<String>) {
+        let _ = self.peer.write(&json!({
+            "t": "r",
+            "id": self.id,
+            "e": { "m": message.into() },
+        }));
+    }
+}
+
+/// A producer-side stream this peer owns.
+type Producer = Box<dyn StreamProducer>;
+
+/// A consumer-side stream this peer owns: it receives the host's chunks.
+struct Consumer {
+    sink: Box<dyn StreamSink>,
+    /// Values received since the last credit replenishment.
+    since_pull: usize,
+}
+
+#[derive(Default)]
+struct StreamTable {
+    next_sid: u64,
+    producers: HashMap<String, Producer>,
+    consumers: HashMap<String, Consumer>,
+    /// Event streams (watches), which run on their OWN thread. See [`StreamSource`].
+    events: HashMap<String, Arc<EventStream>>,
+    /// Stream ids cancelled while they were mid-pump.
+    ///
+    /// The pump REMOVES its producer from the table before doing file I/O (so the
+    /// lock is not held across a read), which means a `return` can arrive during
+    /// that window and find nothing to cancel. Without this set the pump would
+    /// re-insert the producer afterwards and the stream would be un-cancellable
+    /// — the host has stopped pulling, so the open file would leak until the
+    /// process exits.
+    cancelled: HashSet<String>,
+}
+
+/// Shared control block for one event stream: the host's credit and a stop flag,
+/// both touched from the peer's reader thread and the stream's own thread.
+#[derive(Default)]
+struct EventStream {
+    credit: AtomicI64,
+    cancelled: AtomicBool,
+}
+
+impl StreamTable {
+    fn new_sid(&mut self) -> String {
+        let sid = format!("s-{}", self.next_sid);
+        self.next_sid += 1;
+        sid
+    }
+}
+
+/// Deferred handlers answer the request later (see [`DeferredReply`]).
+type DeferredHandler = Arc<dyn Fn(DeferredReply, Vec<Value>) + Send + Sync>;
+
+/// What a registered method does with a request.
+enum HandlerEntry {
+    /// Reply with the returned value immediately.
+    Sync(Handler),
+    /// Take ownership of the reply.
+    Deferred(DeferredHandler),
+}
+
+impl HandlerEntry {
+    /// A dispatchable copy of this entry.
+    fn cloned_entry(&self) -> Self {
+        match self {
+            HandlerEntry::Sync(handler) => HandlerEntry::Sync(Arc::clone(handler)),
+            HandlerEntry::Deferred(handler) => HandlerEntry::Deferred(Arc::clone(handler)),
+        }
+    }
+}
+
+/// Allocate an id in the given space. The prefixes mirror the existing ones
+/// (`r-` requests, `n-` notifications) and add `p-` for pulls, `x-` for stream
+/// data and `c-` for cancels, so a wire trace is readable by eye.
+fn next_id(prefix: &str) -> String {
+    format!("{prefix}-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Decode one inbound stream chunk.
+///
+/// The wire carrier is NOT fixed by kkrpc's protocol: its stock transport
+/// JSON-stringifies, and JSON has no bytes, so whatever the sender passes is
+/// mangled into one of three shapes. All three were measured
+/// (`docs/probes/hand-io/FINDINGS.md` §2), and the differences are the reason
+/// the finding exists at all:
+///
+/// | shape | cost vs payload |
+/// |---|---|
+/// | `"AAEC…"` — base64 string | **1.33x** (the documented carrier) |
+/// | `{"type":"Buffer","data":[…]}` — a Node `Buffer` | ~4-6x |
+/// | `{"0":65,"1":66,…}` — a raw `Uint8Array` | **11.4x** |
+///
+/// Accepting the latter two is not leniency for its own sake: a host that
+/// forgets to encode would otherwise either mis-read silently or fail opaquely,
+/// and both are worse than a correct transfer that merely costs bandwidth. The
+/// waste is the sender's, and it stays visible — this function's cost is written
+/// down here so nobody re-derives "binary over JSON is fine".
+fn decode_chunk(value: Option<&Value>) -> Result<Vec<u8>, String> {
+    let Some(value) = value else {
+        return Err("stream frame carries no value".into());
+    };
+    match value {
+        Value::String(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| format!("bad base64 chunk: {error}")),
+        // Node Buffer: {"type":"Buffer","data":[byte,…]}
+        Value::Object(map) if map.get("type").and_then(Value::as_str) == Some("Buffer") => map
+            .get("data")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|byte| byte as u8)
+                    .collect::<Vec<u8>>()
+            })
+            .ok_or_else(|| "Buffer-shaped chunk has no data array".to_string()),
+        // Uint8Array: {"0":byte,"1":byte,…}. Keys are contiguous by construction.
+        Value::Object(map) => {
+            let mut bytes = Vec::with_capacity(map.len());
+            for index in 0..map.len() {
+                match map.get(&index.to_string()).and_then(Value::as_u64) {
+                    Some(byte) => bytes.push(byte as u8),
+                    None => {
+                        return Err(format!(
+                            "unrecognised stream value shape: object is not a \
+                             contiguous byte map (missing key {index})"
+                        ))
+                    }
+                }
+            }
+            Ok(bytes)
+        }
+        Value::Array(entries) => Ok(entries
+            .iter()
+            .filter_map(Value::as_u64)
+            .map(|byte| byte as u8)
+            .collect()),
+        other => Err(format!(
+            "unrecognised stream value shape: {}",
+            match other {
+                Value::Null => "null".into(),
+                _ => other.to_string(),
+            }
+        )),
+    }
+}
 
 /// Error handed to every in-flight call when the transport ends.
 ///
@@ -57,7 +313,8 @@ pub type Handler = Arc<dyn Fn(Vec<Value>) -> Value + Send + Sync>;
 pub struct Peer {
     writer: Mutex<Box<dyn Write + Send>>,
     pending: Mutex<HashMap<String, Sender<Result<Value, String>>>>,
-    handlers: Mutex<HashMap<String, Handler>>,
+    handlers: Mutex<HashMap<String, HandlerEntry>>,
+    streams: Mutex<StreamTable>,
 }
 
 impl Peer {
@@ -70,6 +327,7 @@ impl Peer {
             writer: Mutex::new(Box::new(writer)),
             pending: Mutex::new(HashMap::new()),
             handlers: Mutex::new(HashMap::new()),
+            streams: Mutex::new(StreamTable::default()),
         })
     }
 
@@ -94,6 +352,12 @@ impl Peer {
                         for (_, sender) in pending.drain() {
                             let _ = sender.send(Err(TRANSPORT_CLOSED.into()));
                         }
+                        drop(pending);
+                        // Streams are owned by the same connection. Leaving a
+                        // producer open would hold a file handle on a peer that
+                        // can never pull again, and a consumer's deferred reply
+                        // would never be sent.
+                        reader_peer.close_streams();
                         break;
                     }
                     Ok(_) => {}
@@ -116,7 +380,18 @@ impl Peer {
         self.handlers
             .lock()
             .expect("handlers")
-            .insert(method.to_string(), handler);
+            .insert(method.to_string(), HandlerEntry::Sync(handler));
+    }
+
+    /// Register a method whose reply is sent later, from another thread.
+    ///
+    /// Needed by any method that CONSUMES an incoming stream: its reply cannot be
+    /// written until the stream ends, and that happens after the handler returns.
+    pub fn on_deferred(&self, method: &str, handler: DeferredHandler) {
+        self.handlers
+            .lock()
+            .expect("handlers")
+            .insert(method.to_string(), HandlerEntry::Deferred(handler));
     }
 
     pub fn call(&self, method: &str, args: Vec<Value>) -> Result<Value, String> {
@@ -194,9 +469,18 @@ impl Peer {
                     .lock()
                     .expect("handlers")
                     .get(&method)
-                    .cloned();
+                    .map(HandlerEntry::cloned_entry);
                 let response = match handler {
-                    Some(call) => json!({ "t": "r", "id": id, "v": call(args) }),
+                    Some(HandlerEntry::Sync(call)) => {
+                        json!({ "t": "r", "id": id, "v": call(args) })
+                    }
+                    Some(HandlerEntry::Deferred(call)) => {
+                        // The handler owns the reply now. Give it a way to send
+                        // one, and write nothing here.
+                        let id = id.as_str().unwrap_or_default().to_string();
+                        call(DeferredReply::new(Arc::clone(self), id), args);
+                        return;
+                    }
                     // Naming the method matters: this text reaches the host and
                     // localises a typo immediately.
                     None => json!({
@@ -225,11 +509,404 @@ impl Peer {
                     }
                 }
             }
+            // Host → shell stream control or stream data.
+            Some("sq") => self.dispatch_stream_control(&message),
+            Some("sr") => self.dispatch_stream_data(&message),
             // Host → shell notifications (`t:"cb"`) are consumed by the
             // registrations in `shell_sys`. Anything else is ignored rather than
             // treated as an error, so a newer host cannot break an older shell
             // merely by sending a frame type it does not know.
             _ => {}
+        }
+    }
+
+    // --- streaming ---------------------------------------------------------
+
+    /// Start a producer-side stream: reply with a stream reference, then emit
+    /// chunks as the host spends credit.
+    ///
+    /// The reply is a REFERENCE, not data — this is what makes a multi-GB file
+    /// cost `credit × chunk` bytes of memory instead of the file size.
+    pub fn open_stream(&self, request_id: &str, producer: Producer) -> Result<String, String> {
+        let sid = {
+            let mut streams = self.streams.lock().map_err(|err| err.to_string())?;
+            let sid = streams.new_sid();
+            streams.producers.insert(sid.clone(), producer);
+            sid
+        };
+        self.write(&json!({
+            "t": "r",
+            "id": request_id,
+            "v": { STREAM_REF: "async-iterable", "id": sid },
+        }))?;
+        Ok(sid)
+    }
+
+    /// Register a sink for a stream the host is producing, and open the window.
+    ///
+    /// `sid` comes from the request's stream-ref argument; the host only starts
+    /// sending once it receives the `pull`, so this must run before the reply.
+    pub fn consume_stream(&self, sid: &str, sink: Box<dyn StreamSink>) -> Result<(), String> {
+        {
+            let mut streams = self.streams.lock().map_err(|err| err.to_string())?;
+            if streams.consumers.contains_key(sid) {
+                return Err(format!("stream {sid} is already being consumed"));
+            }
+            streams.consumers.insert(
+                sid.to_string(),
+                Consumer {
+                    sink,
+                    since_pull: 0,
+                },
+            );
+        }
+        self.write(&json!({
+            "t": "sq",
+            "id": next_id("p"),
+            "sid": sid,
+            "op": "pull",
+            "n": INITIAL_CREDIT,
+        }))
+    }
+
+    /// Handle `t:"sq"` from the host: pull credit, or cancel a producer.
+    fn dispatch_stream_control(self: &Arc<Self>, message: &Value) {
+        let sid = message.get("sid").and_then(Value::as_str).unwrap_or("");
+        let op = message.get("op").and_then(Value::as_str).unwrap_or("");
+        let control_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match op {
+            // `n` is an INCREMENT, never a settable window. A missing or
+            // nonsensical `n` means one chunk, which is what kkrpc does.
+            "pull" => {
+                let credit = message
+                    .get("n")
+                    .and_then(Value::as_u64)
+                    .map(|n| n.max(1) as usize)
+                    .unwrap_or(1);
+                // Event streams are pumped by their own thread; all a pull does
+                // here is widen its window.
+                let event = self
+                    .streams
+                    .lock()
+                    .expect("streams")
+                    .events
+                    .get(sid)
+                    .map(Arc::clone);
+                if let Some(event) = event {
+                    event.credit.fetch_add(credit as i64, Ordering::SeqCst);
+                    return;
+                }
+                self.pump_producer(sid, credit);
+            }
+            // `return`/`throw` are the only request/response-shaped stream
+            // frames: they owe an acknowledgement carrying this control id.
+            "return" | "throw" => {
+                {
+                    let mut streams = self.streams.lock().expect("streams");
+                    // An event stream stops by flag; its own thread owns the
+                    // source and will close it.
+                    if let Some(event) = streams.events.remove(sid) {
+                        event.cancelled.store(true, Ordering::SeqCst);
+                    } else if let Some(mut producer) = streams.producers.remove(sid) {
+                        producer.close();
+                    } else {
+                        // Either already finished, or mid-pump and therefore out
+                        // of the table. Both mean "no further chunks"; record it
+                        // so a mid-pump producer is not re-inserted.
+                        streams.cancelled.insert(sid.to_string());
+                    }
+                }
+                let acknowledgement = if op == "return" {
+                    json!({ "t": "sr", "id": control_id, "sid": sid, "d": true })
+                } else {
+                    json!({
+                        "t": "sr", "id": control_id, "sid": sid,
+                        "e": { "n": "Error", "m": "consumer threw" },
+                    })
+                };
+                let _ = self.write(&acknowledgement);
+            }
+            _ => {}
+        }
+    }
+
+    /// Emit up to `credit` chunks for one producer.
+    ///
+    /// The producer is taken OUT of the table for the duration of each chunk so
+    /// the lock is never held across file I/O, and `cancelled` decides whether it
+    /// goes back — see [`StreamTable::cancelled`].
+    fn pump_producer(self: &Arc<Self>, sid: &str, credit: usize) {
+        for _ in 0..credit {
+            let mut producer = {
+                let mut streams = self.streams.lock().expect("streams");
+                if streams.cancelled.remove(sid) {
+                    return;
+                }
+                match streams.producers.remove(sid) {
+                    Some(producer) => producer,
+                    None => return,
+                }
+            };
+
+            let frame = match producer.next_chunk() {
+                StreamStep::Chunk(bytes) => {
+                    let payload = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    json!({
+                        "t": "sr", "id": next_id("x"), "sid": sid,
+                        "d": false, "v": payload,
+                    })
+                }
+                StreamStep::Done => {
+                    producer.close();
+                    json!({ "t": "sr", "id": next_id("x"), "sid": sid, "d": true })
+                }
+                StreamStep::Failed(message) => {
+                    producer.close();
+                    json!({
+                        "t": "sr", "id": next_id("x"), "sid": sid,
+                        "e": { "n": "Error", "m": message },
+                    })
+                }
+            };
+            let terminal =
+                frame.get("e").is_some() || frame.get("d").and_then(Value::as_bool) == Some(true);
+
+            if terminal {
+                let mut streams = self.streams.lock().expect("streams");
+                streams.cancelled.remove(sid);
+                let _ = self.write(&frame);
+                return;
+            }
+
+            // Re-insert before writing, so a `return` arriving concurrently is
+            // seen (as a removal) rather than racing with a later insert.
+            {
+                let mut streams = self.streams.lock().expect("streams");
+                if streams.cancelled.remove(sid) {
+                    producer.close();
+                    return;
+                }
+                streams.producers.insert(sid.to_string(), producer);
+            }
+            if self.write(&frame).is_err() {
+                self.forget_stream(sid);
+                return;
+            }
+        }
+    }
+
+    /// Start an **event** stream (a watch) on its own thread.
+    ///
+    /// Differs from [`Peer::open_stream`] in where values come from: a producer
+    /// is pumped on demand by the host's credit, whereas an event source blocks
+    /// waiting for the world to change and must therefore not run on the reader
+    /// thread (see [`StreamSource`]). Credit still bounds how far the source may
+    /// run ahead, so a chatty directory cannot flood the pipe.
+    pub fn open_event_stream(
+        self: &Arc<Self>,
+        request_id: &str,
+        mut source: Box<dyn StreamSource>,
+    ) -> Result<String, String> {
+        let (sid, control) = {
+            let mut streams = self.streams.lock().map_err(|err| err.to_string())?;
+            let sid = streams.new_sid();
+            let control = Arc::new(EventStream::default());
+            streams.events.insert(sid.clone(), Arc::clone(&control));
+            (sid, control)
+        };
+
+        // The stream-ref reply goes out BEFORE the thread starts, so no value
+        // can reach the host before it has one.
+        if let Err(error) = self.write(&json!({
+            "t": "r",
+            "id": request_id,
+            "v": { STREAM_REF: "async-iterable", "id": sid },
+        })) {
+            let mut streams = self.streams.lock().expect("streams");
+            streams.events.remove(&sid);
+            source.close();
+            return Err(error);
+        }
+
+        let peer = Arc::clone(self);
+        let thread_sid = sid.clone();
+        thread::spawn(move || {
+            loop {
+                if control.cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Spend credit before producing, so the window is honoured even
+                // when the source is faster than the consumer. A `None` here
+                // means "nothing happened in the last tick", NOT exhaustion — a
+                // quiet watch is expected to answer `None` indefinitely.
+                let Some(value) = source.next_value(EVENT_POLL) else {
+                    continue;
+                };
+                if control.cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Wait for a window rather than buffering: an event that arrives
+                // while the consumer is saturated is still held by the source's
+                // own queue, so nothing is lost by pausing here.
+                while control.credit.load(Ordering::SeqCst) <= 0 {
+                    if control.cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                if control.cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
+                control.credit.fetch_sub(1, Ordering::SeqCst);
+                if peer
+                    .write(&json!({
+                        "t": "sr", "id": next_id("x"), "sid": thread_sid,
+                        "d": false, "v": value,
+                    }))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+
+            source.close();
+            // Whoever still finds the entry in the table owns the stream and
+            // therefore owes the terminal frame. A cancellation path removed it
+            // already and answered on its own.
+            let owned = {
+                let mut streams = peer.streams.lock().expect("streams");
+                streams.events.remove(&thread_sid).is_some()
+            };
+            if owned {
+                let _ = peer.write(&json!({
+                    "t": "sr", "id": next_id("x"), "sid": thread_sid, "d": true,
+                }));
+            }
+        });
+
+        Ok(sid)
+    }
+
+    /// Handle `t:"sr"` from the host: data for a stream this side consumes.
+    fn dispatch_stream_data(self: &Arc<Self>, message: &Value) {
+        let sid = message
+            .get("sid")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        // A control acknowledgement is keyed by an id we generated, and owes no
+        // reply of its own — the deferred request already answered.
+        if let Some(error) = message.get("e") {
+            if let Some(mut consumer) = self.take_consumer(&sid) {
+                let text = error
+                    .get("m")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stream failed")
+                    .to_string();
+                consumer.sink.finish(Err(text));
+            }
+            return;
+        }
+
+        if message.get("d").and_then(Value::as_bool) == Some(true) {
+            if let Some(mut consumer) = self.take_consumer(&sid) {
+                consumer.sink.finish(Ok(()));
+            }
+            return;
+        }
+
+        let bytes = match decode_chunk(message.get("v")) {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                if let Some(mut consumer) = self.take_consumer(&sid) {
+                    consumer.sink.finish(Err(reason));
+                }
+                return;
+            }
+        };
+
+        // Write with the lock RELEASED: a sink does file I/O, and holding the
+        // stream table across it would block every other stream (and any
+        // `return` trying to cancel this one).
+        let outcome = {
+            let mut streams = self.streams.lock().expect("streams");
+            match streams.consumers.get_mut(&sid) {
+                Some(consumer) => {
+                    consumer.since_pull += 1;
+                    let replenish = if consumer.since_pull >= REPLENISH {
+                        consumer.since_pull = 0;
+                        true
+                    } else {
+                        false
+                    };
+                    Some((consumer.sink.write(&bytes), replenish))
+                }
+                None => None,
+            }
+        };
+
+        match outcome {
+            // The sink failed: end the stream and honour the cancellation.
+            Some((Err(message), _)) => {
+                if let Some(mut consumer) = self.take_consumer(&sid) {
+                    consumer.sink.finish(Err(message));
+                }
+                self.cancel_remote_stream(&sid);
+            }
+            Some((Ok(()), true)) => {
+                let _ = self.write(&json!({
+                    "t": "sq", "id": next_id("p"), "sid": sid,
+                    "op": "pull", "n": REPLENISH,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    fn take_consumer(&self, sid: &str) -> Option<Consumer> {
+        self.streams.lock().expect("streams").consumers.remove(sid)
+    }
+
+    /// Drop local state for a stream. Used when the transport fails mid-stream.
+    fn forget_stream(&self, sid: &str) {
+        let mut streams = self.streams.lock().expect("streams");
+        if let Some(mut producer) = streams.producers.remove(sid) {
+            producer.close();
+        }
+        if let Some(mut consumer) = streams.consumers.remove(sid) {
+            consumer
+                .sink
+                .finish(Err("stream interrupted by transport failure".into()));
+        }
+        streams.cancelled.insert(sid.to_string());
+    }
+
+    /// Tell the host to stop producing a stream we no longer want. Best-effort:
+    /// the host treats an unknown stream as already finished.
+    fn cancel_remote_stream(&self, sid: &str) {
+        let _ = self.write(&json!({
+            "t": "sq", "id": next_id("c"), "sid": sid, "op": "return",
+        }));
+    }
+
+    /// Drop every stream (transport end). Producers are closed; consumers fail.
+    fn close_streams(&self) {
+        let mut streams = self.streams.lock().expect("streams");
+        for (_, mut producer) in streams.producers.drain() {
+            producer.close();
+        }
+        for (_, mut consumer) in streams.consumers.drain() {
+            consumer.sink.finish(Err(TRANSPORT_CLOSED.to_string()));
+        }
+        // Event threads own their sources, so they release the watch themselves;
+        // this flag is what tells them to.
+        for (_, event) in streams.events.drain() {
+            event.cancelled.store(true, Ordering::SeqCst);
         }
     }
 
@@ -249,6 +926,34 @@ fn unwrap_arg(value: &Value) -> Value {
         value.get("v").cloned().unwrap_or(Value::Null)
     } else {
         value.clone()
+    }
+}
+
+/// Hooks that exist only for the crate's own tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// A [`DeferredReply`] wired to an in-memory sink, so a sink under test can
+    /// call `send`/`fail` without a live transport.
+    pub(crate) fn detached_reply() -> DeferredReply {
+        let sink = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let peer = Peer::new(SharedSink(sink));
+        DeferredReply::new(peer, "test".into())
+    }
+
+    /// A writer that keeps whatever it is given, for tests that only need the
+    /// peer to exist.
+    pub(crate) struct SharedSink(pub Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink").extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }
 
@@ -792,5 +1497,659 @@ mod tests {
         h.feed("{\"t\":\"r\",\"v\":1}\n");
         h.feed("{\"t\":\"q\",\"id\":\"g1\",\"op\":\"call\",\"p\":[\"probe\"]}\n");
         assert_eq!(h.next_frame()["id"], json!("g1"));
+    }
+
+    // --- stream chunk decoding ---------------------------------------------
+
+    #[test]
+    fn a_base64_chunk_is_decoded() {
+        // The documented carrier. 1.33x the payload, and the only shape the host
+        // is supposed to send.
+        let decoded = decode_chunk(Some(&json!("AAEC"))).expect("decode");
+        assert_eq!(decoded, vec![0u8, 1, 2]);
+    }
+
+    #[test]
+    fn a_node_buffer_shaped_chunk_is_decoded() {
+        // What a raw Node `Buffer` becomes once the stock JSON transport sees it.
+        let decoded =
+            decode_chunk(Some(&json!({ "type": "Buffer", "data": [65, 66] }))).expect("decode");
+        assert_eq!(decoded, b"AB");
+    }
+
+    #[test]
+    fn a_uint8array_shaped_chunk_is_decoded() {
+        // What a raw `Uint8Array` becomes — 11.4x the payload. Accepted rather
+        // than rejected so a host that forgets to encode still transfers
+        // correctly; the cost is recorded, not hidden.
+        let decoded = decode_chunk(Some(&json!({ "0": 90, "1": 91 }))).expect("decode");
+        assert_eq!(decoded, vec![90u8, 91]);
+    }
+
+    #[test]
+    fn a_non_contiguous_byte_map_is_refused_with_a_naming_message() {
+        // {"0":1,"2":3} is not a byte array; silently reading 2 bytes would
+        // corrupt the file in a way the caller cannot detect.
+        let error = decode_chunk(Some(&json!({ "0": 1, "2": 3 }))).expect_err("must fail");
+        assert!(error.contains("missing key 1"), "got: {error}");
+    }
+
+    #[test]
+    fn an_empty_object_decodes_to_no_bytes() {
+        // An empty Uint8Array serialises to `{}`. Treating it as an error would
+        // abort a transfer whose producer legitimately emitted an empty chunk.
+        assert_eq!(
+            decode_chunk(Some(&json!({}))).expect("decode"),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_chunk_shape_is_an_error_not_a_silent_empty_read() {
+        let error = decode_chunk(Some(&json!(42))).expect_err("must fail");
+        assert!(
+            error.contains("unrecognised stream value shape"),
+            "got: {error}"
+        );
+        assert!(
+            decode_chunk(None).is_err(),
+            "a missing value must not read as empty"
+        );
+    }
+
+    // --- streaming: producer side ------------------------------------------
+
+    /// A producer that yields a fixed number of chunks then ends.
+    struct CountingProducer {
+        remaining: usize,
+        closed: Arc<Mutex<bool>>,
+    }
+
+    impl StreamProducer for CountingProducer {
+        fn next_chunk(&mut self) -> StreamStep {
+            if self.remaining == 0 {
+                return StreamStep::Done;
+            }
+            self.remaining -= 1;
+            StreamStep::Chunk(vec![7u8; 4])
+        }
+        fn close(&mut self) {
+            *self.closed.lock().unwrap() = true;
+        }
+    }
+
+    #[test]
+    fn opening_a_stream_replies_with_a_reference_not_data() {
+        // The whole memory argument: the reply must be a stream-ref envelope, so
+        // a multi-GB file costs the credit window rather than the file size.
+        let mut h = Harness::new();
+        let closed = Arc::new(Mutex::new(false));
+        h.peer
+            .open_stream(
+                "req-1",
+                Box::new(CountingProducer {
+                    remaining: 2,
+                    closed: Arc::clone(&closed),
+                }),
+            )
+            .expect("open");
+
+        let reply = h.next_frame();
+        assert_eq!(reply["id"], json!("req-1"));
+        assert_eq!(reply["v"][STREAM_REF], json!("async-iterable"));
+        assert!(
+            reply["v"]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("s-")),
+            "the reply must carry a stream id, not bytes: {reply}"
+        );
+    }
+
+    #[test]
+    fn a_pull_emits_exactly_the_requested_credit() {
+        // Credit is the backpressure mechanism, so "one pull emits N" is a
+        // contract, not an implementation detail.
+        let mut h = Harness::new();
+        h.peer
+            .open_stream(
+                "req-1",
+                Box::new(CountingProducer {
+                    remaining: 10,
+                    closed: Arc::new(Mutex::new(false)),
+                }),
+            )
+            .expect("open");
+        let sid = h.next_frame()["v"]["id"].as_str().unwrap().to_string();
+
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sq", "id": "c1", "sid": sid, "op": "pull", "n": 3 })
+        ));
+
+        for _ in 0..3 {
+            let frame = h.next_frame();
+            assert_eq!(frame["t"], json!("sr"));
+            assert_eq!(frame["sid"], json!(sid));
+            assert_eq!(frame["d"], json!(false));
+            assert!(frame["v"].is_string(), "chunks travel base64-encoded");
+        }
+    }
+
+    #[test]
+    fn a_producer_that_ends_sends_a_terminal_frame_and_is_forgotten() {
+        let mut h = Harness::new();
+        let closed = Arc::new(Mutex::new(false));
+        h.peer
+            .open_stream(
+                "req-1",
+                Box::new(CountingProducer {
+                    remaining: 1,
+                    closed: Arc::clone(&closed),
+                }),
+            )
+            .expect("open");
+        let sid = h.next_frame()["v"]["id"].as_str().unwrap().to_string();
+
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sq", "id": "c1", "sid": sid, "op": "pull", "n": 5 })
+        ));
+
+        assert_eq!(h.next_frame()["d"], json!(false));
+        let terminal = h.next_frame();
+        assert_eq!(terminal["d"], json!(true), "clean end must be terminal");
+        assert!(
+            *closed.lock().unwrap(),
+            "a finished producer must be closed, not left holding a handle"
+        );
+        assert!(
+            h.peer.streams.lock().unwrap().producers.is_empty(),
+            "a finished stream must not be retained"
+        );
+    }
+
+    #[test]
+    fn returning_a_stream_closes_the_producer_and_acknowledges() {
+        // Cancellation must release the file handle, or a long-lived shell leaks
+        // one descriptor per abandoned download.
+        let mut h = Harness::new();
+        let closed = Arc::new(Mutex::new(false));
+        h.peer
+            .open_stream(
+                "req-1",
+                Box::new(CountingProducer {
+                    remaining: 10,
+                    closed: Arc::clone(&closed),
+                }),
+            )
+            .expect("open");
+        let sid = h.next_frame()["v"]["id"].as_str().unwrap().to_string();
+
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sq", "id": "ctl-1", "sid": sid, "op": "return" })
+        ));
+
+        let ack = h.next_frame();
+        assert_eq!(
+            ack["id"],
+            json!("ctl-1"),
+            "`return` owes its control id back"
+        );
+        assert_eq!(ack["d"], json!(true));
+        assert!(
+            *closed.lock().unwrap(),
+            "the cancelled producer must be closed"
+        );
+    }
+
+    #[test]
+    fn no_further_chunks_arrive_after_a_cancel() {
+        // The failure this prevents: a `return` that races a pump, after which
+        // the producer is re-inserted and keeps reading a file nobody wants.
+        let mut h = Harness::new();
+        h.peer
+            .open_stream(
+                "req-1",
+                Box::new(CountingProducer {
+                    remaining: 100,
+                    closed: Arc::new(Mutex::new(false)),
+                }),
+            )
+            .expect("open");
+        let sid = h.next_frame()["v"]["id"].as_str().unwrap().to_string();
+
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sq", "id": "ctl-1", "sid": sid, "op": "return" })
+        ));
+        assert_eq!(h.next_frame()["id"], json!("ctl-1"));
+
+        // A pull for a cancelled stream must produce nothing at all.
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sq", "id": "c2", "sid": sid, "op": "pull", "n": 5 })
+        ));
+        // A live probe proves the reader survived and stayed silent about `sid`.
+        h.peer.on("ping", Arc::new(|_| json!("pong")));
+        h.feed("{\"t\":\"q\",\"id\":\"probe-1\",\"op\":\"call\",\"p\":[\"ping\"]}\n");
+        assert_eq!(h.next_frame()["id"], json!("probe-1"));
+    }
+
+    #[test]
+    fn a_transport_end_closes_every_producer() {
+        // No peer means no pulls ever again; an open producer would hold a file
+        // handle until the process exits.
+        let mut h = Harness::new();
+        let closed = Arc::new(Mutex::new(false));
+        h.peer
+            .open_stream(
+                "req-1",
+                Box::new(CountingProducer {
+                    remaining: 10,
+                    closed: Arc::clone(&closed),
+                }),
+            )
+            .expect("open");
+        h.next_frame();
+        h.close_inbound();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !*closed.lock().unwrap() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(*closed.lock().unwrap(), "EOF must close open producers");
+    }
+
+    // --- streaming: consumer side -----------------------------------------
+
+    /// A sink that records what it is given.
+    struct RecordingSink {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        outcome: Arc<Mutex<Option<Result<(), String>>>>,
+    }
+
+    impl StreamSink for RecordingSink {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+        fn finish(&mut self, outcome: Result<(), String>) {
+            *self.outcome.lock().unwrap() = Some(outcome);
+        }
+    }
+
+    fn recording_sink() -> (
+        Box<dyn StreamSink>,
+        Arc<Mutex<Vec<u8>>>,
+        Arc<Mutex<Option<Result<(), String>>>>,
+    ) {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let outcome = Arc::new(Mutex::new(None));
+        (
+            Box::new(RecordingSink {
+                bytes: Arc::clone(&bytes),
+                outcome: Arc::clone(&outcome),
+            }),
+            bytes,
+            outcome,
+        )
+    }
+
+    /// Wait for a sink to be finished, then return a COPY of its outcome.
+    ///
+    /// Cloned rather than borrowed: the guard's temporary would otherwise
+    /// outlive the match on it.
+    fn await_outcome(
+        outcome: &Arc<Mutex<Option<Result<(), String>>>>,
+    ) -> Option<Result<(), String>> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(value) = outcome.lock().unwrap().clone() {
+                return Some(value);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Poll until `ready` holds, or give up after `limit`.
+    ///
+    /// Required because dispatch runs on the reader THREAD: `feed` returns as
+    /// soon as the bytes are queued, so a synchronous assertion right after it
+    /// is a race, not a check. Every test that observes a side effect of a fed
+    /// frame must go through here.
+    fn wait_until(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if ready() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn consuming_a_stream_opens_the_credit_window_before_any_data() {
+        // kkrpc's producer sends nothing until it sees a pull, so a consumer
+        // that forgot this would deadlock rather than fail loudly.
+        let mut h = Harness::new();
+        let (sink, _, _) = recording_sink();
+        h.peer.consume_stream("s-9", sink).expect("consume");
+
+        let pull = h.next_frame();
+        assert_eq!(pull["t"], json!("sq"));
+        assert_eq!(pull["op"], json!("pull"));
+        assert_eq!(pull["sid"], json!("s-9"));
+        assert_eq!(
+            pull["n"],
+            json!(INITIAL_CREDIT),
+            "the initial window must match kkrpc's own consumer"
+        );
+    }
+
+    #[test]
+    fn stream_data_is_written_to_the_sink_and_replenished() {
+        let mut h = Harness::new();
+        let (sink, bytes, _) = recording_sink();
+        h.peer.consume_stream("s-9", sink).expect("consume");
+        h.next_frame(); // the opening pull
+
+        // Feed one short of the replenish threshold, then the one that trips it.
+        for _ in 0..REPLENISH - 1 {
+            h.feed(&format!(
+                "{}\n",
+                json!({ "t": "sr", "id": "x", "sid": "s-9", "d": false, "v": "AAE=" })
+            ));
+        }
+        // Dispatch is asynchronous (reader thread), so wait for the writes to
+        // land rather than assuming `feed` has been processed.
+        let partial = (REPLENISH - 1) * 2;
+        assert!(
+            wait_until(Duration::from_secs(2), || bytes.lock().unwrap().len()
+                == partial),
+            "expected {partial} bytes before the replenish threshold, got {}",
+            bytes.lock().unwrap().len()
+        );
+
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sr", "id": "x", "sid": "s-9", "d": false, "v": "AAE=" })
+        ));
+
+        let pull = h.next_frame();
+        assert_eq!(pull["op"], json!("pull"), "credit must be replenished");
+        assert_eq!(pull["n"], json!(REPLENISH));
+        assert_eq!(bytes.lock().unwrap().len(), REPLENISH * 2);
+    }
+
+    #[test]
+    fn a_terminal_frame_finishes_the_sink_exactly_once() {
+        let mut h = Harness::new();
+        let (sink, _, outcome) = recording_sink();
+        h.peer.consume_stream("s-9", sink).expect("consume");
+        h.next_frame();
+
+        h.feed("{\"t\":\"sr\",\"id\":\"x\",\"sid\":\"s-9\",\"d\":true}\n");
+        assert!(
+            matches!(await_outcome(&outcome), Some(Ok(()))),
+            "a clean end must finish the sink with Ok"
+        );
+        assert!(
+            h.peer.streams.lock().unwrap().consumers.is_empty(),
+            "a finished consumer must not be retained"
+        );
+    }
+
+    #[test]
+    fn an_errored_stream_fails_the_sink_with_the_sender_message() {
+        let mut h = Harness::new();
+        let (sink, _, outcome) = recording_sink();
+        h.peer.consume_stream("s-9", sink).expect("consume");
+        h.next_frame();
+
+        h.feed("{\"t\":\"sr\",\"id\":\"x\",\"sid\":\"s-9\",\"e\":{\"m\":\"disk full\"}}\n");
+        match await_outcome(&outcome) {
+            Some(Err(message)) => assert!(message.contains("disk full"), "got: {message}"),
+            other => panic!("expected a failure carrying the sender's message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sink_failure_ends_the_stream_and_tells_the_producer_to_stop() {
+        // A full disk must not leave the host pumping forever into a dead sink.
+        struct FailingSink;
+        impl StreamSink for FailingSink {
+            fn write(&mut self, _bytes: &[u8]) -> Result<(), String> {
+                Err("ENOSPC: no space left on device".into())
+            }
+            fn finish(&mut self, _outcome: Result<(), String>) {}
+        }
+
+        let mut h = Harness::new();
+        h.peer
+            .consume_stream("s-9", Box::new(FailingSink))
+            .expect("consume");
+        h.next_frame(); // opening pull
+
+        h.feed("{\"t\":\"sr\",\"id\":\"x\",\"sid\":\"s-9\",\"d\":false,\"v\":\"AAE=\"}\n");
+
+        // The peer must both forget the consumer and ask the host to stop.
+        let cancel = h.next_frame();
+        assert_eq!(cancel["t"], json!("sq"));
+        assert_eq!(cancel["op"], json!("return"));
+        assert_eq!(cancel["sid"], json!("s-9"));
+        assert!(
+            h.peer.streams.lock().unwrap().consumers.is_empty(),
+            "a failed consumer must not be retained"
+        );
+    }
+
+    #[test]
+    fn consuming_the_same_stream_twice_is_refused() {
+        // Two sinks on one stream would split the bytes between them and corrupt
+        // both outputs.
+        let h = Harness::new();
+        let (first, _, _) = recording_sink();
+        h.peer.consume_stream("s-9", first).expect("first");
+        let (second, _, _) = recording_sink();
+        let error = h
+            .peer
+            .consume_stream("s-9", second)
+            .expect_err("must refuse");
+        assert!(error.contains("already being consumed"), "got: {error}");
+    }
+
+    #[test]
+    fn a_transport_end_fails_every_consumer() {
+        let mut h = Harness::new();
+        let (sink, _, outcome) = recording_sink();
+        h.peer.consume_stream("s-9", sink).expect("consume");
+        h.next_frame();
+        h.close_inbound();
+
+        match await_outcome(&outcome) {
+            Some(Err(message)) => assert_eq!(message, TRANSPORT_CLOSED),
+            other => panic!("EOF must fail a waiting consumer, got {other:?}"),
+        }
+    }
+
+    // --- streaming: deferred replies ---------------------------------------
+
+    #[test]
+    fn a_deferred_handler_owns_the_reply() {
+        // Nothing may be written when the handler returns; the sink answers later.
+        let mut h = Harness::new();
+        let captured = Arc::new(Mutex::new(None::<DeferredReply>));
+        let sink = Arc::clone(&captured);
+        h.peer.on_deferred(
+            "hands.write",
+            Arc::new(move |reply, _args| {
+                *sink.lock().unwrap() = Some(reply);
+            }),
+        );
+
+        h.feed("{\"t\":\"q\",\"id\":\"d1\",\"op\":\"call\",\"p\":[\"hands\",\"write\"]}\n");
+        assert!(
+            wait_until(Duration::from_secs(2), || captured
+                .lock()
+                .unwrap()
+                .is_some()),
+            "the deferred handler must run and capture the reply"
+        );
+        let reply = captured.lock().unwrap().clone().expect("handler ran");
+        assert_eq!(reply.id(), "d1");
+
+        reply.send(json!({ "bytes": 5 }));
+        let frame = h.next_frame();
+        assert_eq!(frame["id"], json!("d1"));
+        assert_eq!(frame["v"]["bytes"], json!(5));
+    }
+
+    #[test]
+    fn a_deferred_failure_reaches_the_caller_as_an_error() {
+        let mut h = Harness::new();
+        let captured = Arc::new(Mutex::new(None::<DeferredReply>));
+        let sink = Arc::clone(&captured);
+        h.peer.on_deferred(
+            "hands.write",
+            Arc::new(move |reply, _args| {
+                *sink.lock().unwrap() = Some(reply);
+            }),
+        );
+
+        h.feed("{\"t\":\"q\",\"id\":\"d2\",\"op\":\"call\",\"p\":[\"hands\",\"write\"]}\n");
+        assert!(
+            wait_until(Duration::from_secs(2), || captured
+                .lock()
+                .unwrap()
+                .is_some()),
+            "the deferred handler must run before its reply is used"
+        );
+        captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("handler ran")
+            .fail("ENOSPC: full");
+        let frame = h.next_frame();
+        assert_eq!(frame["id"], json!("d2"));
+        assert_eq!(frame["e"]["m"], json!("ENOSPC: full"));
+    }
+
+    // --- streaming: event sources ------------------------------------------
+
+    /// An event source that yields a fixed list, then reports "quiet" forever.
+    struct ScriptedSource {
+        values: Vec<Value>,
+        closed: Arc<Mutex<bool>>,
+    }
+
+    impl StreamSource for ScriptedSource {
+        fn next_value(&mut self, _timeout: Duration) -> Option<Value> {
+            if self.values.is_empty() {
+                // Quiet, not exhausted: a watch that stops firing is normal.
+                thread::sleep(Duration::from_millis(5));
+                return None;
+            }
+            self.values.remove(0).into()
+        }
+        fn close(&mut self) {
+            *self.closed.lock().unwrap() = true;
+        }
+    }
+
+    #[test]
+    fn an_event_stream_replies_with_a_reference_then_emits_on_credit() {
+        let mut h = Harness::new();
+        let closed = Arc::new(Mutex::new(false));
+        h.peer
+            .open_event_stream(
+                "req-w",
+                Box::new(ScriptedSource {
+                    values: vec![json!({ "kind": "create" })],
+                    closed: Arc::clone(&closed),
+                }),
+            )
+            .expect("open");
+
+        let reply = h.next_frame();
+        assert_eq!(reply["id"], json!("req-w"));
+        let sid = reply["v"]["id"].as_str().unwrap().to_string();
+
+        // No credit yet, so nothing may arrive. Probe with a real request.
+        h.peer.on("ping", Arc::new(|_| json!("pong")));
+        h.feed("{\"t\":\"q\",\"id\":\"p0\",\"op\":\"call\",\"p\":[\"ping\"]}\n");
+        assert_eq!(h.next_frame()["id"], json!("p0"));
+
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sq", "id": "c1", "sid": sid, "op": "pull", "n": 1 })
+        ));
+        let event = h.next_frame();
+        assert_eq!(event["sid"], json!(sid));
+        assert_eq!(event["v"]["kind"], json!("create"));
+    }
+
+    #[test]
+    fn cancelling_an_event_stream_closes_the_source() {
+        // The requirement the proposal calls out: cancelling must release the
+        // watch, not merely stop delivering.
+        let mut h = Harness::new();
+        let closed = Arc::new(Mutex::new(false));
+        h.peer
+            .open_event_stream(
+                "req-w",
+                Box::new(ScriptedSource {
+                    values: Vec::new(),
+                    closed: Arc::clone(&closed),
+                }),
+            )
+            .expect("open");
+        let sid = h.next_frame()["v"]["id"].as_str().unwrap().to_string();
+
+        h.feed(&format!(
+            "{}\n",
+            json!({ "t": "sq", "id": "ctl-1", "sid": sid, "op": "return" })
+        ));
+
+        assert_eq!(h.next_frame()["id"], json!("ctl-1"));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !*closed.lock().unwrap() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            *closed.lock().unwrap(),
+            "cancelling a watch must close it, or the OS watch leaks"
+        );
+    }
+
+    #[test]
+    fn a_transport_end_stops_event_streams() {
+        // A watch outliving its transport would keep firing into a dead pipe.
+        let mut h = Harness::new();
+        let closed = Arc::new(Mutex::new(false));
+        h.peer
+            .open_event_stream(
+                "req-w",
+                Box::new(ScriptedSource {
+                    values: Vec::new(),
+                    closed: Arc::clone(&closed),
+                }),
+            )
+            .expect("open");
+        h.next_frame();
+        h.close_inbound();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !*closed.lock().unwrap() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(*closed.lock().unwrap(), "EOF must stop open event streams");
     }
 }
