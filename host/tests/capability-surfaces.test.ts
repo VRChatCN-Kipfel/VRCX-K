@@ -20,6 +20,7 @@ import {
   SHELL_SUBDOMAINS,
 } from "../src/contracts/capabilityInventory"
 import { HandsService } from "../src/hands"
+import { AutostartService } from "../src/shell-extras"
 import { ShortcutService } from "../src/shortcut"
 import { ShutdownSignal } from "../src/signal"
 import { TrayService } from "../src/tray"
@@ -33,6 +34,7 @@ function bootServices(): Context {
   new TrayService(ctx, { log: () => {} })
   new ShortcutService(ctx, { log: () => {} })
   new HandsService(ctx, {})
+  new AutostartService(ctx)
   createShellCapabilities(ctx, new ShellHandle(() => {}))
   return ctx
 }

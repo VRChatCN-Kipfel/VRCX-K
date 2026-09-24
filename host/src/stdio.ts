@@ -60,6 +60,11 @@ export type HostStdioAPI = {
     /** A chord the host registered was pressed (key-down edge only). */
     pressed(event: ShortcutPressEvent): boolean
   }
+  /** Shell → host deep-link notifications (desktop only). */
+  deepLink: {
+    /** One or more URLs the OS handed to the app (a custom scheme was opened). */
+    opened(event: DeepLinkEvent): boolean
+  }
 }
 
 /** Dialog options for message/ask. */
@@ -256,6 +261,33 @@ export type ShellSysAPI = {
     tray: {
       setSnapshot(snapshot: TrayMenuSnapshot): Promise<TraySetSnapshotResult>
     }
+    /**
+     * Clipboard. Text only: the plugin also does images and HTML, but the brain's
+     * use is user IDs / instance links / avatar URLs, and a narrower wire surface
+     * is a smaller thing to keep honest.
+     */
+    clipboard: {
+      writeText(text: string): Promise<boolean>
+      /** `null` when there is nothing to read or the read failed — "" is a valid value. */
+      readText(): Promise<string | null>
+    }
+    /** Cross-platform OS facts. Read as one object; eight routes would be eight partial reads. */
+    os: {
+      info(): Promise<OsInfo>
+    }
+    /**
+     * Desktop-only routes. ABSENT on mobile rather than returning `{ok:false}`, so
+     * a call there fails loudly ("unknown RPC method") instead of implying the OS
+     * refused a request it never saw. Callers must handle their absence.
+     */
+    autostart?: {
+      isEnabled(): Promise<boolean>
+      setEnabled(enabled: boolean): Promise<{ ok: boolean; error?: string }>
+    }
+    deepLink?: {
+      register(scheme: string): Promise<{ ok: boolean; scheme: string; error?: string }>
+      isRegistered(scheme: string): Promise<boolean>
+    }
   }
   /**
    * File primitives (M2 能力面). Registered by the shell unconditionally — unlike
@@ -264,6 +296,27 @@ export type ShellSysAPI = {
    * every call is attributable; this raw entry is the wire mirror.
    */
   hands: HandsSysAPI
+}
+
+/** Cross-platform OS facts (`shell.os.info`). */
+export type OsInfo = {
+  platform: string
+  version: string
+  family: string
+  arch: string
+  /** `null` when the OS cannot report a locale. */
+  locale: string | null
+  hostname: string
+}
+
+/**
+ * A deep link the OS handed to the app (`deepLink.opened`).
+ *
+ * Desktop only: the shell registers no such route on mobile. `urls` is a list
+ * because one activation can carry several — the plugin reports them together.
+ */
+export type DeepLinkEvent = {
+  urls: string[]
 }
 
 /**
@@ -293,9 +346,21 @@ export type ShellShortcutBridge = {
   onPress(handler: (event: ShortcutPressEvent) => void): () => void
 }
 
+/**
+ * Host-facing view of the deep-link side of the shell bridge (desktop only).
+ *
+ * A purely local registration: `deepLink.opened` arrives on the exposed API, not
+ * through the remote proxy.
+ */
+export type ShellDeepLinkBridge = {
+  onOpen(handler: (event: DeepLinkEvent) => void): () => void
+}
+
 export type ShellStdioBridge = ShellSysAPI & {
   tray: ShellTrayBridge
   shortcut: ShellShortcutBridge
+  /** Desktop only; the shell registers no such notification on mobile. */
+  deepLink: ShellDeepLinkBridge
   /**
    * Whether a write to the shell has already failed (EPIPE). See
    * `withWriteFailureObserver` for why the sending-side signal needs its own
@@ -447,6 +512,7 @@ export function connectShellStdio(
 ): ShellStdioBridge {
   const trayActions = fanout<TrayActionEvent>("tray.action")
   const shortcutPresses = fanout<ShortcutPressEvent>("shortcut.pressed")
+  const deepLinks = fanout<DeepLinkEvent>("deepLink.opened")
   // #33: EOF on the shell's stdin channel means the shell is gone. Its
   // ProcessTree Job Object would hard-reap us anyway — this turns that into the
   // same graceful teardown the stop RPC uses. Only a peer channel (pipe on
@@ -545,6 +611,15 @@ export function connectShellStdio(
           return true
         },
       },
+      deepLink: {
+        // `deepLink.opened` (shell → host, desktop only): the OS handed the app
+        // one or more URLs. The shell only proves they arrived — the brain owns
+        // what a URL means.
+        opened: (event: DeepLinkEvent) => {
+          deepLinks.emit(event)
+          return true
+        },
+      },
     },
   })
   const remote = channel.getAPI()
@@ -567,6 +642,9 @@ export function connectShellStdio(
       register: (accelerator) => remote.shell.shortcut.register(accelerator),
       unregister: (accelerator) => remote.shell.shortcut.unregister(accelerator),
       onPress: (handler) => shortcutPresses.on(handler),
+    },
+    deepLink: {
+      onOpen: (handler) => deepLinks.on(handler),
     },
     /**
      * Whether a write to the shell has already failed. Bootstrap consults this

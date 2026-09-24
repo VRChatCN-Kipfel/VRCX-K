@@ -17,6 +17,7 @@ import { stopOnShellLost, stopOnStdinLoss } from "./lifecycle"
 import { log } from "./log"
 import { loadManifests } from "./manifests"
 import { makeRestartRequester } from "./restart"
+import { AutostartService } from "./shell-extras"
 import { ShortcutService } from "./shortcut"
 import { ShutdownSignal } from "./signal"
 import { watchStdinClose } from "./stdin-watch"
@@ -207,6 +208,13 @@ async function bootstrap() {
   })
   ctx.effect(() => () => hands.detachShell())
 
+  // Desktop-only "start with the system". A `Service` because it must tell "no
+  // shell yet" (a waiting state) apart from "this platform has no such route"
+  // (permanent) — a plain mirror cannot express that distinction. Nothing enables
+  // autostart at boot: the user owns that decision, this only exposes the switch.
+  const autostart = new AutostartService(ctx)
+  ctx.effect(() => () => autostart.detachShell())
+
   await ctx.plugin(Loader)
 
   // ── Upstream plugins we were re-implementing by hand ────────────────────
@@ -387,6 +395,9 @@ async function bootstrap() {
     // one stdio channel. Attached here rather than at boot because the service is
     // provided before the shell exists (plugins may inject it meanwhile).
     hands.attachShell(shell)
+    // Desktop-only extras. `ctx.os` and `ctx.clipboard` are stateless mirrors and
+    // need no attach; only autostart carries shell-attachment state.
+    autostart.attachShell(shell)
     // Bind the dev-watch relay now that the shell API proxy exists. Events
     // emitted before this point were logged only; the relay is fire-and-forget
     // so a shell without the handler (or a dropped pipe) never breaks dev.

@@ -131,11 +131,15 @@ describe("capability surface (M2-1)", () => {
     expect(keys(ctx.shell)).toEqual(
       [
         "app",
+        "autostart",
+        "clipboard",
+        "deepLink",
         "devWatchEvent",
         "dialog",
         "notify",
         "openPath",
         "openUrl",
+        "os",
         "path",
         "reveal",
         "shortcut",

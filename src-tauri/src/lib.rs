@@ -131,6 +131,38 @@ fn dispatch_app_command(
     result
 }
 
+/// Forward one deep link to the host, and mirror it to the face.
+///
+/// A received URL that nobody consumes is indistinguishable from a link that
+/// never arrived — the OS delivered it, this process got it, and nothing
+/// happened. So both deliveries are attempted and the outcome is emitted for the
+/// dev panel, the same shape `shortcut.pressed` uses.
+///
+/// The brain owns what a URL MEANS (log in, join an instance); the shell only
+/// proves it arrived.
+#[cfg(desktop)]
+fn forward_deep_link(app: &tauri::AppHandle, urls: Vec<String>) {
+    let delivery = {
+        let state = app.state::<HostState>();
+        match state.peer() {
+            Some(peer) => match peer.notify("deepLink.opened", vec![json!({ "urls": urls })]) {
+                Ok(()) => "delivered",
+                Err(err) => {
+                    eprintln!("[shell] deep link notify failed: {err}");
+                    "write-failed"
+                }
+            },
+            None => "no-host",
+        }
+    };
+    if let Err(err) = app.emit(
+        "deep-link-opened",
+        json!({ "urls": urls, "delivery": delivery }),
+    ) {
+        eprintln!("[shell] emit deep-link-opened: {err}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -169,8 +201,61 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // Cross-platform, no desktop-only API: `os` is read-only facts and
+        // `clipboard-manager` works on mobile too (plain text only there), so
+        // neither is gated.
+        //
+        // ⚠ `clipboard-manager`'s default permission set enables NOTHING. Every
+        // command must be listed in `capabilities/default.json` or the call fails
+        // at runtime with a permission error — see the capability file.
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(HostState::default())
         .manage(AppLifecycle::default());
+
+    // Desktop-only plugins. Declared under a `cfg(any(windows, macos, linux))`
+    // target section in Cargo.toml AND gated here: the catalog's platform matrix
+    // marks every one of them "none" for Android/iOS, so referencing them on
+    // mobile would be a compile error rather than a graceful absence.
+    #[cfg(desktop)]
+    {
+        // Window position/size persistence. Defaults are the documented useful
+        // set (size, position, maximized, fullscreen, decorations, visible) —
+        // deliberately not narrowed, because losing "was maximized" on restart is
+        // exactly the surprise this plugin exists to prevent.
+        builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+
+        // Autostart: `MacosLauncher::LaunchAgent` is the documented default and
+        // the argv comes from the plugin's own builder. The shell only provides
+        // the MECHANISM — whether a user wants the app to launch with the system
+        // is a UI decision, so nothing enables it at boot. It is off until the
+        // user turns it on.
+        builder = builder.plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ));
+
+        // Deep links. Registered AFTER single-instance on purpose: a second
+        // launch carrying a URL must be forwarded to the running instance, which
+        // is what single-instance's `deep-link` feature (enabled in Cargo.toml)
+        // arranges. Without that pairing a `vrchat://` link would open a second
+        // app instead of reaching the live one.
+        //
+        // ⚠ Runtime scheme registration is Windows/Linux only; on macOS the
+        // scheme must be declared in `tauri.conf.json`.
+        //
+        // ⚠ The `on_open_url` hook is registered in the ONE `.setup()` below,
+        // NOT here. `Builder::setup` is a single slot: a second call REPLACES the
+        // first with no error, so a handler registered in a second `.setup()`
+        // silently discards everything the other one did. That is exactly what
+        // the first attempt at this wiring did.
+        builder = builder.plugin(tauri_plugin_deep_link::init());
+
+        // Tray-relative positioning. Nothing calls `move_window` yet: today the
+        // tray is a native menu and there is no popup window to place. Registered
+        // now so the tray event hook has somewhere to go when the panel lands.
+        builder = builder.plugin(tauri_plugin_positioner::init());
+    }
 
     // Global shortcuts are a desktop-only capability: the plugin's types and the
     // `AppHandle::global_shortcut()` extension do not exist on mobile. The
@@ -222,6 +307,25 @@ pub fn run() {
             // on mobile, so there is nothing to set up there.
             #[cfg(desktop)]
             tray::setup(app.handle())?;
+            // Deep links: consume the URLs the OS hands us. Registered here
+            // rather than in its own `.setup()` because `Builder::setup` is a
+            // single slot — a second call would silently replace this one and
+            // lose the tray + supervisor wiring below.
+            //
+            // Without this hook a deep link is a link that vanishes: the OS
+            // delivers it, this process receives it, nothing happens. The brain
+            // owns what a URL MEANS (log in, join an instance); the shell only
+            // proves it arrived.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt as _;
+                let deeplink_handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    let urls: Vec<String> =
+                        event.urls().iter().map(|url| url.to_string()).collect();
+                    forward_deep_link(&deeplink_handle, urls);
+                });
+            }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let state = handle.state::<HostState>();

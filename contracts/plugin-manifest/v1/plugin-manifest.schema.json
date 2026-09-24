@@ -207,7 +207,11 @@
         "app",
         "path",
         "devWatchEvent",
-        "tray"
+        "tray",
+        "clipboard",
+        "os",
+        "autostart",
+        "deepLink"
       ]
     },
     "HandsPrimitive": {
@@ -239,6 +243,14 @@
         "os": { "$ref": "#/$defs/PermissionGrant" },
         "tray": { "$ref": "#/$defs/PermissionGrant" },
         "shortcut": { "$ref": "#/$defs/PermissionGrant" },
+        "clipboard": {
+          "$ref": "#/$defs/PermissionGrant",
+          "description": "Text clipboard access (read/write)."
+        },
+        "autostart": {
+          "$ref": "#/$defs/PermissionGrant",
+          "description": "Register the app to start with the system. Desktop only; the shell registers no such route on mobile."
+        },
         "hands": {
           "oneOf": [
             { "type": "boolean" },

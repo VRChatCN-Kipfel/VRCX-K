@@ -1,5 +1,5 @@
 import { type Context, Service, symbols } from "cordis"
-import type { AppInfo, PathKind, ShellStdioBridge, ShellSysAPI } from "./stdio"
+import type { AppInfo, OsInfo, PathKind, ShellStdioBridge, ShellSysAPI } from "./stdio"
 
 type ShellApi = ShellSysAPI["shell"]
 
@@ -201,6 +201,16 @@ const OS_SPEC: CapabilitySpec = {
   appExit: (s, code) => (s ? s.app.exit(code) : Promise.resolve(false)),
   pathDir: (s) => (s ? s.path.dir() : Promise.resolve(null)),
   pathResolve: (s, kind) => (s ? s.path.resolve(kind) : Promise.resolve("")),
+  // Cross-platform OS facts (platform/arch/version/family/locale/hostname).
+  // Added to `ctx.os` rather than a new service because `#17` already designated
+  // `ctx.os` as the low-risk misc bucket, and a second service named for the OS
+  // would be a genuine ambiguity for plugin authors.
+  platformInfo: (s) => (s ? s.os.info() : Promise.resolve(null)),
+}
+
+const CLIPBOARD_SPEC: CapabilitySpec = {
+  writeText: (s, text) => (s ? s.clipboard.writeText(text) : Promise.resolve(false)),
+  readText: (s) => (s ? s.clipboard.readText() : Promise.resolve(null)),
 }
 
 /**
@@ -239,6 +249,32 @@ const RAW_SHELL: RawShellSpec = {
     resolve: (s, kind) => (s ? s.path.resolve(kind) : Promise.resolve("")),
   },
   devWatchEvent: (s, event) => (s ? s.devWatchEvent(event) : Promise.resolve(false)),
+  clipboard: CLIPBOARD_SPEC,
+  // OS facts live at `shell.os.info` but the curated surface is `ctx.os.platformInfo`
+  // (see OS_SPEC). The raw mirror still has to cover the key — the compile-time
+  // guard in `RawShellSpec` exists precisely to catch a key that is on the wire but
+  // unreachable through the mirror.
+  os: {
+    info: (s) => (s ? s.os.info() : Promise.resolve(null)),
+  },
+  // Desktop-only routes. `?? ` guards because the shell does not register them on
+  // mobile at all: a raw mirror that assumed their presence would throw a
+  // TypeError there instead of reporting "unsupported".
+  autostart: {
+    isEnabled: (s) => (s?.autostart ? s.autostart.isEnabled() : Promise.resolve(false)),
+    setEnabled: (s, enabled) =>
+      s?.autostart
+        ? s.autostart.setEnabled(enabled)
+        : Promise.resolve({ ok: false, error: "unsupported" }),
+  },
+  deepLink: {
+    register: (s, scheme) =>
+      s?.deepLink
+        ? s.deepLink.register(scheme)
+        : Promise.resolve({ ok: false, scheme, error: "unsupported" }),
+    isRegistered: (s, scheme) =>
+      s?.deepLink ? s.deepLink.isRegistered(scheme) : Promise.resolve(false),
+  },
   tray: {
     setSnapshot: (s, snapshot) =>
       s
@@ -259,6 +295,42 @@ export type OsCapability = {
   appExit(code?: number): Promise<boolean>
   pathDir(): Promise<Record<PathKind, string> | null>
   pathResolve(kind: PathKind): Promise<string>
+  /**
+   * Cross-platform OS facts (platform/arch/version/family/locale/hostname), or
+   * `null` with no shell. This is "which machine am I on" — the multi-device
+   * direction (#13) needs it, and it is the cheapest source for platform-
+   * conditional behaviour.
+   */
+  platformInfo(): Promise<OsInfo | null>
+}
+
+/** Text-only clipboard access. */
+export type ClipboardCapability = {
+  writeText(text: string): Promise<boolean>
+  /** `null` when there is nothing to read, or no shell. */
+  readText(): Promise<string | null>
+}
+
+/**
+ * "Start with the system" (desktop only).
+ *
+ * ⚠ Mechanism only: nothing here enables autostart by itself, because whether the
+ * app launches with the system is the user's decision.
+ */
+export type AutostartCapability = {
+  isEnabled(): Promise<boolean>
+  setEnabled(enabled: boolean): Promise<{ ok: boolean; error?: string }>
+}
+
+/**
+ * Custom URL schemes (desktop only — the shell registers no such route on mobile).
+ *
+ * Registration works at runtime on Windows/Linux only; macOS requires the scheme
+ * in `tauri.conf.json`.
+ */
+export type DeepLinkCapability = {
+  register(scheme: string): Promise<{ ok: boolean; scheme: string; error?: string }>
+  isRegistered(scheme: string): Promise<boolean>
 }
 
 /**
@@ -281,6 +353,7 @@ export function createShellCapabilities(ctx: Context, handle: ShellHandle): void
   buildNode(ctx, "dialog", handle, DIALOG_SPEC)
   buildNode(ctx, "window", handle, WINDOW_SPEC)
   buildNode(ctx, "os", handle, OS_SPEC)
+  buildNode(ctx, "clipboard", handle, CLIPBOARD_SPEC)
 }
 
 declare module "cordis" {
@@ -296,5 +369,6 @@ declare module "cordis" {
     dialog: ShellSysAPI["shell"]["dialog"]
     window: ShellSysAPI["shell"]["window"]
     os: OsCapability
+    clipboard: ClipboardCapability
   }
 }

@@ -34,6 +34,8 @@ export const HOST_SERVICES = [
   "shortcut",
   "signal",
   "hands",
+  "clipboard",
+  "autostart",
 ] as const
 export type HostService = (typeof HOST_SERVICES)[number]
 
@@ -53,6 +55,8 @@ export const REQUESTABLE_CAPABILITIES = [
   "tray",
   "shortcut",
   "hands",
+  "clipboard",
+  "autostart",
 ] as const satisfies readonly HostService[]
 export type RequestableCapability = (typeof REQUESTABLE_CAPABILITIES)[number]
 
@@ -91,6 +95,10 @@ export const SHELL_SUBDOMAINS = [
   "path",
   "devWatchEvent",
   "tray",
+  "clipboard",
+  "os",
+  "autostart",
+  "deepLink",
 ] as const
 export type ShellSubdomain = (typeof SHELL_SUBDOMAINS)[number]
 

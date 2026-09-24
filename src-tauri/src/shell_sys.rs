@@ -19,6 +19,9 @@ use crate::kkrpc_peer::Peer;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_clipboard_manager::ClipboardExt;
+#[cfg(desktop)]
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 #[cfg(desktop)]
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -175,6 +178,128 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
             json!(app.opener().reveal_item_in_dir(path).is_ok())
         }),
     );
+
+    // --- clipboard ---------------------------------------------------------
+    // Text only through this surface on purpose. The plugin also does images and
+    // HTML, but the brain's use is user IDs / instance links / avatar URLs, and a
+    // narrower wire surface is a smaller thing to keep honest. Adding image
+    // transfer here would also mean deciding an encoding for the wire (the same
+    // question as `hands`, and we already have a streaming answer there).
+    //
+    // ⚠ Each of these needs its permission listed in `capabilities/default.json`;
+    // the plugin's default set enables nothing, so a missing entry surfaces as a
+    // runtime permission error, not a compile error.
+    peer.on(
+        "shell.clipboard.writeText",
+        handler(app.clone(), |app, args| {
+            json!(app.clipboard().write_text(str_arg(args, 0)).is_ok())
+        }),
+    );
+    // shell.clipboard.readText() -> string | null
+    // `null` (not an empty string) when there is nothing to read or the read
+    // failed: "" is a legitimate clipboard value, so the two must not collapse.
+    peer.on(
+        "shell.clipboard.readText",
+        handler(app.clone(), |app, _args| {
+            match app.clipboard().read_text() {
+                Ok(text) => json!(text),
+                Err(err) => {
+                    eprintln!("[shell] clipboard read: {err}");
+                    Value::Null
+                }
+            }
+        }),
+    );
+
+    // --- os ----------------------------------------------------------------
+    // Host facts. Merged into ONE reply rather than eight routes: they are read
+    // together (build an environment fingerprint), every one is a cheap local
+    // call, and eight round trips to assemble one object would be eight
+    // opportunities for a partial read.
+    peer.on(
+        "shell.os.info",
+        handler(app.clone(), |_app, _args| {
+            json!({
+                "platform": tauri_plugin_os::platform(),
+                "version": tauri_plugin_os::version().to_string(),
+                "family": tauri_plugin_os::family(),
+                "arch": tauri_plugin_os::arch(),
+                "locale": tauri_plugin_os::locale(),
+                "hostname": tauri_plugin_os::hostname(),
+            })
+        }),
+    );
+
+    // --- autostart (desktop-only) ------------------------------------------
+    // Mechanism only. Nothing here turns autostart ON at boot: whether the app
+    // should launch with the system is a user decision, so the shell exposes the
+    // switch and the UI owns it.
+    //
+    // Gated because the plugin has no mobile implementation at all — on Android
+    // the route is absent, so a call gets the peer's "unknown RPC method" instead
+    // of a `{ok:false}` that would imply the OS refused a request it never saw.
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt as _;
+
+        // shell.autostart.isEnabled() -> bool
+        peer.on(
+            "shell.autostart.isEnabled",
+            handler(app.clone(), |app, _args| {
+                json!(app.autolaunch().is_enabled().unwrap_or(false))
+            }),
+        );
+        // shell.autostart.setEnabled(enabled) -> { ok, error? }
+        // A verdict object, not a bare bool: "the OS refused to register" is
+        // actionable (show it), whereas `false` is indistinguishable from "the
+        // user asked for off".
+        peer.on(
+            "shell.autostart.setEnabled",
+            handler(app.clone(), |app, args| {
+                let wanted = args.first().and_then(Value::as_bool).unwrap_or(false);
+                let result = if wanted {
+                    app.autolaunch().enable()
+                } else {
+                    app.autolaunch().disable()
+                };
+                match result {
+                    Ok(()) => json!({ "ok": true }),
+                    Err(err) => {
+                        eprintln!("[shell] autostart set {wanted}: {err}");
+                        json!({ "ok": false, "error": err.to_string() })
+                    }
+                }
+            }),
+        );
+
+        // --- deep link ------------------------------------------------------
+        // shell.deepLink.register(scheme) -> { ok, error? }
+        // Runtime registration works on Windows/Linux only; on macOS the scheme
+        // must be declared in tauri.conf.json. Reported rather than swallowed:
+        // a scheme that silently failed to register is indistinguishable from a
+        // link nobody clicked.
+        peer.on(
+            "shell.deepLink.register",
+            handler(app.clone(), |app, args| {
+                let scheme = str_arg(args, 0);
+                match app.deep_link().register(scheme.clone()) {
+                    Ok(()) => json!({ "ok": true, "scheme": scheme }),
+                    Err(err) => {
+                        eprintln!("[shell] deep-link register {scheme}: {err}");
+                        json!({ "ok": false, "scheme": scheme, "error": err.to_string() })
+                    }
+                }
+            }),
+        );
+        // shell.deepLink.isRegistered(scheme) -> bool
+        peer.on(
+            "shell.deepLink.isRegistered",
+            handler(app.clone(), |app, args| {
+                let scheme = str_arg(args, 0);
+                json!(app.deep_link().is_registered(scheme).unwrap_or(false))
+            }),
+        );
+    }
 
     // --- global shortcuts --------------------------------------------------
     // Desktop-only: there is no OS-wide hotkey facility on mobile, and the
