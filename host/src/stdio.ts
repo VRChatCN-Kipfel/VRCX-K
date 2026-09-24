@@ -1,6 +1,7 @@
 import type { Context } from "cordis"
-import { RPCChannel, type RPCMessage, type Transport } from "kkrpc"
+import type { RPCMessage, Transport } from "kkrpc"
 import { nodeStdioTransport } from "kkrpc/stdio"
+import { StreamingRPCChannel } from "kkrpc/streaming"
 import { HOST_RESTART_EXIT, hostWsAPI } from "./api"
 import { gracefulStopWithTimeout, stopOnStdinLoss } from "./lifecycle"
 import { stdinIsPeerChannel } from "./stdin-watch"
@@ -374,7 +375,19 @@ export function connectShellStdio(
   if (!transport) {
     throw new TypeError("host stdio: no transport available (neither default nor supplied)")
   }
-  const channel = new RPCChannel<HostStdioAPI, ShellSysAPI>(transport, {
+  // `StreamingRPCChannel`, not the base `RPCChannel`, so this ONE channel can
+  // carry the `hands.*` stream frames (`t:"sq"` / `t:"sr"`) as well as ordinary
+  // RPC. The base channel has no stream routing at all — measured: the compiled
+  // `channel-*.js` contains zero occurrences of either tag — so a stream frame
+  // would be silently dropped and `hands.read` could never arrive.
+  //
+  // Streaming is a strict superset here: `StreamingRPCChannel extends RPCChannel`
+  // and both directions of ordinary request/response were verified unchanged
+  // through it (nested namespaces, `expose`, and a test-supplied transport), see
+  // docs/probes/probe-host-streaming-channel.ts (6/6) and
+  // docs/hands-host-design.md §1. The added cost is per-stream state, which is
+  // why the base channel remains right for the face⇄brain ws path.
+  const channel = new StreamingRPCChannel<HostStdioAPI, ShellSysAPI>(transport, {
     onClose: watchStdinLoss
       ? (reason) => {
           console.error(
