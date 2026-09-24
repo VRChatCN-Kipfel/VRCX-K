@@ -218,6 +218,51 @@ payload ([`hand-io/FINDINGS.md`](hand-io/FINDINGS.md) §2). The probe now sends
 base64 on purpose and says so in a comment; the peer decodes all three shapes so
 a host that forgets still transfers correctly rather than silently corrupting.
 
+### `hands-e2e/hol.mjs` — head-of-line blocking on the real peer
+
+Takes the proposal's §5 **inference** and measures it on the actual Rust peer over
+a real pipe: round-trip latency of `hands.stat` while a 128 MiB `hands.read`
+stream is flowing, plus a post-load control.
+
+```bash
+node docs/probes/hands-e2e/hol.mjs --size=134217728 --samples=100
+```
+
+Result: **p50 barely moves (1.28x) but p95 degrades 51x** (0.37 → 18.85 ms), and
+latency recovers after the stream stops. That **corrects** §5's "bulk will make
+interaction feel stuck" — the cost is in the tail, not the median.
+
+⚠ Two honesty notes carried in the file itself: the loaded tail could come from
+**queueing** OR from the peer simply being **busy** (its reader thread both pumps
+chunks and answers requests), and this probe **cannot separate** them. And a
+loopback measurement cannot license any cross-machine conclusion — the same
+discipline as [`transport-lab`](transport-lab/FINDINGS.md) §8.
+
+## Host-side streaming probes (single-file, root of `docs/probes/`)
+
+These four answer what the `ctx.hands` design cannot guess. See
+[`../hands-host-design.md`](../hands-host-design.md).
+
+| probe | answers |
+|---|---|
+| `probe-host-streaming-channel.ts` | Can the host's stdio channel carry streams at all? Is `StreamingRPCChannel` a drop-in for ordinary RPC? **6/6** |
+| `probe-host-stream-lifecycle.ts` | Does `this.ctx.effect(...)` inside a Service method bind to the CALLER's fiber? |
+| `probe-host-stream-leak.ts` | If a plugin is unloaded mid-stream, does anything stop it? (**measured leak**: 16 chunks after unload) |
+| `probe-host-effect-economy.ts` | Does a per-stream `ctx.effect` registration need releasing, or does it accumulate? (**1000 registrations all survived to unload**) |
+
+```bash
+bun run docs/probes/probe-host-streaming-channel.ts
+bun run docs/probes/probe-host-stream-lifecycle.ts
+bun run docs/probes/probe-host-stream-leak.ts
+bun run docs/probes/probe-host-effect-economy.ts
+```
+
+⚠ `probe-host-streaming-channel.ts` also measured something that changes a
+signature's meaning: **the host receives base64 STRINGS, not `Uint8Array`** (the
+stock JSON codec has no binary form). So the proposal's
+`AsyncIterable<Uint8Array>` requires the HOST SIDE to decode — it is not a
+pass-through.
+
 ## `probe-hand-attribution.ts` (single-file, root of `docs/probes/`)
 
 Does a **streaming** Service method keep its caller attribution? Written to test a
