@@ -12,6 +12,7 @@ import { RPCTransportClosedError } from "kkrpc"
 import { createShellCapabilities, ShellHandle } from "./capability"
 import { attachDevWatch, DevWatch, type DevWatchEvent } from "./dev-watch"
 import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "./fiber"
+import { HandsService } from "./hands"
 import { stopOnShellLost, stopOnStdinLoss } from "./lifecycle"
 import { log } from "./log"
 import { loadManifests } from "./manifests"
@@ -193,6 +194,19 @@ async function bootstrap() {
   const capabilities = new ShellHandle((line) => log(line))
   createShellCapabilities(ctx, capabilities)
 
+  // File capability (M2). A `Service` subclass rather than a `buildNode` mirror
+  // because it owns per-stream state: every `read`/`watch` registers a guard on
+  // the CALLER's fiber, so unloading a plugin stops its in-flight stream. That is
+  // a measured requirement, not a nicety — an unguarded stream kept producing
+  // after its plugin was unloaded (docs/probes/probe-host-stream-leak.ts).
+  //
+  // Registered before the loader so plugins can inject `ctx.hands`; it reports
+  // "no shell" until the bridge attaches, like tray/shortcut.
+  const hands = new HandsService(ctx, {
+    audit: (line) => log(line),
+  })
+  ctx.effect(() => () => hands.detachShell())
+
   await ctx.plugin(Loader)
 
   // ── Upstream plugins we were re-implementing by hand ────────────────────
@@ -369,6 +383,10 @@ async function bootstrap() {
     shortcuts.attachShell(shell.shortcut)
     // Capability surface (M2-1): hand the shell API to the capability services.
     capabilities.attach(shell)
+    // File capability (M2): the same bridge, so `ctx.hands` reads through the
+    // one stdio channel. Attached here rather than at boot because the service is
+    // provided before the shell exists (plugins may inject it meanwhile).
+    hands.attachShell(shell)
     // Bind the dev-watch relay now that the shell API proxy exists. Events
     // emitted before this point were logged only; the relay is fire-and-forget
     // so a shell without the handler (or a dropped pipe) never breaks dev.

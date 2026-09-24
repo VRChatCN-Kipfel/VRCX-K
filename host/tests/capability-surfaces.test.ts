@@ -14,10 +14,12 @@ import { describe, expect, test } from "bun:test"
 import { Context } from "cordis"
 import { createShellCapabilities, ShellHandle } from "../src/capability"
 import {
+  HANDS_PRIMITIVES,
   HOST_SERVICES,
   REQUESTABLE_CAPABILITIES,
   SHELL_SUBDOMAINS,
 } from "../src/contracts/capabilityInventory"
+import { HandsService } from "../src/hands"
 import { ShortcutService } from "../src/shortcut"
 import { ShutdownSignal } from "../src/signal"
 import { TrayService } from "../src/tray"
@@ -25,11 +27,12 @@ import { TrayService } from "../src/tray"
 /** Build a context carrying exactly the services the host provides at boot. */
 function bootServices(): Context {
   const ctx = new Context()
-  // Mirrors host/src/index.ts: provide the shutdown signal, construct the two
+  // Mirrors host/src/index.ts: provide the shutdown signal, construct the
   // Service subclasses, then register the capability surface.
   ctx.provide("signal", new ShutdownSignal())
   new TrayService(ctx, { log: () => {} })
   new ShortcutService(ctx, { log: () => {} })
+  new HandsService(ctx, {})
   createShellCapabilities(ctx, new ShellHandle(() => {}))
   return ctx
 }
@@ -58,5 +61,20 @@ describe("declared capabilities really exist at runtime", () => {
       .filter((key) => key !== "ctx" && key !== "name")
       .sort()
     expect(keys).toEqual([...SHELL_SUBDOMAINS].sort())
+  })
+
+  test("ctx.hands exposes exactly the declared primitives", () => {
+    // The inventory's HANDS_PRIMITIVES is only a single source of truth if
+    // something fails when the service drifts from it. A renamed or dropped
+    // primitive would otherwise let a plugin request a permission that cannot be
+    // satisfied — the same failure this whole file exists to prevent.
+    const ctx = bootServices()
+    const hands = ctx.get("hands") as unknown as Record<string, unknown>
+    const keys = Object.getOwnPropertyNames(
+      // Walk to the prototype: the methods are class methods, so they are not
+      // own properties of the per-caller shadow.
+      Object.getPrototypeOf(hands) as object,
+    ).filter((key) => (HANDS_PRIMITIVES as readonly string[]).includes(key))
+    expect(keys.sort()).toEqual([...HANDS_PRIMITIVES].sort())
   })
 })

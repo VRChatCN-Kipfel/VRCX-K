@@ -87,6 +87,106 @@ export type AppInfo = {
 export type PathKind = "config" | "data" | "cache" | "temp" | "home"
 
 /**
+ * The `hands` file primitives exposed by the shell (Rust).
+ *
+ * Mirrors `src-tauri/src/hands.rs`. Four primitives only — directory walking,
+ * batching and retry are deliberately ABSENT: the per-file cost is a full round
+ * trip, so batching belongs on the brain side (`docs/hands-capability-proposal.md`
+ * §1, measured in `docs/probes/transport-lab/FINDINGS.md` §6).
+ */
+export type HandsSysAPI = {
+  /** `null` for a missing path — "does not exist" is an answer, not an error. */
+  stat(path: string): Promise<HandsStatWire | null>
+  /**
+   * A **stream reference**, not data. ⚠ Each yielded chunk arrives as a **base64
+   * STRING**, not bytes: kkrpc's stock JSON codec has no binary form (measured in
+   * `docs/probes/probe-host-streaming-channel.ts`). The decoding belongs to
+   * `hands.ts`, which re-exposes `AsyncIterable<Uint8Array>`.
+   */
+  read(path: string, opts?: HandsReadOptions): AsyncIterable<unknown>
+  /**
+   * Consumes a stream and answers when it ends, so the reply is DEFERRED on the
+   * Rust side: "how many bytes" is only knowable after the last chunk.
+   */
+  write(
+    path: string,
+    data: AsyncIterable<unknown>,
+    opts?: HandsWriteOptions,
+  ): Promise<HandsWriteResult>
+  /** Also a stream reference; yields change records. */
+  watch(path: string, opts?: HandsWatchOptions): AsyncIterable<unknown>
+}
+
+/** One file's identity and size. Batch sizing and resume both need it. */
+export type HandsStatWire = {
+  size: number
+  /**
+   * Monotonic file identity, stable across `rename`. Empty string means the
+   * filesystem could not report one (some network shares) — treat that as
+   * "unknown", never as "same".
+   */
+  id: string
+  mtimeMs: number
+  kind: "file" | "dir" | "other"
+}
+
+export type HandsReadOptions = {
+  /** Byte offset to start at. Resumption is exactly this — no separate method. */
+  offset?: number
+  chunkSize?: number
+}
+
+export type HandsWriteOptions = {
+  /** Start offset. Omitted = overwrite from 0. */
+  offset?: number
+  /** `append` and `offset > 0` are mutually exclusive (the shell rejects it). */
+  mode?: "create" | "truncate" | "append"
+}
+
+export type HandsWatchOptions = {
+  recursive?: boolean
+}
+
+export type HandsWriteResult = {
+  bytes: number
+  endOffset: number
+  mode: string
+}
+
+/**
+ * One change event from `hands.watch`.
+ *
+ * `path` is the path the **shell's** watcher reported, which on some platforms is
+ * canonicalized (macOS resolves `/var` to `/private/var`). Do not compare it to a
+ * caller-supplied string without normalizing both — that mistake silently
+ * dropped every event on macOS.
+ */
+export type HandsChange = {
+  kind: "create" | "modify" | "remove" | "replace"
+  path: string
+  id?: string
+}
+
+/**
+ * The error codes the file primitives use, carried as a `CODE: detail` prefix on
+ * the message because kkrpc's error frame only carries `{name, message}`.
+ *
+ * ⚠ `ESTALE` is deliberately distinct from `ENOENT`: after a rotation the path is
+ * a DIFFERENT file (reopen and reset the offset), whereas a missing file usually
+ * means give up. Opposite handling, so they must not collapse.
+ */
+export const HANDS_ERROR_CODES = [
+  "ENOENT",
+  "EACCES",
+  "EISDIR",
+  "ESTALE",
+  "ENOSPC",
+  "ECANCEL",
+  "EUNSUPPORTED",
+] as const
+export type HandsErrorCode = (typeof HANDS_ERROR_CODES)[number]
+
+/**
  * Dev-watch event pushed host → shell → face (issue #11 wiring). This is a
  * #11-owned event shape (not a #7 lifecycle DTO): plain camelCase JSON, errors
  * reduced to strings so kkrpc JSON transport never sees Error objects.
@@ -157,6 +257,13 @@ export type ShellSysAPI = {
       setSnapshot(snapshot: TrayMenuSnapshot): Promise<TraySetSnapshotResult>
     }
   }
+  /**
+   * File primitives (M2 能力面). Registered by the shell unconditionally — unlike
+   * the tray surface they have no Tauri dependency — so these are always present
+   * on an attached shell. Plugin access goes through the `ctx.hands` service so
+   * every call is attributable; this raw entry is the wire mirror.
+   */
+  hands: HandsSysAPI
 }
 
 /**
@@ -448,6 +555,10 @@ export function connectShellStdio(
   return {
     ready: (info) => remote.ready(info),
     shell: remote.shell,
+    // The file primitives are reached through the same remote proxy. Re-exported
+    // here so `HandsService` has one dependency and plugins never touch the raw
+    // wire surface for file access.
+    hands: remote.hands,
     tray: {
       setSnapshot: (snapshot) => remote.shell.tray.setSnapshot(snapshot),
       onAction: (handler) => trayActions.on(handler),

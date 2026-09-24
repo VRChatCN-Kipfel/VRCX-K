@@ -50,6 +50,10 @@ export type ShellSubdomain =
   | "devWatchEvent"
   | "tray";
 export type PermissionGrant = boolean | string[];
+/**
+ * The file primitives ctx.hands can be granted at, one entry per primitive. PRIMITIVE granularity, not a single boolean and not a path scope: hands is a sharper permission than ctx.shell because it reaches the whole disk, so 'read and stat, never write' must be expressible. Path-scoped grants are deliberately not modelled yet — they need a matcher both sides honour, and the enforcement layer is #13/M4. Keys mirror HANDS_PRIMITIVES in host/src/contracts/capabilityInventory.ts.
+ */
+export type HandsPrimitive = "stat" | "read" | "write" | "watch";
 
 /**
  * Author-owned plugin declaration, read from <plugin-root>/.vrcxk/manifest.json. AUTHORITATIVE for version, dependencies, services and permissions. The marketplace index carries only a display cache of name/description; everything else is read from this file. See docs/plugin-source-and-index-design.md.
@@ -195,6 +199,16 @@ export interface Permissions {
   os?: PermissionGrant;
   tray?: PermissionGrant;
   shortcut?: PermissionGrant;
+  /**
+   * File primitives (stat/read/write/watch). Reaches the whole disk, so prefer a narrow list over `true`. Declaration only at this stage — not enforced (#24 is declare-and-warn, and the real boundary is M4's subprocess isolation).
+   */
+  hands?:
+    | boolean
+    | []
+    | [HandsPrimitive]
+    | [HandsPrimitive, HandsPrimitive]
+    | [HandsPrimitive, HandsPrimitive, HandsPrimitive]
+    | [HandsPrimitive, HandsPrimitive, HandsPrimitive, HandsPrimitive];
 }
 /**
  * Frontend extension point (M3). Omit for headless plugins.

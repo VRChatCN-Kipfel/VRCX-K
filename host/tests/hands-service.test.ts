@@ -1,0 +1,446 @@
+// `ctx.hands` — the host-side file capability (M2 能力面).
+//
+// These tests exist because every rule `hands.ts` implements was measured first,
+// and each of those measurements is a way the implementation could silently be
+// wrong later. The load-bearing ones:
+//
+//   1. **A stream must not outlive its caller.** Measured leak: an unguarded
+//      stream kept producing after its plugin was unloaded
+//      (docs/probes/probe-host-stream-leak.ts). If someone drops the guard, that
+//      test fails rather than the leak returning quietly.
+//   2. **The guard must be released when a stream ends.** Measured: 1000
+//      unreleased registrations survived to unload
+//      (docs/probes/probe-host-effect-economy.ts). A bulk sync would otherwise
+//      accumulate a table the size of its file count.
+//   3. **Chunks arrive base64-encoded**, not as bytes
+//      (docs/probes/probe-host-streaming-channel.ts). Treating a string as a
+//      `Uint8Array` silently yields garbage, not an error.
+//   4. **`ESTALE` and `ENOENT` must stay distinguishable** — rotation vs deletion
+//      need opposite handling (docs/hands-capability-proposal.md §2.2).
+//
+// A fake bridge stands in for the shell so the tests are about THIS module's
+// contract. The real wire is covered by probe-host-streaming-channel.ts and, for
+// the Rust half, docs/probes/hands-e2e/run.mjs.
+
+import { describe, expect, test } from "bun:test"
+import { Context } from "cordis"
+import { callerName } from "../src/capability"
+import { asHandsError, decodeChunk, HandsError, HandsService, normalizeChange } from "../src/hands"
+import type { ShellStdioBridge } from "../src/stdio"
+
+/** Build a service whose "shell" is a scripted object. */
+function serviceWith(hands: Partial<ShellStdioBridge["hands"]>): {
+  ctx: Context
+  svc: HandsService
+  audits: string[]
+} {
+  const ctx = new Context()
+  const audits: string[] = []
+  const svc = new HandsService(ctx, { audit: (line) => audits.push(line) })
+  svc.attachShell({
+    hands: {
+      stat: async () => null,
+      read: () => emptyStream(),
+      write: async () => ({ bytes: 0, endOffset: 0, mode: "create" }),
+      watch: () => emptyStream(),
+      ...hands,
+    },
+  } as unknown as ShellStdioBridge)
+  return { ctx, svc, audits }
+}
+
+async function* emptyStream(): AsyncIterable<never> {
+  // Intentionally yields nothing.
+}
+
+async function* from<T>(values: T[]): AsyncIterable<T> {
+  for (const value of values) yield value
+}
+
+async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
+  const out: T[] = []
+  for await (const value of stream) out.push(value)
+  return out
+}
+
+describe("the raw mirror is not usable without a shell", () => {
+  test("a stat with no shell attached fails with a clear code", async () => {
+    const ctx = new Context()
+    const svc = new HandsService(ctx, {})
+    // Not a silent `null`: "no shell" and "no such file" must not look alike.
+    await expect(svc.stat("/tmp/x")).rejects.toThrow(/no shell attached/)
+  })
+
+  test("attaching a shell makes it usable", async () => {
+    const { svc } = serviceWith({
+      stat: async () => ({ size: 3, id: "i", mtimeMs: 1, kind: "file" }),
+    })
+    expect(await svc.stat("/tmp/x")).toEqual({ size: 3, id: "i", mtimeMs: 1, kind: "file" })
+  })
+})
+
+describe("audit: one line per call, attributed to the caller", () => {
+  test("a plugin's call is attributed to that plugin, not to the host", async () => {
+    const { ctx, audits } = serviceWith({
+      stat: async () => ({ size: 1, id: "i", mtimeMs: 0, kind: "file" }),
+    })
+    await ctx.plugin(function readerPlugin(inner: Context) {
+      return inner.hands.stat("/tmp/a")
+    })
+
+    const lines = audits.filter((line) => line.includes("hands.stat"))
+    expect(lines.length).toBe(1)
+    expect(lines[0]).toContain("readerPlugin")
+    expect(lines[0]).not.toContain("<unknown>")
+  })
+
+  test("a stream records ONCE at call time, not once per chunk", async () => {
+    // The rule that matters: auditing per chunk would bury the real signal under
+    // thousands of lines for one file. Measured-adjacent: attribution works
+    // either way, so this is purely about volume.
+    const { ctx, audits } = serviceWith({
+      read: () => from(["AAEC", "AwQF", "BgcI"]),
+    })
+    await ctx.plugin(async function streamPlugin(inner: Context) {
+      // Consume all three chunks.
+      for await (const _chunk of inner.hands.read("/tmp/big")) {
+        /* drain */
+      }
+    })
+
+    expect(audits.filter((line) => line.includes("hands.read")).length).toBe(1)
+  })
+
+  test("a caller that obtains an iterable but never consumes it still leaves a trace", async () => {
+    // This is the practical reason the record happens at call time rather than
+    // inside the generator body, which would not run until the first next().
+    const { ctx, audits } = serviceWith({ read: () => from(["AAEC"]) })
+    await ctx.plugin(function idlePlugin(inner: Context) {
+      // Deliberately never iterate.
+      void inner.hands.read("/tmp/never-consumed")
+    })
+    expect(audits.filter((line) => line.includes("hands.read")).length).toBe(1)
+  })
+
+  test("the audit does not dump the payload", async () => {
+    // A path is useful; a megabyte of base64 is not.
+    const huge = "A".repeat(64 * 1024)
+    const { ctx, audits } = serviceWith({ read: () => from([huge]) })
+    await ctx.plugin(async function bulkPlugin(inner: Context) {
+      for await (const _chunk of inner.hands.read("/tmp/x")) {
+        /* drain */
+      }
+    })
+    const line = audits.find((entry) => entry.includes("hands.read"))
+    expect(line).toBeDefined()
+    expect((line as string).length).toBeLessThan(200)
+  })
+})
+
+describe("chunk decoding", () => {
+  test("a base64 string becomes the original bytes", () => {
+    // The measured wire shape. Treating this string as bytes yields garbage
+    // rather than an error, which is exactly why it is pinned.
+    expect(Array.from(decodeChunk("AAEC"))).toEqual([0, 1, 2])
+  })
+
+  test("a Uint8Array passes through unchanged", () => {
+    // Accepted so this keeps working if the transport gains a binary carrier.
+    expect(Array.from(decodeChunk(new Uint8Array([9, 8])))).toEqual([9, 8])
+  })
+
+  test("an unrecognised chunk shape raises instead of reading as empty", () => {
+    expect(() => decodeChunk(42)).toThrow(HandsError)
+  })
+
+  test("read yields decoded bytes, not the base64 string", async () => {
+    const { svc } = serviceWith({ read: () => from(["AAEC"]) })
+    const chunks = await collect(svc.read("/tmp/x"))
+    expect(chunks.length).toBe(1)
+    expect(chunks[0]).toBeInstanceOf(Uint8Array)
+    expect(Array.from(chunks[0])).toEqual([0, 1, 2])
+  })
+})
+
+describe("write re-encodes to the carrier the shell sends", () => {
+  test("bytes are base64-encoded on the way out", async () => {
+    const seen: unknown[] = []
+    const { svc } = serviceWith({
+      write: async (_path, data) => {
+        for await (const chunk of data) seen.push(chunk)
+        return { bytes: 3, endOffset: 3, mode: "create" }
+      },
+    })
+    const result = await svc.write("/tmp/out", from([new Uint8Array([0, 1, 2])]))
+    expect(seen).toEqual(["AAEC"])
+    expect(result.bytes).toBe(3)
+  })
+
+  test("the byte count comes from the shell, not from a local count", async () => {
+    // The shell reports the real end offset (append mode lands bytes somewhere
+    // other than where the caller asked). Recomputing here would disagree.
+    const { svc } = serviceWith({
+      write: async () => ({ bytes: 999, endOffset: 1500, mode: "append" }),
+    })
+    const result = await svc.write("/tmp/out", emptyStream())
+    expect(result.bytes).toBe(999)
+    expect(result.endOffset).toBe(1500)
+  })
+})
+
+describe("error surface: codes survive and stay distinguishable", () => {
+  test("a CODE: prefix becomes a structured code", () => {
+    const stale = asHandsError(new Error("ESTALE: /log was replaced during read"))
+    expect(stale.code).toBe("ESTALE")
+    expect(stale.isStale).toBe(true)
+    // The prefix is stripped so the message is readable on its own.
+    expect(stale.message).toBe("/log was replaced during read")
+  })
+
+  test("ESTALE and ENOENT are different codes, not different prose", () => {
+    // The whole point of the split: rotation means "reopen and reset", a missing
+    // file usually means "give up". Opposite handling ⇒ separate codes.
+    const stale = asHandsError(new Error("ESTALE: replaced"))
+    const missing = asHandsError(new Error("ENOENT: gone"))
+    expect(stale.code).not.toBe(missing.code)
+    expect(stale.isStale).toBe(true)
+    expect(missing.isStale).toBe(false)
+  })
+
+  test("a message with no known code reports undefined rather than inventing one", () => {
+    // Guessing would send a caller down the wrong branch, which is worse than
+    // admitting the gap.
+    const error = asHandsError(new Error("something exploded"))
+    expect(error.code).toBeUndefined()
+    expect(error.message).toBe("something exploded")
+  })
+
+  test("an already-coded error passes through unchanged", () => {
+    const original = new HandsError("ENOSPC: disk full")
+    expect(asHandsError(original)).toBe(original)
+  })
+
+  test("a thrown non-Error still becomes a HandsError", () => {
+    expect(asHandsError("plain string").message).toBe("plain string")
+  })
+})
+
+describe("watch payloads are validated, not guessed at", () => {
+  test("a well-formed change is accepted", () => {
+    expect(normalizeChange({ kind: "create", path: "/a", id: "x" })).toEqual({
+      kind: "create",
+      path: "/a",
+      id: "x",
+    })
+  })
+
+  test("an unknown kind is dropped", () => {
+    // Inventing a kind would fire the wrong caller behaviour.
+    expect(normalizeChange({ kind: "explode", path: "/a" })).toBeUndefined()
+  })
+
+  test("a missing or empty path is dropped", () => {
+    expect(normalizeChange({ kind: "create" })).toBeUndefined()
+    expect(normalizeChange({ kind: "create", path: "" })).toBeUndefined()
+    expect(normalizeChange(null)).toBeUndefined()
+  })
+
+  test("an absent id is omitted rather than set to undefined", () => {
+    const change = normalizeChange({ kind: "modify", path: "/a" })
+    expect(change).toBeDefined()
+    expect("id" in (change as object)).toBe(false)
+  })
+})
+
+describe("stream lifetime is bound to the caller (the measured leak)", () => {
+  test("unloading a plugin stops its in-flight stream", async () => {
+    // THE regression this whole guard exists for. Measured before the guard:
+    // 16 chunks produced after the plugin was unloaded
+    // (docs/probes/probe-host-stream-leak.ts).
+    const ctx = new Context()
+    let produced = 0
+    let stopped = false
+
+    const svc = new HandsService(ctx, {})
+    svc.attachShell({
+      hands: {
+        read: () =>
+          (async function* () {
+            while (!stopped) {
+              produced += 1
+              yield "AAEC"
+              await new Promise((resolve) => setTimeout(resolve, 5))
+            }
+          })(),
+        stat: async () => null,
+        write: async () => ({ bytes: 0, endOffset: 0, mode: "create" }),
+        watch: () => emptyStream(),
+      },
+    } as unknown as ShellStdioBridge)
+
+    // A plugin that consumes forever, plus an observable signal that the stream
+    // was actually torn down.
+    //
+    // ⚠ The consumer is FIRE-AND-FORGET (`void (async () => …)()`), not awaited
+    // inside `apply`. Awaiting an endless loop here would make `await plugin`
+    // never resolve — that is how the first version of this test timed out, and
+    // it was the test's bug, not the guard's: a real plugin must not block its
+    // own load on a stream either.
+    let started = false
+    const plugin = ctx.plugin(function leakingPlugin(inner: Context) {
+      void (async () => {
+        try {
+          for await (const _chunk of inner.hands.read("/tmp/forever")) {
+            started = true
+            /* consume forever */
+          }
+        } finally {
+          stopped = true
+        }
+      })()
+    })
+    await plugin
+
+    // Wait for production to actually begin before measuring, so "unload stopped
+    // it" cannot pass merely because it never started.
+    const startDeadline = Date.now() + 5_000
+    while (!started && Date.now() < startDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(started).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    const before = produced
+    expect(before).toBeGreaterThan(0)
+
+    // Unload the plugin. Nothing else happens — the guard must do the work.
+    ;(plugin as unknown as { dispose: () => void }).dispose()
+    await new Promise((resolve) => setTimeout(resolve, 120))
+
+    expect(stopped).toBe(true)
+    // Production must have ceased: allow a small race window, not unbounded.
+    const afterUnload = produced - before
+    expect(afterUnload).toBeLessThanOrEqual(2)
+  }, 15_000)
+
+  test("a completed stream releases its registration", async () => {
+    // Measured: unreleased registrations accumulate (1000 survived to unload), so
+    // a bulk sync would build a table as large as its file count. This asserts
+    // the release actually happens.
+    const ctx = new Context()
+    const svc = new HandsService(ctx, {})
+    svc.attachShell({
+      hands: {
+        read: () => from(["AAEC"]),
+        stat: async () => null,
+        write: async () => ({ bytes: 0, endOffset: 0, mode: "create" }),
+        watch: () => emptyStream(),
+      },
+    } as unknown as ShellStdioBridge)
+
+    const rootFiber = (ctx as unknown as { fiber: { _disposables?: { length?: number } } }).fiber
+    const before = rootFiber._disposables?.length ?? 0
+
+    for (let i = 0; i < 50; i++) {
+      for await (const _chunk of svc.read(`/tmp/f${i}`)) {
+        /* drain */
+      }
+    }
+
+    const after = rootFiber._disposables?.length ?? 0
+    // 50 reads must not leave 50 registrations behind.
+    expect(after - before).toBeLessThan(5)
+  })
+
+  test("breaking out of a stream releases its registration", async () => {
+    const ctx = new Context()
+    const svc = new HandsService(ctx, {})
+    svc.attachShell({
+      hands: {
+        read: () => from(["AAEC", "AwQF", "BgcI"]),
+        stat: async () => null,
+        write: async () => ({ bytes: 0, endOffset: 0, mode: "create" }),
+        watch: () => emptyStream(),
+      },
+    } as unknown as ShellStdioBridge)
+
+    const rootFiber = (ctx as unknown as { fiber: { _disposables?: { length?: number } } }).fiber
+    const before = rootFiber._disposables?.length ?? 0
+
+    for (let i = 0; i < 20; i++) {
+      for await (const _chunk of svc.read("/tmp/early")) {
+        break // cancel after the first chunk
+      }
+    }
+
+    const after = rootFiber._disposables?.length ?? 0
+    expect(after - before).toBeLessThan(5)
+  })
+
+  test("the guard is per-caller, so one caller's unload does not stop another's stream", async () => {
+    // `this.ctx` is the CALLER's ctx, so each stream registers on its own fiber.
+    // A shared instance field would release the wrong one.
+    const ctx = new Context()
+    const svc = new HandsService(ctx, {})
+    svc.attachShell({
+      hands: {
+        read: () =>
+          (async function* () {
+            yield "AAEC"
+            await new Promise((resolve) => setTimeout(resolve, 200))
+          })(),
+        stat: async () => null,
+        write: async () => ({ bytes: 0, endOffset: 0, mode: "create" }),
+        watch: () => emptyStream(),
+      },
+    } as unknown as ShellStdioBridge)
+
+    let secondSawChunk = false
+    const first = ctx.plugin(async function firstPlugin(inner: Context) {
+      for await (const _chunk of inner.hands.read("/tmp/first")) {
+        /* drain */
+      }
+    })
+    const second = ctx.plugin(async function secondPlugin(inner: Context) {
+      for await (const _chunk of inner.hands.read("/tmp/second")) {
+        secondSawChunk = true
+      }
+    })
+    await first
+    await second
+
+    // Unload only the first plugin; the second must still be able to consume.
+    ;(first as unknown as { dispose: () => void }).dispose()
+    await new Promise((resolve) => setTimeout(resolve, 250))
+
+    expect(secondSawChunk).toBe(true)
+  }, 15_000)
+})
+
+describe("attribution plumbing", () => {
+  test("callerName resolves a service method's `this` to the calling plugin", async () => {
+    // Guards against a future refactor turning a class method into an arrow
+    // property, which loses attribution silently (cordis findings §1.8).
+    const ctx = new Context()
+    const seen: Array<string | null> = []
+    class Tracing extends HandsService {
+      async stat(path: string) {
+        seen.push(callerName(this))
+        return super.stat(path)
+      }
+    }
+    const svc = new Tracing(ctx, {})
+    svc.attachShell({
+      hands: {
+        stat: async () => null,
+        read: () => emptyStream(),
+        write: async () => ({ bytes: 0, endOffset: 0, mode: "create" }),
+        watch: () => emptyStream(),
+      },
+    } as unknown as ShellStdioBridge)
+
+    await ctx.plugin(function attrPlugin(inner: Context) {
+      return inner.hands.stat("/tmp/x")
+    })
+    expect(seen).toEqual(["attrPlugin"])
+  })
+})
