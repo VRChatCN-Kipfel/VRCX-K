@@ -436,16 +436,53 @@ fn register_watch(peer: &Arc<Peer>) {
 struct FileWatcher {
     rx: Receiver<notify::Result<notify::Event>>,
     watcher: RecommendedWatcher,
-    /// The exact path the caller asked about. Events are filtered against it,
-    /// because the watch may be installed on the parent directory.
+    /// The exact path the caller asked about, **canonicalized**.
+    ///
+    /// Comparison must be on canonicalized paths, and getting this wrong is
+    /// silent: `notify`'s macOS backend canonicalizes the paths it reports
+    /// (`fsevent.rs` `append_path` → `canonicalize()`, then every event carries
+    /// that resolved path), while the caller's string is whatever it typed. On
+    /// macOS `/var` is a symlink to `/private/var`, and `std::env::temp_dir()`
+    /// returns the `/var` form — so a raw comparison drops EVERY event and the
+    /// watch looks like "nothing ever happens" rather than failing. That is
+    /// exactly how this was caught: only the macOS CI job failed.
     target: PathBuf,
     /// Whether the watch had to move up to the parent (target absent at start).
     watching_parent: bool,
 }
 
+/// Resolve a path for comparison with event paths.
+///
+/// Falls back to the input when canonicalization fails (the target may not
+/// exist yet — the whole point of the parent-directory fallback), in which case
+/// the parent is canonicalized instead so the leaf can still be compared.
+fn comparable(path: &Path) -> PathBuf {
+    if let Ok(resolved) = path.canonicalize() {
+        return resolved;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => match parent.canonicalize() {
+            Ok(resolved) => resolved.join(name),
+            Err(_) => path.to_path_buf(),
+        },
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Does this event concern the watched path?
+///
+/// Compared on canonicalized forms so a symlinked ancestor (macOS `/var`) does
+/// not make every event look unrelated. A raw `==` here is the bug described on
+/// [`FileWatcher::target`].
+fn event_concerns(event_path: &Path, target: &Path) -> bool {
+    event_path == target || comparable(event_path) == target
+}
+
 impl FileWatcher {
     fn start(path: &str, recursive: bool) -> Result<Self, String> {
-        let target = PathBuf::from(path);
+        let requested = PathBuf::from(path);
+        // Always compare in canonical form; see the field docs.
+        let target = comparable(&requested);
         let (tx, rx) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |event| {
             // A send failure means the consumer is gone; dropping is correct.
@@ -461,16 +498,16 @@ impl FileWatcher {
 
         // Try the target itself first: a recursive watch on a directory only
         // works there, and a file that exists is watched most directly.
-        let watching_parent = match watcher.watch(&target, mode) {
+        let watching_parent = match watcher.watch(&requested, mode) {
             Ok(()) => false,
             Err(_) => {
-                let parent = target
+                let parent = requested
                     .parent()
                     .filter(|parent| !parent.as_os_str().is_empty())
                     .ok_or_else(|| {
                         encode_error(
                             Code::NotFound,
-                            format!("{} does not exist and has no parent", target.display()),
+                            format!("{} does not exist and has no parent", requested.display()),
                         )
                     })?;
                 // The parent must exist; if it does not, this path is not
@@ -531,8 +568,13 @@ impl StreamSource for FileWatcher {
                 Ok(Ok(event)) => {
                     // Filter to the requested path when the watch sits on the
                     // parent, so a sibling's churn does not surface as a change
-                    // to the target.
-                    if self.watching_parent && !event.paths.iter().any(|path| path == &self.target)
+                    // to the target. Compared canonically — a raw equality here
+                    // silently dropped every event on macOS (see `target`).
+                    if self.watching_parent
+                        && !event
+                            .paths
+                            .iter()
+                            .any(|path| event_concerns(path, &self.target))
                     {
                         continue;
                     }
@@ -914,6 +956,64 @@ mod tests {
             .expect("must fail");
         std::fs::remove_dir_all(&dir).ok();
         assert!(error.starts_with("ENOENT"), "got: {error}");
+    }
+
+    // --- the symlinked-ancestor trap (found by macOS CI, not locally) -------
+
+    #[test]
+    fn event_paths_are_compared_canonically_so_a_symlinked_ancestor_matches() {
+        // This is the platform trap that only macOS CI caught: `notify`'s
+        // fsevent backend reports CANONICALIZED paths, while the caller passes
+        // whatever it typed. On macOS `std::env::temp_dir()` yields `/var/...`
+        // but events arrive as `/private/var/...`, because `/var` is a symlink.
+        // A raw `==` therefore dropped every event and the watch looked like
+        // "nothing ever happens" — a silent wrong answer, not an error.
+        let dir = temp_dir("watch-canonical");
+        let real = dir.canonicalize().expect("canonicalize");
+        let target = real.join("appears.log");
+
+        // Simulate what the backend reports: the canonical form of the same
+        // path. On a platform without a symlinked ancestor these are equal, so
+        // the assertion below is what would have failed on macOS.
+        let reported = comparable(&target);
+        assert!(
+            event_concerns(&reported, &target),
+            "a canonical event path must match the canonical target"
+        );
+
+        // And the negative direction must still hold: a sibling is not the
+        // target, or the fallback filter would pass everything.
+        let sibling = comparable(&real.join("other.log"));
+        assert!(
+            !event_concerns(&sibling, &target),
+            "a sibling must not be mistaken for the target"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_target_that_does_not_exist_yet_still_yields_a_comparable_path() {
+        // The parent-directory fallback watches a path that does not exist, so
+        // canonicalization necessarily fails for it. The comparison must still
+        // resolve the MISSING LEAF against the canonical parent, or the first
+        // event after creation would be filtered out.
+        let dir = temp_dir("watch-canonical-missing");
+        let real = dir.canonicalize().expect("canonicalize");
+        let missing = real.join("not-yet.log");
+
+        let resolved = comparable(&missing);
+        assert_eq!(
+            resolved
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok()),
+            Some(real.clone()),
+            "the missing leaf must resolve against its canonical parent"
+        );
+        assert!(event_concerns(&missing, &resolved));
+        assert!(event_concerns(&resolved, &missing));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // --- error surface ------------------------------------------------------
