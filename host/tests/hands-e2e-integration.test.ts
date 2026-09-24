@@ -480,7 +480,19 @@ describe("the shell's hello arrives on a real connection", () => {
       // of a pile of undefined fields.
       expect(hello.schemaVersion).toBe(1)
       expect(hello.node.launchId.length).toBeGreaterThan(0)
-      expect(hello.node.platform).toBe("windows")
+      // ⚠ DERIVED from the host's own platform, not hardcoded. The peer is a
+      // local process, so `std::env::consts::OS` on the other end must agree with
+      // `process.platform` here — and that agreement is the actual assertion.
+      // Hardcoding "windows" made this test pass locally and FAIL on macOS and
+      // Ubuntu, which is worse than not having it: a green local run said nothing
+      // about the two platforms where it was red.
+      const expectedPlatform =
+        process.platform === "win32"
+          ? "windows"
+          : process.platform === "darwin"
+            ? "macos"
+            : process.platform
+      expect(hello.node.platform).toBe(expectedPlatform)
       // The peer's OWN cwd — the value the brain previously had no way to obtain,
       // and the correct base for resolving a relative path.
       expect(hello.cwd.length).toBeGreaterThan(0)
