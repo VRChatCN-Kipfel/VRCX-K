@@ -200,8 +200,15 @@ beforeAll(() => {
 }, 30_000)
 
 afterAll(() => {
+  // ⚠ `destroy()`, not `close()` — and the difference is not cosmetic.
+  // `StreamingRPCChannel` exposes `destroy()`; there is no `close()`. The first
+  // version of this wrote `channel?.close?.()`, and the optional call meant it
+  // was a SILENT NO-OP: the stream bookkeeping (`localStreams` / `remoteStreams`
+  // / `pendingStreams`) was never torn down, so a stream still in flight kept its
+  // state until the process exited. Nothing failed, which is why it survived —
+  // the type checker only caught it once `host/tests` was included in a program.
   try {
-    channel?.close?.()
+    channel?.destroy()
   } catch {
     /* already gone */
   }
