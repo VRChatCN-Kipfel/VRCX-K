@@ -900,10 +900,28 @@ impl Peer {
                 self.cancel_remote_stream(&sid);
             }
             Some((Ok(()), true)) => {
-                let _ = self.write(&json!({
+                // ⚠ The replenish write MUST be checked, and this is the only
+                // ignored write in the consume path.
+                //
+                // If it fails the transport is gone, so no further chunks will
+                // ever arrive — and the sink is what owns the consumer's deferred
+                // reply. Leaving it unfinished means `hands.write`'s caller waits
+                // out kkrpc's 30s timeout instead of being told the write died.
+                //
+                // `close_streams` is not a safety net here: it runs on reader EOF,
+                // which may never come if only the WRITE side is broken. The
+                // read-side path already does this correctly (it finishes the sink
+                // with the sink's own error above); this is the mirror of it.
+                if let Err(error) = self.write(&json!({
                     "t": "sq", "id": next_id("p"), "sid": sid,
                     "op": "pull", "n": REPLENISH,
-                }));
+                })) {
+                    if let Some(mut consumer) = self.take_consumer(&sid) {
+                        consumer
+                            .sink
+                            .finish(Err(format!("stream interrupted: {error}")));
+                    }
+                }
             }
             _ => {}
         }
