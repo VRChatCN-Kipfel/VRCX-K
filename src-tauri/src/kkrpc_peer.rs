@@ -703,6 +703,29 @@ impl Peer {
                 }
                 StreamStep::Done => {
                     producer.close();
+                    // ⚠ No `v` on the terminal frame, and that is ONLY correct
+                    // because `StreamStep::Done` carries no payload (see the enum
+                    // above) and `StreamSink::finish` takes no value either.
+                    //
+                    // kkrpc's remote consumer DOES read a terminal `v`. Verified
+                    // against the shipped source map (`streaming-channel.ts`):
+                    //
+                    //   :433-439  const result = { done: message.d === true,
+                    //                             value: this.decodeValue(message.v) }
+                    //             waiter.resolve(result)      // <-- delivered
+                    //   :648-655  readBuffered() returns it to the caller
+                    //   :667      `if (stream.done) return {done:true,value:undefined}`
+                    //             is NOT this path — it is the "already finished,
+                    //             next() called again" short-circuit
+                    //
+                    // So an earlier claim of mine ("the JS side ignores it anyway,
+                    // the value is hardcoded `void 0`") was WRONG: it read the
+                    // short-circuit branch as the delivery path. The honest reason
+                    // there is nothing to send is simply that no value exists.
+                    //
+                    // ⇒ If `StreamStep::Done` ever gains a payload, THIS frame must
+                    // gain `"v"` in the same change, or the value is silently
+                    // dropped to `undefined` on the host side.
                     json!({ "t": "sr", "id": next_id("x"), "sid": sid, "d": true })
                 }
                 StreamStep::Failed(message) => {

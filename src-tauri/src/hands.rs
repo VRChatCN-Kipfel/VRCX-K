@@ -1069,18 +1069,32 @@ mod tests {
         //
         // i.e. "cannot read it" reached the caller as "read it, no size", because
         // `(await ctx.hands.stat(p)).size` is `undefined` rather than a rejection.
-        let error = stat_outcome(if cfg!(windows) {
-            r"\\.\NUL"
-        } else {
-            "/dev/null"
-        })
-        .expect_err("a real failure must be a failure, not a value");
-        // Either the OS refuses the path (EACCES) or our regular-file guard does
-        // (EUNSUPPORTED). Both are failures, and both must carry a parseable code.
+        //
+        // ⚠ THE OPERAND IS PLATFORM-INDEPENDENT ON PURPOSE. The first version of
+        // this test used `cfg!(windows) { "\\.\NUL" } else { "/dev/null" }`, which
+        // is red on BOTH unix platforms: `/dev/null` **stats fine** (it is a
+        // character device, and `stat` is a metadata query — reporting
+        // `kind:"other"` is more useful than failing). So the test only ever
+        // passed on Windows, the one platform where the chosen operand happened to
+        // fail. Same shape as the hardcoded `"windows"` assertion fixed earlier:
+        // a platform assumption masquerading as a contract.
+        //
+        // An INTERIOR NUL is refused by the OS layer on every platform:
+        //   - Windows: `metadata` → `os error 1`, `InvalidInput`
+        //   - Unix:    the `CString` conversion → `NulError` → `InvalidInput`
+        // Both are measured, and `classify` maps `InvalidInput` to `Denied` →
+        // `EACCES`, so the assertion below is exact rather than a disjunction.
+        let error =
+            stat_outcome("a\0b").expect_err("a real failure must be a failure, not a value");
         assert!(
-            error.starts_with("EACCES") || error.starts_with("EUNSUPPORTED"),
+            error.starts_with("EACCES"),
             "the failure must carry a parseable code, got: {error}"
         );
+        //
+        // NOTE: `EUNSUPPORTED` is deliberately NOT accepted here. That code comes
+        // from the regular-file guard in `FileReader::open` (the READ path);
+        // `stat_path` has no such guard — it reports devices as `kind:"other"`.
+        // Accepting it here would suggest `stat` can produce it, which it cannot.
     }
 
     #[test]
