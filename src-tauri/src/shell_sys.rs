@@ -35,6 +35,7 @@ fn str_arg(args: &[Value], i: usize) -> String {
         .to_string()
 }
 
+#[cfg(desktop)]
 /// What kind of JSON value actually arrived, for an error that names it.
 ///
 /// ⚠ `serde_json`'s `Value` has no `type_name()`, and the point of the message is
@@ -53,6 +54,7 @@ fn json_type_name(value: Option<&Value>) -> &'static str {
     }
 }
 
+#[cfg(desktop)]
 /// Read the `enabled` flag of `shell.autostart.setEnabled`.
 ///
 /// # ⚠ Why this is a separate, strict function and not `as_bool().unwrap_or(false)`
@@ -130,6 +132,7 @@ fn autostart_flag(args: &[Value]) -> Result<bool, Value> {
 //   that they were skipped. If this warning ever disappears without Android
 //   deep-link being implemented, something was papered over — check why.
 
+#[cfg(desktop)]
 /// Longest scheme this surface accepts.
 ///
 /// RFC 3986 sets no length limit, so the number is a deliberate choice rather
@@ -141,6 +144,7 @@ fn autostart_flag(args: &[Value]) -> Result<bool, Value> {
 /// value whose only notable property is being long.
 const MAX_SCHEME_LEN: usize = 32;
 
+#[cfg(desktop)]
 /// Windows registry classes that EXIST on a stock install, under
 /// `HKEY_CLASSES_ROOT` / `HKCU\Software\Classes`.
 ///
@@ -269,6 +273,7 @@ const RESERVED_REGISTRY_CLASSES: &[&str] = &[
     "printto",
 ];
 
+#[cfg(desktop)]
 /// Schemes this app must never claim.
 ///
 /// ⚠ The last two entries are deliberate — do NOT "helpfully" remove them:
@@ -293,6 +298,7 @@ const RESERVED_SCHEMES: &[&str] = &[
     "vrcx",
 ];
 
+#[cfg(desktop)]
 /// Is `c` allowed in a scheme **after** the first character?
 ///
 /// RFC 3986 §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. The set
@@ -304,6 +310,7 @@ fn is_scheme_char(c: char) -> bool {
     matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '+' | '-' | '.')
 }
 
+#[cfg(desktop)]
 /// Validate a scheme name before it reaches the OS.
 ///
 /// # Why this exists
