@@ -264,6 +264,16 @@ jobs:
       # rather than a silent skip.
       - name: Build hands e2e peer (for the integration test)
         id: hands_e2e
+        # ⚠ `shell: bash` IS REQUIRED, not decoration. This block is POSIX
+        # (`VAR=value`, `[ ... ]`, `test -f`, `{...;}`), and GitHub's default shell
+        # on `windows-latest` is **pwsh**, which rejects every one of those — `BIN=x`
+        # fails with "not recognized as a cmdlet". Measured: the three Linux/macOS
+        # jobs passed this step while Windows never reached it, so the breakage was
+        # invisible until the Windows job's turn. GitHub ships Git Bash on Windows
+        # runners, and this is also consistent with the existing
+        # `run: bash scripts/android-*.sh` steps: when a step needs POSIX, say so
+        # instead of writing shell-agnostic contortions.
+        shell: bash
         run: |
           cargo build --release --locked --manifest-path src-tauri/Cargo.toml --example hands-e2e
           BIN="target/release/examples/hands-e2e"
