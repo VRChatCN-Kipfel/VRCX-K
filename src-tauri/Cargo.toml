@@ -20,22 +20,80 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
 tauri-plugin-opener = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
 # Cross-platform notifications (desktop win/mac/linux + android/ios under one API).
 # Shell exposes simple notify via this plugin; Windows-deep (buttons/hero) rides
 # tauri-winrt-notification below (added at F3; dependency already provisioned).
 tauri-plugin-notification = "2"
+# Cross-platform OS facts (os): platform/arch/version/family/hostname/locale.
+# Read-only, eight commands, supported on all five platforms. Source of truth for
+# "which machine am I on" — relevant to the multi-device direction (#13), and the
+# cheapest way to make platform-conditional UI decisions.
+tauri-plugin-os = "2"
+# Clipboard access (clipboard-manager). A VRCX-shaped app copies user IDs,
+# instance links and avatar URLs constantly, and we had NO clipboard capability.
+# ⚠ Its default permission set enables NOTHING: every command must be listed
+# explicitly in the capability file, or the call fails at runtime.
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
+# File bytes on the wire. `kkrpc`'s stock transport is JSON text, so binary must
+# ride a text carrier; base64 costs 1.33x and is far faster than the
+# numeric-keyed JSON that a raw `Uint8Array` degrades into (docs/probes/hand-io/
+# FINDINGS.md §2 — measured 9.4-10.4x smaller and 112-155x faster).
+base64 = "0.22"
+# File watching — the one file capability with no std equivalent. Stable 8.x, not
+# the 9.0.0-rc line: the rc-only fixes could NOT be reproduced here, so they are
+# not evidence (docs/probes/hand-io/rust-crates/FINDINGS.md §4.6-4.7).
+notify = "8"
+# Stable file identity across rename/rotation. On Windows this is the u128
+# high-resolution id (correct on ReFS), unlike `same-file`'s low-res index, which
+# its own source warns is not unique there (rust-crates/FINDINGS.md §4.2).
+file-id = "0.2"
 typify = { version = "0.7.0", features = ["macro"] }
 # Runtime support emitted by typify for schema regex constraints.
 regress = "0.11.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# ── Desktop-only plugins ──────────────────────────────────────────────────────
+# ⚠ This table MUST come after the general `[dependencies]` table: a
+# `[target.'…'.dependencies]` heading ends the `[dependencies]` table, so
+# anything written below it belongs to the target section instead. Placing this
+# block mid-file silently moved `serde`/`serde_json`/`base64`/`notify`/`file-id`
+# into it — which builds fine on Windows and then fails to compile EVERY module
+# on Android. `cargo check --target aarch64-linux-android` is what caught it.
+#
+# Gated rather than stubbed: these have no mobile implementation at all (the
+# catalog's platform matrix marks every one of them "none" for Android/iOS), so a
+# desktop dependency here would be dead weight — or a build failure — on mobile.
+# See docs/tauri-plugins/tauri-v2-plugin-catalog.md §3e.
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+# Persist window size/position across restarts. Pure Rust, a few lines in
+# `.setup()`; we had no window-state persistence at all before this.
+tauri-plugin-window-state = "2"
+# "Start with the system". Registration lands in the OS's own startup mechanism
+# (Run key / LaunchAgent / XDG autostart); `MacosLauncher::LaunchAgent` is part of
+# `init()`. ⚠ Users dislike silent startup registration, so the UI must expose a
+# toggle — the shell provides the mechanism, not the policy.
+tauri-plugin-autostart = "2"
+# Custom URL scheme handling (`vrchat://`-style). Windows/Linux support runtime
+# registration; **macOS/Android/iOS require the scheme to be declared in config**
+# and cannot register at runtime. Pairing with `single-instance` needs the latter's
+# `deep-link` feature (above) so a second launch is forwarded instead of opening a
+# second window.
+tauri-plugin-deep-link = "2"
+# Tray-relative window positioning. Only meaningful once a POPUP WINDOW exists —
+# today the tray is a native menu with no second window, so this is provisioned for
+# the future tray-panel, not wired to anything yet.
+# The `tray-icon` feature makes `tauri/tray-icon` available; we already enable that
+# on the `tauri` dependency itself, so the feature is a no-op here rather than a
+# second copy of the same capability.
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 
 # Windows-deep toast (AUMID/icon/hero/buttons) — tauri-apps official fork of
 # winrt-notification. Provisioned now so F3 depth lands without touching the
