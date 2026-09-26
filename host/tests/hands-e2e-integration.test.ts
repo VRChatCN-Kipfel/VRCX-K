@@ -288,10 +288,22 @@ describe("the host's HandsService drives the real Rust peer", () => {
       }
       expect(caught).toBeInstanceOf(HandsError)
       const err = caught as HandsError
-      expect(err.code).toBe("EACCES")
+      // ⚠ THE EXPECTED CODE IS `EINVAL`, AND IT USED TO BE `EACCES` — the same
+      // change the Rust unit test next to `stat_outcome` records. An interior NUL
+      // is refused by the OS layer on every platform (`InvalidInput`), and the old
+      // `classify` catch-all reported every unrecognised kind as `Denied`. That was
+      // the bug: `EACCES` tells a caller to go and ask the user for permissions,
+      // while a malformed path can never succeed on any machine. This file pinned
+      // the buggy value end-to-end (it only runs when the release binary exists, so
+      // the Rust-side change did not surface it locally) and went red on all three
+      // desktop CI runners. It is exact on purpose: a disjunction here would let the
+      // regression back in.
+      expect(err.code).toBe("EINVAL")
       // The prefix must be STRIPPED into `.code`, not left in the message for
       // callers to parse — that is the whole point of the class.
-      expect(err.message).not.toContain("EACCES:")
+      expect(err.message).not.toContain("EINVAL:")
+      // And the code must not be the misleading one.
+      expect(err.code).not.toBe("EACCES")
     },
     30_000,
   )
