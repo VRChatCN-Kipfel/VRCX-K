@@ -420,7 +420,8 @@ pub fn run() {
         //
         // ⚠ Platform split (upstream `register`, 2.4.10 `src/lib.rs:259-281`
         // vs `:133-135`): Windows/Linux support RUNTIME registration through
-        // `shell.deepLink.register`; macOS/Android/iOS return
+        // `shell.deepLink.registerAll` (stack layer 4 of issue #41 removed the name parameter
+        // this comment used to name); macOS/Android/iOS return
         // `Error::UnsupportedPlatform` and instead require the scheme to be
         // declared in `tauri.conf.json` (`plugins.deep-link.desktop.schemes` for
         // desktop, `plugins.deep-link.mobile` for the app-link form). So even

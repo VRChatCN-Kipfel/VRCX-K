@@ -523,7 +523,9 @@ describe("undeclared calls to ctx.tray / ctx.shortcut / ctx.autostart must warn 
    *      warning, so an undeclared capability call becomes invisible;
    *   2. it skips the caller-fiber binding streams depend on ⇒ the
    *      "still producing after unload" leak reopens;
-   *   3. the `shell.deepLink.register` narrowing was defeated by a property access.
+   *   3. the deep-link registration narrowing was defeated by a property access (the route is
+   *      `shell.deepLink.registerAll` since stack layer 4 of issue #41; back then it was the
+   *      parameterised `register(scheme)`).
    * `manifestLookup` leaked for the same reason, letting one plugin read another's
    * declared manifest.
    *
