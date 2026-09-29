@@ -117,6 +117,34 @@ Check ($foreignBefore -ne '<absent>') '对照键（本脚本自有名字）已�
 $realBefore = Get-RegistryExport $realVrcxKey (Join-Path $snapDir 'real-vrcx-before.reg')
 Say "  既有 vrcx 键的起始状态: $(if ($realBefore -eq '<absent>') { '不存在（干净机器）' } else { '存在，已快照' })"
 
+Stage '1.5 同名不同归属：安装器必须拒绝覆盖（评审点名的盲区）'
+# ⚠ 前面几条只覆盖"名字不同"（别人的 `vrcx` 键）。**名字相同、归属不同**（这台机器上已经有一个
+# 别人的 `vrcxk` 类键）才是真正的风险面：安装器的写路径是用户每次安装都会走的，而覆盖一个既有类键
+# **不可恢复**。上游模板在 Install 段是四次裸 WriteRegStr，判据在**我们自己的** NSIS_HOOK_PREINSTALL
+# 里 —— 所以这一格必须断言"安装器真的拒绝了"，而不只是"运行时不覆盖"。
+$ownForeignBefore = $null
+try {
+  Remove-Item $ownKey -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -Path "$ownKey\shell\open\command" -Force | Out-Null
+  Set-ItemProperty $ownKey -Name 'URL Protocol' -Value ''
+  Set-ItemProperty "$ownKey\shell\open\command" -Name '(default)' -Value '"C:\fake\other.exe" "%1"'
+  $ownForeignBefore = Get-RegistryExport $ownKey (Join-Path $snapDir 'own-foreign-before.reg')
+  Check ($ownForeignBefore -ne '<absent>') '已铺好一个「同名但属于别人」的 vrcxk 类键'
+
+  $installDirBefore = Test-Path $installDir
+  $proc = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+  Say "installer exit code (collision case): $($proc.ExitCode)"
+  # 静默模式下没有对话框，所以**退出码是唯一的信号**：拒绝必须是非零（实测：Abort + SetErrorLevel 1 ⇒ 1）。
+  Check ($proc.ExitCode -ne 0) '安装器在冲突时以非零退出码拒绝（静默模式下的唯一信号）'
+  $ownForeignAfter = Get-RegistryExport $ownKey (Join-Path $snapDir 'own-foreign-after.reg')
+  Check ($ownForeignBefore -eq $ownForeignAfter) '被拒绝的安装没有改动那个既有的 vrcxk 键（逐字节）'
+  Check ((Test-Path $installDir) -eq $installDirBefore) '被拒绝的安装没有在安装目录里留下东西（Abort 在写文件之前）'
+} finally {
+  # 必须清掉，否则后面的正常安装会被同一判据拦住（那就把"拒绝"测成了"装不上"）。
+  if (Test-Path $ownKey) { Remove-Item $ownKey -Recurse -Force -ErrorAction SilentlyContinue }
+  if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 Stage '2. 静默安装'
 if (Test-Path $ownKey) { Remove-Item $ownKey -Recurse -Force }
 if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }

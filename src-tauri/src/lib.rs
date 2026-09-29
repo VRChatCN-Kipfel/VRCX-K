@@ -155,6 +155,28 @@ fn dispatch_app_command(
     result
 }
 
+/// Where one activation should go, given what the peer said.
+///
+/// ⚠ **A failed write is the same case as a missing peer**, and this function exists so that
+/// rule is testable without an `AppHandle`. The queue used to cover only `None` — but §5.1 names
+/// **two** windows it is for: the cold start (peer does not exist yet) and the **host restart**
+/// (crash / upgrade / `host_reload`), where the peer *exists and is already dead*. The second one
+/// reported `write-failed` and dropped the URL with a single stderr line (found in review).
+#[cfg(desktop)]
+#[derive(Debug, PartialEq, Eq)]
+enum DeepLinkDelivery {
+    Delivered,
+    Queued,
+}
+
+#[cfg(desktop)]
+fn deeplink_delivery(notify: &Option<Result<(), String>>) -> DeepLinkDelivery {
+    match notify {
+        Some(Ok(())) => DeepLinkDelivery::Delivered,
+        Some(Err(_)) | None => DeepLinkDelivery::Queued,
+    }
+}
+
 /// Forward one deep link to the host, and mirror it to the face.
 ///
 /// A received URL that nobody consumes is indistinguishable from a link that
@@ -171,39 +193,42 @@ fn dispatch_app_command(
 /// real launch. The wiring itself is verified on real hardware: see
 /// `docs/probes/mac-deeplink/FINDINGS.md` §5.
 ///
-/// ⚠ When the host is not up yet the URL is **queued, not dropped** — see the `None` arm
-/// below and [`replay_pending_deep_links`]. A cold start is exactly that case.
+/// ⚠ Whenever the host cannot take it — not up yet **or** the write failed — the URL is
+/// **queued, not dropped**: see [`deeplink_delivery`] and [`replay_pending_deep_links`].
 #[cfg(desktop)]
 fn forward_deep_link(app: &tauri::AppHandle, urls: Vec<String>) {
-    let delivery = {
+    let notify: Option<Result<(), String>> = {
         let state = app.state::<HostState>();
-        match state.peer() {
-            Some(peer) => match peer.notify("deepLink.opened", vec![json!({ "urls": urls })]) {
-                Ok(()) => "delivered",
-                Err(err) => {
-                    eprintln!("[shell] deep link notify failed: {err}");
-                    "write-failed"
-                }
-            },
-            None => {
-                // ⚠ This is the ORDINARY case on a cold start, not an edge case: the URL is
-                // what launched us, so the OS delivers it in milliseconds while the sidecar
-                // (bun + Cordis + include tree) still needs seconds. Dropping it here is
-                // what made "double-click a link" open the app and do nothing, with no
-                // signal anywhere. Remember it instead; `replay_pending_deep_links` hands
-                // it over when the host is up (issue #41 §7.1 item 4).
-                let pending = app.state::<DeepLinkPending>();
-                let dropped = pending.push(urls.clone());
-                if dropped > 0 {
-                    eprintln!(
-                        "[shell] deep link queued: {} waiting, {dropped} older activation(s) \
-                         dropped by the {}-entry cap",
-                        pending.len(),
-                        deeplink::PENDING_CAP
-                    );
-                }
-                "queued"
+        state.peer().map(|peer| {
+            peer.notify("deepLink.opened", vec![json!({ "urls": urls.clone() })])
+                .map_err(|err| err.to_string())
+        })
+    };
+    let delivery = match deeplink_delivery(&notify) {
+        DeepLinkDelivery::Delivered => "delivered",
+        DeepLinkDelivery::Queued => {
+            if let Some(Err(err)) = &notify {
+                eprintln!(
+                    "[shell] deep link notify failed ({err}) — queueing it instead of dropping it"
+                );
             }
+            // ⚠ This is the ORDINARY case on a cold start, not an edge case: the URL is
+            // what launched us, so the OS delivers it in milliseconds while the sidecar
+            // (bun + Cordis + include tree) still needs seconds. Dropping it here is
+            // what made "double-click a link" open the app and do nothing, with no
+            // signal anywhere. Remember it instead; `replay_pending_deep_links` hands
+            // it over when the host is up (issue #41 §7.1 item 4).
+            let pending = app.state::<DeepLinkPending>();
+            let dropped = pending.push(urls.clone());
+            if dropped > 0 {
+                eprintln!(
+                    "[shell] deep link queued: {} waiting, {dropped} older activation(s) \
+                     dropped by the {}-entry cap",
+                    pending.len(),
+                    deeplink::PENDING_CAP
+                );
+            }
+            "queued"
         }
     };
     if let Err(err) = app.emit(
@@ -650,6 +675,32 @@ pub fn run() {
 mod packaging_tests {
     use serde_json::Value;
 
+    /// ⚠ The review finding this pins: the queue used to cover only "no peer yet", so the
+    /// **host-restart** window (peer present but dead → write fails) dropped the URL with a
+    /// lone stderr line — while §5.1 names that window as one of the two the queue exists for.
+    /// "The write failed" and "there is no peer" must therefore take the same path.
+    #[cfg(desktop)]
+    #[test]
+    fn a_failed_write_is_queued_exactly_like_a_missing_peer() {
+        use super::{deeplink_delivery, DeepLinkDelivery};
+
+        assert_eq!(
+            deeplink_delivery(&Some(Ok(()))),
+            DeepLinkDelivery::Delivered,
+            "a successful notify is still delivered"
+        );
+        assert_eq!(
+            deeplink_delivery(&None),
+            DeepLinkDelivery::Queued,
+            "no peer yet (cold start) queues"
+        );
+        assert_eq!(
+            deeplink_delivery(&Some(Err("broken pipe".to_string()))),
+            DeepLinkDelivery::Queued,
+            "⚠ a failed write is the host-restart window and must queue too, not be dropped"
+        );
+    }
+
     fn conf(name: &str) -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
         let text = std::fs::read_to_string(&path)
@@ -856,5 +907,54 @@ mod packaging_tests {
                 hook_path.display()
             );
         }
+    }
+
+    /// ⚠ The write side of the same invariant (PR #49 review ③): the installer must **refuse** to
+    /// take over a class key it does not own, and that refusal lives in our hooks file — upstream
+    /// writes the key with four bare `WriteRegStr` calls and no check at all.
+    ///
+    /// Same drift risk as the cleanup test, same technique: the two sides live in different files
+    /// (`tauri.conf.json` and `windows/hooks.nsh`) with nothing between them, so a scheme added to
+    /// the config without a matching pre-install probe would silently install over somebody else's
+    /// handler on every machine.
+    #[test]
+    fn the_installer_refuses_to_take_over_every_declared_scheme() {
+        let base = conf("tauri.conf.json");
+        let schemes = declared_schemes_in(&base);
+        assert!(
+            !schemes.is_empty(),
+            "nothing declared — pinned by the test above"
+        );
+
+        let hook_rel = at(&base, &["bundle", "windows", "nsis", "installerHooks"])
+            .and_then(|value| value.as_str().map(str::to_string))
+            .expect("bundle.windows.nsis.installerHooks must point at the hook file");
+        let hook_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&hook_rel);
+        let hook = std::fs::read_to_string(&hook_path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", hook_path.display()));
+
+        assert!(
+            hook.contains("!macro NSIS_HOOK_PREINSTALL"),
+            "{} must define the pre-install hook: without it the installer overwrites whatever \
+             already owns the scheme name, and an existing class key cannot be restored",
+            hook_path.display()
+        );
+        for scheme in &schemes {
+            let expected = format!("Software\\Classes\\{scheme}\\shell\\open\\command");
+            assert!(
+                hook.contains(&expected),
+                "{} declares the scheme {scheme:?} but the pre-install hook never reads \
+                 `{expected}` ('{scheme}' is the argument to the whole pre-install check). \
+                 Adding a scheme means adding both its probe and its cleanup.",
+                hook_path.display()
+            );
+        }
+        // A refusal that reports success is not a refusal: silent runs show no dialog, so the
+        // abort has to set the exit code (measured: aborted ⇒ 1, successful ⇒ 0).
+        assert!(
+            hook.contains("SetErrorLevel 1"),
+            "the pre-install refusal must force a non-zero exit code, or a silent install that \
+             refused looks exactly like one that succeeded"
+        );
     }
 }
