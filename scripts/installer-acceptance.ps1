@@ -138,7 +138,15 @@ try {
   Check ($proc.ExitCode -ne 0) '安装器在冲突时以非零退出码拒绝（静默模式下的唯一信号）'
   $ownForeignAfter = Get-RegistryExport $ownKey (Join-Path $snapDir 'own-foreign-after.reg')
   Check ($ownForeignBefore -eq $ownForeignAfter) '被拒绝的安装没有改动那个既有的 vrcxk 键（逐字节）'
-  Check ((Test-Path $installDir) -eq $installDirBefore) '被拒绝的安装没有在安装目录里留下东西（Abort 在写文件之前）'
+  # ⚠ 判据是"**载荷**没被写下去"，不是"文件系统一尘不染"。
+  # 我第一版写的是 `(Test-Path $installDir) -eq $installDirBefore`，CI 直接把它判红了 —— 因为模板的
+  # `Section Install` **第 630 行**是 `SetOutPath $INSTDIR`，它在我们的 `NSIS_HOOK_PREINSTALL`
+  # （**633 行**）之前就把目录建好了：拒绝之后会留下一个**空**目录，这是模板的既定行为，不是我们的漏写。
+  # （实测 run 36583103268：退出码 1、键逐字节未变、目录被创建但没有载荷。）
+  $appExe = Join-Path $installDir 'tauri-app.exe'
+  Check (-not (Test-Path $appExe)) '被拒绝的安装没有写下主程序（Abort 发生在写文件之前）'
+  $payloadCount = (Get-ChildItem $installDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+  Say "  被拒绝后安装目录里的文件数: $payloadCount（0 = 连一个文件都没写）"
 } finally {
   # 必须清掉，否则后面的正常安装会被同一判据拦住（那就把"拒绝"测成了"装不上"）。
   if (Test-Path $ownKey) { Remove-Item $ownKey -Recurse -Force -ErrorAction SilentlyContinue }
