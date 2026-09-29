@@ -18,7 +18,8 @@ on:
     # 每周一 03:17 UTC —— 上游打包链（Tauri/NSIS/WiX）变化时，即使没人动我们的文件也能发现。
     - cron: "17 3 * * 1"
   pull_request:
-    branches: [rewrite]
+    # ⚠ 同 build.yml：**不**按 base 分支过滤。stacked PR 的 base 是上一层分支而不是 `rewrite`，
+    # 加上 `branches: [rewrite]` 会让第 2/3 层静默跳过这条验收（而这条验收就在第 2 层里）。
     paths:
       - "src-tauri/tauri.conf.json"
       - "src-tauri/windows/**"
