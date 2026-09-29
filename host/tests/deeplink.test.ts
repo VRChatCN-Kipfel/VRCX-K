@@ -9,7 +9,10 @@ import { describe, expect, test } from "bun:test"
 import { Context } from "cordis"
 import { bindDeepLinkAdmin, hostWsAPI } from "../src/api"
 import {
+  attachDeepLinkShell,
+  closeDeepLinkService,
   DeepLinkService,
+  dispatchDeepLinkEvent,
   normalizeOpened,
   parseDeepLink,
   unregisterDeclaredScheme,
@@ -57,6 +60,37 @@ function service(
   const ctx = new Context()
   return new DeepLinkService(ctx, { bridge: shell, log: log ?? (() => {}) })
 }
+
+/**
+ * ⚠ Review finding, pinned: `attachShell` runs inside the CONSTRUCTOR, and `fanout` hands a
+ * RETAINED event to its first subscriber **synchronously** (`stdio.ts`) — which is exactly the
+ * cold-start case retention was added for. With the log sink assigned after the subscription,
+ * that handoff logged through `undefined` and threw, so the activation this whole PR exists to
+ * save was the one it lost. The sink must be in place before anything can dispatch.
+ */
+test("a retained activation handed over during construction is logged, not thrown away", () => {
+  const lines: string[] = []
+  const retained: DeepLinkEvent = { urls: ["vrcxk://user/usr_1"] }
+  const syncBridge: ShellDeepLinkBridge = {
+    onOpen(next) {
+      // Exactly what `fanout(..., { retainUntilSubscribed: true })` does for the first subscriber.
+      next(retained)
+      return () => {}
+    },
+  }
+  const ctx = new Context()
+  const deepLink = new DeepLinkService(ctx, {
+    bridge: syncBridge,
+    log: (line) => lines.push(line),
+  })
+
+  expect(
+    lines.some((line) => line.includes("deepLink.opened vrcxk://user/usr_1")),
+    `the retained activation must be logged during construction; got: ${JSON.stringify(lines)}`,
+  ).toBe(true)
+  // And the service is still usable afterwards (no half-constructed state).
+  expect(dispatchDeepLinkEvent(deepLink, { urls: ["vrcxk://world/wrld_2"] })).toBe(1)
+})
 
 describe("parseDeepLink: the OS hands over a URL, not a structured command", () => {
   test("the authority form is verb/id", () => {
@@ -134,7 +168,7 @@ describe("dispatch: arrival must leave a trace even with no subscriber", () => {
     // produced byte-identical logs (i.e. nothing).
     const lines: string[] = []
     const deepLink = service(bridge().bridge, (line) => lines.push(line))
-    expect(deepLink.dispatch({ urls: ["vrcxk://user/usr_1"] })).toBe(1)
+    expect(dispatchDeepLinkEvent(deepLink, { urls: ["vrcxk://user/usr_1"] })).toBe(1)
     expect(lines.some((line) => line.includes("deepLink.opened vrcxk://user/usr_1"))).toBe(true)
   })
 
@@ -143,7 +177,9 @@ describe("dispatch: arrival must leave a trace even with no subscriber", () => {
     const deepLink = service(shell.bridge)
     const seen: string[] = []
     deepLink.onUrl((target) => seen.push(`${target.verb}/${target.id}`))
-    const delivered = deepLink.dispatch({ urls: ["vrcxk://user/usr_1", "vrcxk://world/wrld_2"] })
+    const delivered = dispatchDeepLinkEvent(deepLink, {
+      urls: ["vrcxk://user/usr_1", "vrcxk://world/wrld_2"],
+    })
     expect(delivered).toBe(2)
     expect(seen).toEqual(["user/usr_1", "world/wrld_2"])
   })
@@ -155,10 +191,10 @@ describe("dispatch: arrival must leave a trace even with no subscriber", () => {
     const off = deepLink.onUrl(() => {
       calls += 1
     })
-    deepLink.dispatch({ urls: ["vrcxk://user/usr_1"] })
+    dispatchDeepLinkEvent(deepLink, { urls: ["vrcxk://user/usr_1"] })
     off()
     expect(deepLink.subscriberCount).toBe(0)
-    deepLink.dispatch({ urls: ["vrcxk://user/usr_1"] })
+    dispatchDeepLinkEvent(deepLink, { urls: ["vrcxk://user/usr_1"] })
     expect(calls).toBe(1)
   })
 
@@ -172,7 +208,7 @@ describe("dispatch: arrival must leave a trace even with no subscriber", () => {
     deepLink.onUrl(() => {
       reached += 1
     })
-    expect(deepLink.dispatch({ urls: ["vrcxk://user/usr_1"] })).toBe(1)
+    expect(dispatchDeepLinkEvent(deepLink, { urls: ["vrcxk://user/usr_1"] })).toBe(1)
     expect(reached).toBe(1)
     expect(lines.some((line) => line.includes("deepLink handler error"))).toBe(true)
   })
@@ -180,22 +216,50 @@ describe("dispatch: arrival must leave a trace even with no subscriber", () => {
   test("a malformed payload delivers nothing and says so", () => {
     const lines: string[] = []
     const deepLink = service(bridge().bridge, (line) => lines.push(line))
-    expect(deepLink.dispatch({ urls: "nope" })).toBe(0)
+    expect(dispatchDeepLinkEvent(deepLink, { urls: "nope" })).toBe(0)
     expect(lines.some((line) => line.includes("invalid payload"))).toBe(true)
   })
 
   test("an unparseable URL is skipped without taking the activation down", () => {
     const lines: string[] = []
     const deepLink = service(bridge().bridge, (line) => lines.push(line))
-    const delivered = deepLink.dispatch({ urls: ["not a url", "vrcxk://user/usr_1"] })
+    const delivered = dispatchDeepLinkEvent(deepLink, { urls: ["not a url", "vrcxk://user/usr_1"] })
     expect(delivered).toBe(1)
     expect(lines.some((line) => line.includes("unparseable URL"))).toBe(true)
   })
 
+  /**
+   * ⚠ Review finding, pinned — and the reason the test above is not enough. `"not a url"` is
+   * rejected by `new URL`, which is a DIFFERENT path from a **malformed percent escape**: that
+   * one gets through `new URL` and then made `decodeURIComponent` throw a `URIError`, which
+   * escaped `dispatch` — taking down the whole activation (including any valid URL later in the
+   * same batch) and leaving **nothing** in the log. So the assertion is not just "the bad one is
+   * skipped": the good one must still be delivered in that same batch, and the arrival recorded.
+   */
+  test("a malformed percent escape does not take the rest of the batch with it", () => {
+    const lines: string[] = []
+    const seen: string[] = []
+    const deepLink = service(bridge().bridge, (line) => lines.push(line))
+    deepLink.onUrl((target) => seen.push(target.raw))
+
+    const delivered = dispatchDeepLinkEvent(deepLink, {
+      // "%E0%A4%A" is an incomplete UTF-8 sequence: `decodeURIComponent` throws on it.
+      urls: ["vrcxk://user/%E0%A4%A", "vrcxk://user/usr_ok"],
+    })
+
+    expect(delivered, "the valid URL in the same batch must still be delivered").toBe(1)
+    expect(seen).toEqual(["vrcxk://user/usr_ok"])
+    expect(
+      lines.some((line) => line.includes("unparseable URL")),
+      `the malformed URL must be REPORTED (gap ④: an arrival always leaves a trace); got: ${JSON.stringify(lines)}`,
+    ).toBe(true)
+    expect(lines.some((line) => line.includes("deepLink.opened vrcxk://user/usr_ok"))).toBe(true)
+  })
+
   test("a closed service ignores notifications instead of throwing", () => {
     const deepLink = service(bridge().bridge)
-    deepLink.close()
-    expect(deepLink.dispatch({ urls: ["vrcxk://user/usr_1"] })).toBe(0)
+    closeDeepLinkService(deepLink)
+    expect(dispatchDeepLinkEvent(deepLink, { urls: ["vrcxk://user/usr_1"] })).toBe(0)
   })
 
   test("re-attaching a new shell replaces the subscription instead of doubling it", () => {
@@ -204,7 +268,7 @@ describe("dispatch: arrival must leave a trace even with no subscriber", () => {
     const deepLink = service(first.bridge)
     const seen: string[] = []
     deepLink.onUrl((target) => seen.push(target.raw))
-    deepLink.attachShell(second.bridge)
+    attachDeepLinkShell(deepLink, second.bridge)
     expect(first.subscribed).toBe(false)
     first.emit({ urls: ["vrcxk://user/stale"] })
     second.emit({ urls: ["vrcxk://user/fresh"] })

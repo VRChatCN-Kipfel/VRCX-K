@@ -67,6 +67,59 @@ describe("declared capabilities really exist at runtime", () => {
     expect(keys).toEqual([...SHELL_SUBDOMAINS].sort())
   })
 
+  /**
+   * ⚠ The same leak class as the `ctx.hands` test below/above, now closed for `ctx.deepLink`
+   * (review finding). It went the other way once: `deepLink` was written with `record`,
+   * `dispatch`, `close`, `attachShell` and `detachShell` as **class members**, and methods live
+   * on the prototype, so any plugin could reach them through the Cordis per-caller shadow:
+   *
+   *   - `dispatch(fake)` — fabricate an activation for every subscriber;
+   *   - `close()` — switch the capability off globally and permanently (`closed` is one-way);
+   *   - `attachShell(fake)` — hijack the delivery source;
+   *   - `record(...)` — forge `[cap]` audit lines.
+   *
+   * `hands.ts` had already been fixed for exactly this (`record`/`rawApi` became module-level
+   * functions); `deeplink.ts` reintroduced the pattern, which is why this test now walks its
+   * prototype too. Wiring lives in module-level functions, and this list is what says so.
+   */
+  test("ctx.deepLink exposes only the plugin surface — no wiring on the prototype", () => {
+    const ctx = bootServices()
+    const deepLink = ctx.get("deepLink") as unknown as Record<string, unknown>
+    // Walk to the prototype: methods are class methods, so they are not own properties of the
+    // per-caller shadow.
+    const all = Object.getOwnPropertyNames(Object.getPrototypeOf(deepLink) as object).filter(
+      (key) => key !== "constructor",
+    )
+
+    // The plugin surface. `onUrl` is the capability's whole point; `subscriberCount` is
+    // read-only diagnostics.
+    const PLUGIN_SURFACE = ["onUrl", "subscriberCount"]
+    // Wiring that legitimately stays: it only sets a slot, so a plugin calling it gains
+    // nothing beyond what `ctx.effect` already gives it (same reasoning as `hands.guarded`).
+    const WIRING = ["useManifests"]
+    const unexpected = all.filter((key) => !PLUGIN_SURFACE.includes(key) && !WIRING.includes(key))
+    expect(
+      unexpected,
+      `neither the plugin surface nor listed wiring, so a plugin could reach it through the ` +
+        `per-caller shadow: ${unexpected.join(", ")}. Move it to a module-level function (see ` +
+        `deeplink.ts) or list it in WIRING with a reason.`,
+    ).toEqual([])
+
+    // The regression guard, spelled out: these five must NOT come back as members.
+    for (const gone of ["record", "dispatch", "close", "attachShell", "detachShell"]) {
+      expect(
+        all,
+        `${gone} must stay a module-level function: as a prototype member any plugin can call ` +
+          `it through \`ctx.deepLink\`, which is the defect this test exists to prevent.`,
+      ).not.toContain(gone)
+    }
+
+    // The other direction: the surface must actually be there.
+    for (const member of PLUGIN_SURFACE) {
+      expect(all, `the plugin surface is missing ${member}`).toContain(member)
+    }
+  })
+
   test("ctx.hands exposes exactly the declared primitives", () => {
     // The inventory's HANDS_PRIMITIVES is only a single source of truth if
     // something fails when the service drifts from it. A renamed or dropped

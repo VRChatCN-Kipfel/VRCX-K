@@ -84,6 +84,23 @@ function safeJson(value: unknown): string {
 }
 
 /**
+ * `decodeURIComponent`, but a malformed escape yields `undefined` instead of throwing.
+ *
+ * ⚠ Measured failure this prevents (review finding): `decodeURIComponent("%E0%A4%A")` throws a
+ * `URIError`, and that used to escape `dispatch()` — so **one** bad URL took down the whole
+ * activation, including any *valid* URL later in the same batch, and left **nothing** in the log.
+ * That is the exact opposite of what this file promises ("an unparseable URL is skipped without
+ * taking the activation down") and of gap ④'s whole point ("an arrival must always leave a trace").
+ */
+function decodePart(value: string): string | undefined {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Parse one custom-scheme URL into a {@link DeepLinkTarget}, or `undefined` when it is not
  * a URL at all.
  *
@@ -106,14 +123,18 @@ export function parseDeepLink(raw: string): DeepLinkTarget | undefined {
 
   const segments = url.pathname.split("/").filter((part) => part.length > 0)
   const authority = url.hostname
-  const verb = authority.length > 0 ? authority : (segments.shift() ?? "")
-  const id = decodeURIComponent(segments.shift() ?? "")
+  const verbRaw = authority.length > 0 ? authority : (segments.shift() ?? "")
+  // ⚠ Both decodes can fail on a malformed percent escape; either failure makes the whole URL
+  // unparseable, and the caller reports it and moves on to the next one in the batch.
+  const verb = decodePart(verbRaw)
+  const id = decodePart(segments.shift() ?? "")
+  if (verb === undefined || id === undefined) return undefined
 
   const params: Record<string, string> = {}
   for (const [name, value] of url.searchParams) {
     params[name] = value
   }
-  return { scheme, verb: decodeURIComponent(verb), id, params, raw }
+  return { scheme, verb, id, params, raw }
 }
 
 /**
@@ -173,23 +194,141 @@ export async function unregisterDeclaredScheme(
 }
 
 /**
- * ⚠ Bridge and manifest lookup live in {@link createSecretSlot} slots, not in fields: a
- * `private` field is only private at compile time, and reading one off a real plugin was
- * measured to hand over the whole bridge (`service-secret.ts`).
+ * ⚠ Bridge, manifest lookup, log sink and the mutable state all live in
+ * {@link createSecretSlot} slots, NOT in fields: a `private` field is only private at compile
+ * time, and reading one off a real plugin was measured to hand over the whole bridge
+ * (`service-secret.ts`).
  */
 const bridgeSlot = createSecretSlot<ShellDeepLinkBridge>()
 const lookupSlot = createSecretSlot<(entryId: string) => VRCXKPluginManifest | undefined>()
+const logSlot = createSecretSlot<(line: string) => void>()
+const stateSlot = createSecretSlot<DeepLinkState>()
+
+/** Everything the wiring needs that must NOT be reachable as a member. */
+type DeepLinkState = {
+  closed: boolean
+  detach?: () => void
+  readonly handlers: Set<DeepLinkHandler>
+}
+
+function log(target: object, line: string): void {
+  logSlot.get(target)?.(line)
+}
+
+/**
+ * Audit + the `#24` overreach check, written as a **module-level function**.
+ *
+ * ⚠ Same reason `hands.ts` spells out at length: `record` used to be a `private` METHOD, and
+ * methods live on the prototype — so a plugin could call `ctx.deepLink.record(...)` and
+ * **write arbitrary `[cap]` lines into the audit log** through the Cordis per-caller shadow.
+ * That is a regression of a defect this repository had already found and fixed once
+ * (`hands.ts`, first tightened by the `WIRING` list in `capability-surfaces.test.ts`).
+ *
+ * ⚠ Do NOT rewrite this as an arrow-function property: that would bind the instance and
+ * silently destroy caller attribution (`caller: null`), making every audit line say
+ * `<unknown>` (cordis findings §1.8).
+ */
+function record(self: unknown, method: string, detail: string): void {
+  const who = callerName(self) ?? "<unknown>"
+  log(self as object, `[cap] ${who} -> deepLink.${method}${detail ? ` ${detail}` : ""}`)
+  const warning = overreachWarning(self, `deepLink.${method}`, lookupSlot.get(self as object))
+  if (warning) log(self as object, warning)
+}
+
+/**
+ * ⚠ The wiring is reachable ONLY from this module: `attachDeepLinkShell`, `detachDeepLinkShell`,
+ * `dispatchDeepLinkEvent` and `closeDeepLinkService` are module-level functions, so none of them
+ * appears on the prototype. As class methods they were all reachable by any plugin through the
+ * per-caller shadow, with these consequences (review findings):
+ *
+ *   - `dispatch(fake)` — **fabricate an activation** for every subscriber;
+ *   - `close()` — switch the capability off **globally and permanently** (`closed` is one-way);
+ *   - `attachShell(fake)` — **hijack the delivery source**;
+ *   - `record(...)` — forge audit lines (now fixed above).
+ *
+ * `onUrl` and `subscriberCount` stay methods on purpose: they ARE the plugin surface, and
+ * `useManifests` stays because it only sets a slot (a plugin gains nothing beyond what
+ * `ctx.effect` already allows).
+ */
+export function attachDeepLinkShell(service: DeepLinkService, bridge: ShellDeepLinkBridge): void {
+  const state = stateSlot.get(service)
+  if (!state || state.closed) return
+  state.detach?.()
+  bridgeSlot.set(service, bridge)
+  // A shell restart replaces the bridge; the previous subscription goes first so an
+  // activation is never fanned out twice.
+  state.detach = bridge.onOpen((event) => dispatchDeepLinkEvent(service, event))
+}
+
+export function detachDeepLinkShell(service: DeepLinkService): void {
+  const state = stateSlot.get(service)
+  if (state) {
+    state.detach?.()
+    state.detach = undefined
+  }
+  bridgeSlot.clear(service)
+}
+
+/**
+ * Fan one shell notification out: validate, parse, **log**, then hand each URL to the
+ * subscribers. Returns how many URLs were delivered.
+ *
+ * ⚠ The log line is not debug noise. It is the product's only evidence that a URL arrived when
+ * no plugin is interested — before this existed, an activation that reached the host left no
+ * trace anywhere (gap ④).
+ */
+export function dispatchDeepLinkEvent(service: DeepLinkService, event: unknown): number {
+  const state = stateSlot.get(service)
+  if (!state || state.closed) return 0
+  const opened = normalizeOpened(event)
+  if (!opened) {
+    log(service, `deepLink.opened ignored (invalid payload): ${safeJson(event)}`)
+    return 0
+  }
+  let delivered = 0
+  for (const raw of opened.urls) {
+    const target = parseDeepLink(raw)
+    if (!target) {
+      log(service, `deepLink.opened ignored (unparseable URL): ${raw}`)
+      continue
+    }
+    delivered += 1
+    const suffix = target.id ? `/${target.id}` : ""
+    log(service, `deepLink.opened ${target.scheme}://${target.verb}${suffix}`)
+    for (const handler of [...state.handlers]) {
+      try {
+        handler(target, opened)
+      } catch (error) {
+        // A throwing business handler must not kill the notification path.
+        log(service, `deepLink handler error: ${describe(error)}`)
+      }
+    }
+  }
+  return delivered
+}
+
+/** Drop every subscription and the shell registration (host shutdown). */
+export function closeDeepLinkService(service: DeepLinkService): void {
+  const state = stateSlot.get(service)
+  if (!state) return
+  state.closed = true
+  state.detach?.()
+  state.detach = undefined
+  bridgeSlot.clear(service)
+  state.handlers.clear()
+}
 
 export class DeepLinkService extends Service {
-  private detach?: () => void
-  private closed = false
-  private readonly logLine: (line: string) => void
-  private readonly handlers = new Set<DeepLinkHandler>()
-
   constructor(ctx: Context, options: DeepLinkServiceOptions = {}) {
     super(ctx, "deepLink")
-    if (options.bridge) this.attachShell(options.bridge)
-    this.logLine = options.log ?? (() => {})
+    // ⚠ ORDER MATTERS, and it is a review finding: `fanout` hands a RETAINED event to its first
+    // subscriber **synchronously** (`stdio.ts`), so `attachShell` can dispatch before this
+    // constructor returns. With the sink assigned after it, that dispatch logged through
+    // `undefined` and threw — losing exactly the cold-start activation the retention exists to
+    // save. Sink first, subscription second.
+    logSlot.set(this, options.log ?? (() => {}))
+    stateSlot.set(this, { closed: false, handlers: new Set<DeepLinkHandler>() })
+    if (options.bridge) attachDeepLinkShell(this, options.bridge)
   }
 
   /** Give the service the manifest registry so `#24` can compare declare vs actual. */
@@ -198,100 +337,22 @@ export class DeepLinkService extends Service {
   }
 
   /**
-   * One audit line per caller-visible operation, plus the `#24` check.
-   *
-   * Recorded BEFORE the work, so an undeclared attempt that fails (or has no shell) is
-   * still attributed — the lesson from `hands`, where only the failures were recorded and
-   * an undeclared call therefore looked like a declared one.
-   */
-  private record(self: unknown, method: string, detail: string): void {
-    const who = callerName(self) ?? "<unknown>"
-    this.logLine(`[cap] ${who} -> deepLink.${method}${detail ? ` ${detail}` : ""}`)
-    const warning = overreachWarning(self, `deepLink.${method}`, lookupSlot.get(this))
-    if (warning) this.logLine(warning)
-  }
-
-  /**
-   * Attach the shell bridge and subscribe to its URL notifications.
-   *
-   * Safe to call again with a new bridge (a shell restart): the previous subscription is
-   * dropped first, so an activation is never fanned out twice.
-   */
-  attachShell(bridge: ShellDeepLinkBridge): void {
-    if (this.closed) return
-    this.detach?.()
-    bridgeSlot.set(this, bridge)
-    this.detach = bridge.onOpen((event) => this.dispatch(event))
-  }
-
-  detachShell(): void {
-    this.detach?.()
-    this.detach = undefined
-    bridgeSlot.clear(this)
-  }
-
-  /**
    * Subscribe to inbound URLs. Returns an unsubscribe function.
    *
-   * A subscription is the plugin-facing half of this capability: it lets a plugin react to
-   * an activation without being able to create or destroy one.
+   * A subscription is the plugin-facing half of this capability: it lets a plugin react to an
+   * activation without being able to create or destroy one.
    */
   onUrl(handler: DeepLinkHandler): () => void {
-    this.record(this, "onUrl", "")
-    this.handlers.add(handler)
+    record(this, "onUrl", "")
+    const state = stateSlot.get(this)
+    state?.handlers.add(handler)
     return () => {
-      this.handlers.delete(handler)
+      state?.handlers.delete(handler)
     }
   }
 
   /** How many URL handlers are registered. Diagnostics, and what a test can assert on. */
   get subscriberCount(): number {
-    return this.handlers.size
-  }
-
-  /**
-   * Fan one shell notification out: validate, parse, **log**, then hand each URL to the
-   * subscribers. Returns how many URLs were delivered.
-   *
-   * ⚠ The log line is not debug noise. It is the product's only evidence that a URL
-   * arrived when no plugin is interested — before this existed, an activation that reached
-   * the host left no trace anywhere (gap ④).
-   */
-  dispatch(event: unknown): number {
-    if (this.closed) return 0
-    const opened = normalizeOpened(event)
-    if (!opened) {
-      this.logLine(`deepLink.opened ignored (invalid payload): ${safeJson(event)}`)
-      return 0
-    }
-    let delivered = 0
-    for (const raw of opened.urls) {
-      const target = parseDeepLink(raw)
-      if (!target) {
-        this.logLine(`deepLink.opened ignored (unparseable URL): ${raw}`)
-        continue
-      }
-      delivered += 1
-      const suffix = target.id ? `/${target.id}` : ""
-      this.logLine(`deepLink.opened ${target.scheme}://${target.verb}${suffix}`)
-      for (const handler of [...this.handlers]) {
-        try {
-          handler(target, opened)
-        } catch (error) {
-          // A throwing business handler must not kill the notification path.
-          this.logLine(`deepLink handler error: ${describe(error)}`)
-        }
-      }
-    }
-    return delivered
-  }
-
-  /** Drop every subscription and the shell registration (host shutdown). */
-  close(): void {
-    this.closed = true
-    this.detach?.()
-    this.detach = undefined
-    bridgeSlot.clear(this)
-    this.handlers.clear()
+    return stateSlot.get(this)?.handlers.size ?? 0
   }
 }

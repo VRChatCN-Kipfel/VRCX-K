@@ -952,9 +952,6 @@ export function connectShellStdio(
     },
   })
   const remote = channel.getAPI()
-  // Captured before the bridge object is built so the optional route can be narrowed
-  // without a non-null assertion (see the `deepLink` member below).
-  const deepLinkRoute = remote.shell.deepLink
   // Build the bridge explicitly. The remote proxy is function-shaped and its
   // `set` trap turns property assignment into an RPC, so own properties must
   // NOT be added on top of it (Object.create(remote) + `bridge.tray = ...`
@@ -981,14 +978,28 @@ export function connectShellStdio(
     },
     deepLink: {
       onOpen: (handler) => deepLinks.on(handler),
-      // ⚠ `shell.deepLink` is OPTIONAL in the wire type (a mobile shell registers no such
-      // route at all, and a shell older than issue #41 has no `unregister`), so an absent
-      // route must surface as "this shell cannot do it" rather than as a TypeError that
-      // looks like a refusal. Captured once here so the narrowing is real rather than a
-      // non-null assertion.
-      ...(deepLinkRoute
-        ? { unregister: (scheme: string) => deepLinkRoute.unregister(scheme) }
-        : {}),
+      // ⚠ `shell.deepLink.unregister` is OPTIONAL in the wire type (a mobile shell registers no
+      // such route at all, and a shell older than issue #41 has no `unregister`), so an absent
+      // route must surface as "this shell cannot do it" rather than as a TypeError that looks
+      // like a refusal.
+      //
+      // ⚠ An earlier version guarded this with `deepLinkRoute ? {…} : {}` and claimed the
+      // narrowing was "real rather than a non-null assertion". **That was wrong and is now
+      // gone** (review finding): the kkrpc remote proxy is function-shaped — this very file
+      // documents that its `set` trap turns assignment into an RPC — so `remote.shell.deepLink`
+      // is ALWAYS truthy and the false branch was unreachable. What actually happens on an old
+      // shell is that the call goes out and comes back as `unknown RPC method:
+      // shell.deepLink.unregister`, which `unregisterDeclaredScheme` catches and reports as
+      // `unsupported`. That outcome is correct; the comment claiming a guard was not.
+      //
+      // The `?.` below is therefore a TYPE-level necessity, not a runtime branch — and the
+      // fallback is a REJECTION on purpose: if that branch ever does become reachable (a future
+      // capability negotiation, or a non-proxy transport), it must surface as "this shell cannot
+      // do it" through the caller's existing error path, never as `undefined` flowing into the
+      // result handling, which would blow up one frame later.
+      unregister: (scheme: string) =>
+        remote.shell.deepLink?.unregister(scheme) ??
+        Promise.reject(new Error("this shell has no shell.deepLink.unregister route")),
     },
     /**
      * Whether a write to the shell has already failed. Bootstrap consults this

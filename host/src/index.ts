@@ -11,7 +11,12 @@ import { Context } from "cordis"
 import { RPCTransportClosedError } from "kkrpc"
 import { bindDeepLinkAdmin } from "./api"
 import { createShellCapabilities, ShellHandle } from "./capability"
-import { DeepLinkService, unregisterDeclaredScheme } from "./deeplink"
+import {
+  attachDeepLinkShell,
+  closeDeepLinkService,
+  DeepLinkService,
+  unregisterDeclaredScheme,
+} from "./deeplink"
 import { attachDevWatch, DevWatch, type DevWatchEvent } from "./dev-watch"
 import { declaresHeartbeat, FIBER_ACTIVE, FIBER_FAILED } from "./fiber"
 import { HandsService } from "./hands"
@@ -196,7 +201,7 @@ async function bootstrap() {
   // subscription simply never fires. ⚠ Before this existed, a URL that reached the host
   // left no trace anywhere, which made #41's acceptance criterion untestable.
   const deepLinks = new DeepLinkService(ctx, { log: (line) => log(line) })
-  ctx.effect(() => () => deepLinks.close())
+  ctx.effect(() => () => closeDeepLinkService(deepLinks))
 
   // Capability surface (M2-1): the raw `ctx.shell` mirror plus the curated
   // `ctx.notify`/`ctx.dialog`/`ctx.window`/`ctx.os` services. Registered before
@@ -515,7 +520,7 @@ async function bootstrap() {
     // undo path. Note where the undo goes — `HostWsAPI.deepLink`, never `ctx.deepLink`:
     // a cordis service is plugin-readable, and the owner's decision is that plugins may
     // receive URLs but may not unregister the app's scheme (issue #41 §7.1 item 2).
-    deepLinks.attachShell(shell.deepLink)
+    attachDeepLinkShell(deepLinks, shell.deepLink)
     bindDeepLinkAdmin({
       unregister: (scheme) => unregisterDeclaredScheme(shell.deepLink, scheme),
     })
