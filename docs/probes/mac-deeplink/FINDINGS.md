@@ -9,14 +9,14 @@
 > **Run it**: `ssh mac 'bash -s' < docs/probes/mac-deeplink/run.sh`
 > — needs only `clang` + `python3` (both from Xcode CLT). **No Rust, no bun, no Tauri.**
 > It self-cleans on exit (kills the app, `lsregister -u`, removes the bundles).
-> `PROBE_ROOT=... run.sh` overrides where the bundles are built (that is finding §0.7).
+> `PROBE_ROOT=... run.sh` overrides where the bundles are built (that is finding row 8 / §2 run 2).
 
 ## 0. Answer table
 
 | # | Question | Answer | How it was measured |
 |---|---|---|---|
 | 1 | Does a scheme declared via `CFBundleURLTypes` actually reach a running app? | **Yes** | Bundle + `lsregister -f` + `open "scheme://…"` → the app logged the URL |
-| 2 | Which receive path is used — **argv**, **Apple Event**, or the **NSApplication delegate**? | **Apple Event `kAEGetURL`**, which `NSApplication` forwards to the **delegate's `application:openURLs:`**. **argv is never used.** | A plain C URL handler logged `argc=1` (no URL) three times while `open` reported success; an ObjC/AppKit app logged `PATH-B delegate openURLs url=…` |
+| 2 | Which receive path is used — **argv**, **Apple Event**, or the **NSApplication delegate**? | **Apple Event `kAEGetURL`**, which `NSApplication` forwards to the **delegate's `application:openURLs:`**. **argv is never used.** | `run.sh` **mode C** (a plain C URL handler, no AppKit) — launched 5× and every launch logged `argc=1` with no URL, while an ObjC/AppKit app logged `PATH-B delegate openURLs url=…` |
 | 3 | Is the **delegate** path (the one Tauri/WRY turns into `RunEvent::Opened`) the one that fires? | **Yes** — measured with **no** Apple Event handler installed | Mode A of the probe installs nothing; `PATH-B delegate` fired |
 | 4 | Can delivery be **driven and observed over SSH**? | **Yes, if the SSH user owns the console session** (`launchctl print gui/<uid>` reachable). `open -a` launches into the GUI session and a full `NSApplication` runs there | §2 run 1: `gui/501 domain: reachable`, app reached `didFinishLaunching`, URL delivered |
 | 5 | Is **`open`'s exit status** evidence that the URL was delivered? | **No — both directions measured.** exit 0 with nothing delivered (§3.1), and non-zero while the claim exists (§3.2) | plain C handler; `/tmp` run |
@@ -26,7 +26,7 @@
 | 9 | Does the **Tauri bundler** turn `plugins.deep-link.desktop.schemes` into a real `CFBundleURLTypes`? | **Yes — measured on a real `tauri build`** (`CFBundleURLSchemes = [vrcxkscratch]`, `CFBundleURLName = "com.vrcxk.app vrcxkscratch"`). This half was previously **source-read only** | §5, `run-real-app.sh` |
 | 10 | Does the **full chain** work on real hardware — macOS → shell → kkrpc/stdio → host? | **Yes.** `open "vrcxkscratch://hello?a=1"` from an SSH session → the host logged `[probe] deepLink.opened received urls=["vrcxkscratch://hello?a=1"]` | §5 |
 | 11 | Does the same hold on **Windows**, where the launch URL arrives as **argv**? | **Yes — after a fix.** Windows/Linux deliver it inside the deep-link plugin's own setup, which Tauri runs *before* the app's `.setup()` registers `on_open_url`, so the URL was emitted into an empty listener set. Draining `get_current()` after registering fixes it; measured: `deepLink.opened vrcxk://user/usr_1` at **6 ms after `ready`**, plus the warm case (§7) | §7 |
-| 12 | What is **still unverified**? | (a) the **installer's own** registry write and (b) the `NSIS_HOOK_POSTUNINSTALL` runtime behaviour — both blocked on this machine by a context that refuses installer writes (a 20-line NSIS installer reproduces it; another unsigned NSIS installer on the same box installed fine, so it is not NSIS and not "unsigned"). Everything else — scheme declaration, bundler output, LaunchServices/registry claim, cold + warm delivery on macOS **and** Windows, and the incumbent VRCX's key staying byte-identical — is measured. Also unmeasured: `LSUIElement`/second-instance details (§0.9) | §6.3, §7.1 |
+| 12 | What is **still unverified**? | **(a)** MSI/WiX side (registration + uninstall cleanup): template read, **not measured**. **(b)** `LSUIElement` and second-instance forwarding. **(c)** "an installer-installed app receives a URL" was **never covered by one single run**: the install/uninstall half runs the real installer in CI (`.github/workflows/installer-acceptance.yml`, run **36462916457**), while the URL→host half used an **equivalent install** plus a human-triggered `open` (§7). ⚠ The two things that *used* to be listed here — the installer's own registry write and the `NSIS_HOOK_POSTUNINSTALL` runtime behaviour — are **verified by that CI run**; the dev box could not do it (a per-binary block refuses installer writes: a 20-line NSIS installer reproduces it, and another unsigned NSIS installer on the same box installed fine) | §6.3, §7.1, §7.1 item 2 |
 
 ## 1. What the probe does
 
@@ -94,9 +94,23 @@ gui/501 domain: reachable
 
 ### Supporting measurement — argv is not the carrier
 
-A plain C bundle (no AppKit) with the same `CFBundleURLTypes`, launched and then sent
-`open "scheme://…"` five ways (`open -a`, `open URL`, `open -n URL`, `osascript open location`,
-`open -b <bundleid> URL`):
+⚠ **This is now an instrument in the repo, not a one-off**: `run.sh` mode **C** builds a plain C bundle
+(no AppKit, no Apple Event handler) whose `main` logs `argc`/`argv` and exits; the probe then sends
+`open "scheme://…"` five times and asserts the URL never appears in any logged `argv`.
+(An earlier round measured this with a throwaway bundle — the conclusion had a source but the
+instrument did not, so it could not be reproduced. That gap is closed; the numbers below are from a
+re-run of mode C on 2026-09-29.)
+
+```
+=== C: plain C bundle (no AppKit, no AE handler) — is argv ever the carrier? ===
+  PASS argv-mode: LaunchServices claims vrcxkprobec
+       argv-mode: delivery 1..5: 'open' returned 0 (⚠ NOT evidence on its own)
+       argv-mode: the C bundle was launched 5 time(s) across 5 deliveries
+  PASS argv-mode: no launch ever saw the URL in argv (every launch logged argc=1)
+```
+
+The earlier round, for the record (same conclusion, five different delivery spellings —
+`open -a`, `open URL`, `open -n URL`, `osascript open location`, `open -b <bundleid> URL`):
 
 ```
 21:20:28 pid=53592 argc=1 argv=[…/Probe2.app/Contents/MacOS/probe2]
@@ -104,7 +118,7 @@ A plain C bundle (no AppKit) with the same `CFBundleURLTypes`, launched and then
 21:20:29 pid=53595 argc=1 argv=[…/Probe2.app/Contents/MacOS/probe2]
 ```
 
-`argc=1` on every launch — and `open` reported **OK** for all five. The URL was simply dropped,
+`argc=1` on every launch — and `open` reported **OK** for all of them. The URL was simply dropped,
 which is what a handler without an Apple Event/`NSApplication` path looks like.
 
 ## 3. The two traps, in detail

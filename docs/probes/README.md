@@ -364,12 +364,19 @@ It also demonstrated a separate, harder constraint by crashing on the first run:
 ## `mac-deeplink/` (subdirectory, **macOS only**)
 
 Does a custom URL scheme actually reach an app on macOS — and can that be verified
-**over SSH**? `run.sh` builds two tiny AppKit apps from one source file (mode A measures
-**only** the `application:openURLs:` **delegate** path, which is the one Tauri/WRY maps to
-`RunEvent::Opened`; mode B additionally installs a `kAEGetURL` handler), registers them with
-`lsregister`, delivers a URL, and **asserts on the app side** — never on `open`'s exit status.
-Read [`mac-deeplink/FINDINGS.md`](mac-deeplink/FINDINGS.md) §0 first. Written for issue #41's
-acceptance criterion "若写 `schemes`：macOS 上一条真机验证".
+**over SSH**? `run.sh` builds three tiny bundles from two sources:
+
+- **mode A** — AppKit, measuring **only** the `application:openURLs:` **delegate** path (the one
+  Tauri/WRY maps to `RunEvent::Opened`);
+- **mode B** — AppKit plus a hand-installed `kAEGetURL` handler;
+- **mode C** — **plain C, no AppKit at all**: it logs `argc`/`argv` and exits, so it is the instrument
+  behind "argv is never the carrier" (5 deliveries, every launch logged `argc=1`, no URL in argv).
+
+It registers them with `lsregister`, delivers a URL, and **asserts on the app side** —
+`open`'s exit status is recorded as a **note**, never as a pass/fail gate (it lies in both
+directions: §3.1). The script-executable control is likewise asserted on **its own log**, not on
+`open`'s status. Read [`mac-deeplink/FINDINGS.md`](mac-deeplink/FINDINGS.md) §0 first.
+Written for issue #41's acceptance criterion "若写 `schemes`：macOS 上一条真机验证".
 
 ```bash
 ssh mac 'bash -s' < docs/probes/mac-deeplink/run.sh   # needs only clang + python3
@@ -378,8 +385,8 @@ ssh mac 'bash -s' < docs/probes/mac-deeplink/run.sh   # needs only clang + pytho
 Three findings that bite anyone writing a macOS deep-link test:
 
 - **argv is never the carrier.** The URL arrives as an Apple Event (`kAEGetURL`), which
-  `NSApplication` forwards to the delegate. A plain C handler logs `argc=1` while `open`
-  reports success.
+  `NSApplication` forwards to the delegate. Mode C (plain C handler) logs `argc=1` on every
+  launch while `open` reports success.
 - **`open`'s exit status is not evidence of delivery** — measured both ways (exit 0 with
   nothing delivered; non-zero while the LaunchServices claim exists).
 - **A bundle under `/tmp` gets a claim but is never handed the URL** (`-10814`). That is a

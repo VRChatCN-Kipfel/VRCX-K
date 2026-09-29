@@ -57,9 +57,22 @@ stage "3. the built app declares the scheme, and LaunchServices claims it"
 stage "4. COLD START — no app running, the URL launches it"
 pkill -f "$APP/Contents/MacOS" 2>/dev/null
 sleep 2
+# ⚠ 「应用没在跑」是本格的**前提**，不能只靠一句不检查返回值的 pkill 就宣布成立 ——
+# 否则 pkill 没命中活着的进程时，一次**暖启动**投递照样会让本格 PASS（正是本文件别处反对的那种假绿）。
+# 所以这里轮询确认进程真的没了，前提不成立就判 FAIL 并说明"本格未验证"。
+app_gone=0
+for _ in $(seq 1 15); do
+  if ! pgrep -f "$APP/Contents/MacOS" >/dev/null 2>&1; then app_gone=1; break; fi
+  sleep 1
+done
+if [ "$app_gone" -eq 1 ]; then
+  pass "precondition: no $SCHEME app process is running (this is a genuine cold start)"
+else
+  fail "precondition FAILED: the app is still running, so this case would not test a cold start"
+fi
 rm -rf "$HOSTLOG_DIR"
-echo "opened $SCHEME://user/usr_1 at $(date '+%H:%M:%S') with the app NOT running"
-open "$SCHEME://user/usr_1" || fail "open returned non-zero"
+echo "opened $SCHEME://user/usr_1 at $(date '+%H:%M:%S') with the app NOT running (verified: $app_gone)"
+open "$SCHEME://user/usr_1" || note "⚠ 'open' returned non-zero — recorded, NOT a verdict (exit status is not evidence, FINDINGS §3.1)"
 for _ in $(seq 1 60); do ls "$HOSTLOG_DIR" >/dev/null 2>&1 && break; sleep 1; done
 sleep 8
 cat "$HOSTLOG_DIR"/* 2>/dev/null | sed 's/^/    /'
@@ -70,7 +83,7 @@ else
 fi
 
 stage "5. WARM — the app is running, a second URL arrives"
-open "$SCHEME://world/wrld_2" || fail "open returned non-zero"
+open "$SCHEME://world/wrld_2" || note "⚠ 'open' returned non-zero — recorded, NOT a verdict (FINDINGS §3.1)"
 sleep 6
 if grep -h "deepLink.opened" "$HOSTLOG_DIR"/* 2>/dev/null | grep -q "wrld_2"; then
   pass "a second activation reached the host while the app was running"

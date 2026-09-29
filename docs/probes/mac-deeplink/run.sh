@@ -103,15 +103,8 @@ int main(void) {
 }
 OBJC
 
-build_app() { # $1 = mode/label, $2 = scheme, $3 = extra cflags
-  local mode="$1" scheme="$2" cflags="$3"
-  local app="$ROOT/Probe-$mode.app"
-  mkdir -p "$app/Contents/MacOS"
-  # shellcheck disable=SC2086
-  clang -fobjc-arc -framework Cocoa $cflags \
-    -DMODE_NAME="\"$mode\"" -DLOG_PATH="\"$ROOT/$mode.log\"" \
-    -o "$app/Contents/MacOS/probe" "$ROOT/probe.m" || return 1
-  python3 - "$app" "$scheme" "com.vrcxk.probe.$mode" <<'PY'
+write_plist() { # $1 = app dir, $2 = scheme, $3 = bundle id
+  python3 - "$1" "$2" "$3" <<'PY'
 import plistlib, sys, os, re
 app, scheme, bundleid = sys.argv[1:4]
 key = re.sub(r'[^A-Za-z0-9]', '', scheme).lower()
@@ -133,6 +126,48 @@ with open(os.path.join(app, "Contents", "Info.plist"), "wb") as fh:
 PY
 }
 
+build_app() { # $1 = mode/label, $2 = scheme, $3 = extra cflags
+  local mode="$1" scheme="$2" cflags="$3"
+  local app="$ROOT/Probe-$mode.app"
+  mkdir -p "$app/Contents/MacOS"
+  # shellcheck disable=SC2086
+  clang -fobjc-arc -framework Cocoa $cflags \
+    -DMODE_NAME="\"$mode\"" -DLOG_PATH="\"$ROOT/$mode.log\"" \
+    -o "$app/Contents/MacOS/probe" "$ROOT/probe.m" || return 1
+  write_plist "$app" "$scheme" "com.vrcxk.probe.$mode"
+}
+
+# ── the plain C control (mode C) ────────────────────────────────────────────
+# ⚠ THIS IS THE INSTRUMENT FOR "argv is never the carrier". That claim is load-bearing
+# (deep-link-decisions.md §5.4(1) and FINDINGS row 2 rest on it), so the probe that produced it
+# has to live in the repo: an earlier round measured it with a throwaway bundle, which left
+# "the conclusion has a source, but the instrument does not" — unreproducible, and impossible to
+# re-run after an OS change. It is deliberately NOT an @interface app: no AppKit, no Apple Event
+# handler, so if the URL were delivered through argv this program would be the one to see it.
+cat > "$ROOT/probe.c" <<'C'
+/* A URL handler with NO AppKit and NO Apple Event handler: logs argc/argv and exits. */
+#include <stdio.h>
+int main(int argc, char **argv) {
+  /* ⚠ NOT getenv: `open` launches through launchd and does not pass the shell's environment
+     (same trap the ObjC probe documents). The path is compiled in instead. */
+  FILE *f = fopen(PROBE_LOG, "a");
+  if (!f) return 0;
+  fprintf(f, "argc=%d argv=[", argc);
+  for (int i = 0; i < argc; i++) fprintf(f, "%s%s", i ? " " : "", argv[i]);
+  fprintf(f, "]\n");
+  fclose(f);
+  return 0;
+}
+C
+
+build_app_c() { # $1 = scheme
+  local scheme="$1"
+  local app="$ROOT/Probe-argv.app"
+  mkdir -p "$app/Contents/MacOS"
+  clang -DPROBE_LOG="\"$ROOT/argv.log\"" -o "$app/Contents/MacOS/probe" "$ROOT/probe.c" || return 1
+  write_plist "$app" "$scheme" "com.vrcxk.probe.argv"
+}
+
 claimed() { # $1 = scheme -> 0 if LaunchServices has a claim for it
   "$LSREG" -dump 2>/dev/null | grep -q "claimed schemes:.*[[:space:]]$1:"
 }
@@ -143,7 +178,7 @@ deliver_and_check() { # $1 = label, $2 = scheme, $3 = expected log pattern
   local log="$ROOT/$mode.log"
 
   rm -f "$log"
-  "$LSREG" -f "$app" || fail "$label: lsregister -f failed"
+  "$LSREG" -f "$app" || fail "$mode: lsregister -f failed"
   sleep 1
 
   if claimed "$scheme"; then
@@ -158,10 +193,13 @@ deliver_and_check() { # $1 = label, $2 = scheme, $3 = expected log pattern
   grep -q READY "$log" || { fail "$mode: app never reached didFinishLaunching"; return; }
 
   local url="$scheme://hello?a=1"
+  # ⚠ `open` 的退出码在本探针里**只记不作为判据**（`note`，不进 PASS/FAIL 计数）。
+  # FINDINGS §3.1 用一张三行表论证了它两个方向都会骗人（纯 C bundle 返回 0 而 URL 根本没到；
+  # AppKit bundle 在 /tmp 下 claim 存在却返回 -10814），所以判据只能是**应用侧日志**（下面那一段）。
   if open "$url" 2>"$ROOT/$mode.open.err"; then
-    pass "$mode: 'open $url' returned 0"
+    note "$mode: 'open $url' returned 0 (⚠ NOT evidence on its own — see FINDINGS §3.1)"
   else
-    fail "$mode: 'open $url' returned non-zero"
+    note "$mode: 'open $url' returned non-zero (⚠ NOT evidence on its own — see FINDINGS §3.1)"
     note "$(tr -d '\n' < "$ROOT/$mode.open.err" | cut -c1-200)"
   fi
   sleep 3
@@ -172,6 +210,51 @@ deliver_and_check() { # $1 = label, $2 = scheme, $3 = expected log pattern
   else
     fail "$mode: URL NOT delivered as '$pattern' (log follows)"
     sed 's/^/       /' "$log"
+  fi
+  pkill -f "$app/Contents/MacOS/probe" 2>/dev/null
+  sleep 0.5
+}
+
+run_argv_mode() { # $1 = scheme — the instrument behind "argv is never the carrier"
+  local scheme="$1"
+  local app="$ROOT/Probe-argv.app" log="$ROOT/argv.log"
+  "$LSREG" -f "$app" || fail "argv-mode: lsregister -f failed"
+  sleep 1
+  if claimed "$scheme"; then
+    pass "argv-mode: LaunchServices claims $scheme"
+  else
+    fail "argv-mode: LaunchServices has NO claim for $scheme (registration problem, not a delivery problem)"
+    return
+  fi
+
+  rm -f "$log"
+  local url="$scheme://hello?a=1" i=0
+  while [ "$i" -lt 5 ]; do
+    # ⚠ exit code recorded as a note, never as evidence (FINDINGS §3.1: it lies both ways).
+    if open "$url" 2>/dev/null; then
+      note "argv-mode: delivery $((i + 1)): 'open' returned 0 (⚠ NOT evidence on its own)"
+    else
+      note "argv-mode: delivery $((i + 1)): 'open' returned non-zero (⚠ NOT evidence on its own)"
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  sleep 2
+
+  local launches=0
+  [ -s "$log" ] && launches=$(grep -c 'argc=' "$log" 2>/dev/null || echo 0)
+  note "argv-mode: the C bundle was launched $launches time(s) across 5 deliveries"
+  [ -s "$log" ] && sed 's/^/       /' "$log"
+
+  # The claim under test: the URL never arrives as an argument. So the assertion is on argv,
+  # not on the exit code and not on a launch count (0 launches is reported, not silently passed).
+  if [ "$launches" -eq 0 ]; then
+    fail "argv-mode: the C bundle was never launched, so this run does NOT test the argv claim"
+  elif grep -q '://' "$log" 2>/dev/null; then
+    fail "argv-mode: the URL APPEARED in argv — argv would be a delivery path after all"
+    grep '://' "$log" | sed 's/^/       /'
+  else
+    pass "argv-mode: no launch ever saw the URL in argv (every launch logged argc=1)"
   fi
   pkill -f "$app/Contents/MacOS/probe" 2>/dev/null
   sleep 0.5
@@ -205,16 +288,20 @@ with open(os.path.join(sys.argv[1], "Contents", "Info.plist"), "wb") as fh:
 PY
 "$LSREG" -f "$CTRL"; sleep 1
 if [ -s "$ROOT/control.log" ]; then rm -f "$ROOT/control.log"; fi
+# ⚠ 判据是**控制组自己的日志有没有被写**（即"URL 有没有真的送到它"），**不是 `open` 的退出码**：
+# 退出码两个方向都会骗人（见 FINDINGS §3.1），把它当成 PASS 的依据正是本文件别处反对的做法。
+# 所以先记退出码，再由日志下结论 —— 而且"日志为空"这条在**两种退出码**下都要判。
 if open "vrcxkprobecontrol://x" 2>"$ROOT/control.err"; then
-  sleep 2
-  if [ -s "$ROOT/control.log" ]; then
-    fail "control: script-executable bundle RAN and captured the URL (expected refusal)"
-  else
-    fail "control: open returned 0 but nothing ran — exit status is NOT evidence of delivery"
-  fi
+  note "control: 'open …' returned 0 (⚠ NOT evidence on its own)"
 else
-  pass "control: script-executable bundle is refused (cannot be a URL handler)"
+  note "control: 'open …' returned non-zero (⚠ NOT evidence on its own)"
   note "$(tr -d '\n' < "$ROOT/control.err" | cut -c1-160)"
+fi
+sleep 2
+if [ -s "$ROOT/control.log" ]; then
+  fail "control: script-executable bundle RAN and captured the URL (expected refusal)"
+else
+  pass "control: the URL never reached the script-executable bundle (nothing in its log)"
 fi
 
 echo
@@ -249,6 +336,14 @@ if build_app aehandler "vrcxkprobeae" "-DUSE_AE_HANDLER"; then
   deliver_and_check aehandler "vrcxkprobeae" "PATH-A apple-event"
 else
   fail "aehandler: clang build failed"
+fi
+
+echo
+echo "=== C: plain C bundle (no AppKit, no AE handler) — is argv ever the carrier? ==="
+if build_app_c "vrcxkprobec"; then
+  run_argv_mode "vrcxkprobec"
+else
+  fail "argv-mode: clang build failed"
 fi
 
 echo

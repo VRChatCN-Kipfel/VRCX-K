@@ -1,6 +1,8 @@
 # `shell.deepLink` 四缺口裁定建议书（issue #41）
 
-> **状态：待裁定。本文不改变任何代码。**
+> **状态：四条裁定均已完成**（第 1/2/3 条 2026-09-28；第 4 条同日经「重新解释」后选定 **A**，见 §7）。
+> **本文此后是「记录」而不是「提案」**——裁定结论在 §7，落地与验收见 §6.1 与 §9。
+> ⚠ 按本仓库的权威顺序，**issue #41 高于本文**；两边不一致时以 issue 为准，并回来把这里改齐。
 > 依据：issue #41 全文、PR #40（已并入 `rewrite`，merge `7f7edf4d`）、`rewrite` 分支的
 > `src-tauri/src/shell_sys.rs` / `src-tauri/src/lib.rs` / `src-tauri/tauri.conf.json` /
 > `host/src/stdio.ts` / `host/src/index.ts`、`docs/hands-prior-art.md`（PR #40 引入）、
@@ -25,7 +27,8 @@
 
 ⚠ 与本文初版相比有一处**证据升级**：**macOS 侧已经实测到端到端** —— 先用探针量机制（§5.4），
 再在那台 Mac 上装好工具链、用**临时 scheme** 真机构建并让 URL 一路落到宿主日志（§5.5）。
-所以 ② 在 macOS 上不再是「零验证」；仍未定的只有**名字**（§7.1）和 ④ 的消费方（产品侧）。
+所以 ② 在 macOS 上不再是「零验证」；**名字已定为 `vrcxk`（§7.1 第 1 行）**，④ 的消费方与丢失语义也已裁定
+（**A：有界队列 + 就绪后重放 + 聚焦窗口**，§7.1 第 4 行）。
 
 ---
 
@@ -74,7 +77,8 @@ Tauri 的打包链路是现成的，**config 里写一个名字，四个平台�
 - **`desktop.schemes` 是否只放一个名字**：建议**先只放一个**。数组形态会同时写多条注册表记录，
   多一个名字就多一份「卸载残留 + 类键冲突」的面。
 - **安装器范围**：`bundle.targets = "all"` ⇒ 我们**同时**产出 NSIS 与 MSI，而两者的注册表 root 不同
-  （NSIS perUser → HKCU；MSI 模板 → HKLM）。三选一，见 §3。
+  （NSIS perUser → HKCU；MSI 模板 → HKLM）。范围本身已裁定为**双持**（§7.1 第 3 行），
+  由它派生的 root/清理问题见 §7.2。
 
 ---
 
@@ -136,7 +140,16 @@ ${EndIf}
 ### 4.2 无解的那一条（必须写进文档，而不是绕过）
 
 **覆盖已有类键无法还原。** 这不是 ① 能补的（`unregister` 是删整棵），也不是 ③ 能补的
-（卸载清理是删整棵）。唯一有效的手段是**注册前规避**：
+（卸载清理是删整棵）。唯一有效的手段是**注册前规避** —— ⚠ **但它今天只覆盖一半写入口**：
+
+| 写注册表的入口 | allowlist | 注册前归属探测 |
+|---|---|---|
+| **运行时** `shell.deepLink.register` | 有 | 有（本次实现） |
+| **安装器**（NSIS / MSI，**用户实际走的**） | 有（由 bundler 生成的 `deep_link_protocols` 决定） | ❌ **没有** —— 上游模板 Install 段是四次裸 `WriteRegStr`，零探测 |
+
+⚠ 也就是说：下面这条"唯一有效的手段"**只对运行时那一半成立**；安装器那一半**未实现**（已记为 §8 的一行，
+并在 PR #49 的评审里作为本层待办：模板在 Install 段最前面留了 `NSIS_HOOK_PREINSTALL` 落点）。
+而安装器恰恰是正常用户唯一会走的路。
 
 - **allowlist（不是黑名单）**：只允许我们**在 config 里声明过**的名字通过运行时注册路径。
   这一条今天已经半成品：`validate_deep_link_scheme` 是黑名单 + 语法门，其自身的注释就写着
@@ -161,9 +174,12 @@ ${EndIf}
 
 ⇒ 「④ 的消费方」不只是「谁来处理」，而是「**怎么保证 URL 不丢**」。两个方向：
 
-- **(A) shell 侧排队重放**（推荐）：`forward_deep_link` 在 `no-host` 分支把 URL 压入有界队列，
-  在 peer 就绪（`host-ready` / `promote_ready`）后按序重放；加一条上限与「丢弃即日志」。
+- **(A) shell 侧排队重放**（推荐，**已裁定**）：`forward_deep_link` 在 `no-host` 分支把 URL 压入有界队列，
+  在 peer 就绪（`host-ready` / `promote_ready`）后按序重放；加一条上限与「丢弃即日志」；
+  **并且重放后把主窗口带到前台**（第三个成分，见下方 ⚠）。
   优点：宿主侧完全不必知道「我启动晚了」这件事，语义与 `tray.action` 的「未投递就报出来」一致。
+  ⚠ **「聚焦窗口」不是锦上添花**：用户刚点了链接，应用必须出现在前面，而不是在别的窗口后面默默做事 ——
+  否则「URL 没丢」在用户看来仍等于「什么都没发生」。
 - **(B) 宿主侧拉取**：shell 只记「有未投递的 URL」，宿主就绪后主动 `shell.deepLink.pending()`。
   优点：宿主掌握投递时机；代价是多一条路由 + shell 侧仍要存。
 
@@ -233,7 +249,7 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 
 ⚠ **两条必须写在结论旁边的限定**：
 
-1. 用的是**临时 scheme 名**（真名仍待裁定），所以这一条证明的是**链路**，不是**名字**。
+1. 当时用的是**临时 scheme 名**（真名验收见本节末与 FINDINGS §6），所以这一条证明的是**链路**，不是**名字**。
    —— 真名 `vrcxk` 的验收后来补做了，见 `docs/probes/mac-deeplink/run-real-name.sh` 与 FINDINGS §6：
    内置 `.app` 带 `CFBundleURLTypes=vrcxk`、LaunchServices 认领、**冷启动与热启动都到达宿主**。
    ⚠ 真名验收还**暴露并修掉了一个真实缺陷**：宿主侧「expose 已注册、消费方尚未订阅」的窗口会把通知
@@ -253,7 +269,8 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 1. 补 `shell.deepLink.unregister` 路由（**仅 shell 侧**，宿主类型面可加，插件面不加）。
 2. 加「认领已存在的类键会被拒绝」的**真实注册表**语义测试（§9 第 2 条验收）。
 3. `forward_deep_link` 的未投递队列（5.1(A) 的机制部分，与「谁消费」无关）。
-   ⚠ **本项等 §7 第 4 条**：若裁定的结果是「脑缺席就丢」，本项改成**把丢弃写进文档与日志**，不做队列。
+   ✅ **已按裁定的 A 落地**（有界队列 + 就绪后重放 + **重放后聚焦主窗口**，§7.1 第 4 行）；原先「若裁定成
+   『脑缺席就丢』则改成只记日志」的待定分支随裁定作废。
 4. 把「覆盖已有类键无法还原」写进已知边界文档。
 5. 保留并复跑 macOS 机制探针 `docs/probes/mac-deeplink/run.sh`（§5.4）——它在真实应用就绪前
    是唯一能把「macOS 不投递」与「我们没收/没转发」分开的仪器。
@@ -269,13 +286,18 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 
 9. 脸的「本应用认领了哪些 scheme」+ 撤销入口（(c) 的 UI 部分）。
 
-### 6.1 落地现状（2026-09-28，三个 PR）
+### 6.1 落地现状（2026-09-29：主仓库上的三层 stack）
 
-| PR | 内容 | 覆盖裁定 | 状态 |
-|---|---|---|---|
-| [#44](https://github.com/VRChatCN-Kipfel/VRCX-K/pull/44) | 本文档 + `docs/probes/mac-deeplink/`（机制探针、真实应用探针、**真名验收探针**） | 裁定记录 | CI 绿 |
-| [#45](https://github.com/VRChatCN-Kipfel/VRCX-K/pull/45) | 壳：声明 `vrcxk`、归属探测 + 声明白名单门、`unregister` 路由、未投递队列、**NSIS 卸载清理**（第 0 步 1–4 与第 1 步 6–7 的 NSIS 侧） | ①②③(NSIS 侧)④(壳侧) | CI 绿 |
-| [#46](https://github.com/VRChatCN-Kipfel/VRCX-K/pull/46) | 宿主：`ctx.deepLink` 消费方、`HostWsAPI.deepLink` 注销入口、契约登记、**通知保留槽**（第 1 步 8 + 缺口④） | ②(宿主/脸侧)④(宿主侧) | CI 绿 |
+实现以 **stacked PR** 的形式落在主仓库（每层的 base 是上一层分支，逐层可读）：
+
+| 层 | PR（main repo） | 分支 | 内容 | 覆盖裁定 | 状态 |
+|---|---|---|---|---|---|
+| 1/3 | [#48](https://github.com/VRChatCN-Kipfel/VRCX-K/pull/48) | `issue-41/1-docs-decision` | 本文档 + `docs/probes/mac-deeplink/`（机制探针、真实应用探针、**真名验收探针**） | 裁定记录 | open，评审中 |
+| 2/3 | [#49](https://github.com/VRChatCN-Kipfel/VRCX-K/pull/49) | `issue-41/2-shell-wiring` | **壳**：声明 `vrcxk`、归属探测 + 声明白名单门、`unregister` 路由、未投递队列、**NSIS 卸载清理**、`get_current()` 冷启动修复、**CI 真机装卸验收** | ①②③(NSIS 侧)④(壳侧) | open，评审中 |
+| 3/3 | [#50](https://github.com/VRChatCN-Kipfel/VRCX-K/pull/50) | `issue-41/3-host-consumer` | **宿主**：`ctx.deepLink` 消费方、`HostWsAPI.deepLink` 注销入口、契约登记、**通知保留槽** | ②(宿主/脸侧)④(宿主侧) | open，评审中 |
+
+> 历史：**#44 / #45 / #46 是同一天被关闭、并以组织分支重开的初版**（三条 `CLOSED`、`mergedAt` 为
+> `null`）。维护者要求改为「主仓库分支 + stacked PR」，内容原样迁移到上面这条链。
 
 ⚠ **两条与原计划不同的实测结论**（详见 §5.5 与 `docs/probes/mac-deeplink/FINDINGS.md` §6）：
 
@@ -313,7 +335,8 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 
 ## 7. 裁定
 
-> 2026-09-28 owner 裁定三条（1/2/3），第四条要求先重新解释 —— 解释在下节末尾，选项在 §5.1。
+> 2026-09-28 owner 裁定第 1/2/3 条；第 4 条要求先重新解释，**解释后于同日选定 A**（见下）。
+> **四条均已裁定**，本节是它们的记录。
 
 ### 7.1 已裁定
 
@@ -322,7 +345,7 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 | 1 | scheme 名字 | **遵循建议 ⇒ `vrcxk`** | 写进 `plugins.deep-link.desktop.schemes`（§2）。⚠ 同时把运行时注册路径收窄为「只允许 config 里声明过的名字」（§4.2 的 allowlist），而不是再叠一层黑名单 |
 | 2 | `unregister` 暴露面 | **选择性暴露** | ⚠ **本条的语义由本文定义一次，若与本意不符请当场纠正**：① **不给插件面**（`capability.ts` 的 curated/raw 两条镜像继续不放 `unregister`）；② 走**宿主 + UI** 路径；③ **只能注销 config 里声明过的名字** —— 同一个 allowlist 同时管注册与注销，因此它**永远不能**用来删别人的类键。⇒ 与 §3 的 **(c)+内部** 同向，只是把「选择性」明确成「按声明白名单限定范围」 |
 | 3 | 安装器范围 | **双持（继续 `targets="all"`）** | NSIS 与 MSI 都发。⚠ 代价已记录：两者注册表 root 不同（NSIS perUser ⇒ **HKCU**；MSI 模板 ⇒ **HKLM**），语义不一致；且 **MSI 侧的卸载清理由 MSI 组件语义承担，本轮未实测**（§8） |
-| 4 | URL 丢失语义 | **待选择** | 解释见 §5.1 与下节末尾；它决定「**冷启动双击链接是否会被静默丢弃**」 |
+| 4 | URL 丢失语义 | **A：有界队列 + 就绪后重放 + 聚焦窗口** | 三件一起才算落地（缺第三件时「URL 没丢」在用户看来仍等于「什么都没发生」）：① 壳侧有界队列（上限 8、溢出**丢最旧**并记日志）；② 宿主就绪后按序重放；③ **重放后把主窗口带到前台**。定义与理由见 §5.1(A) |
 
 ### 7.2 由前三条**派生**的待办（不改变裁定本身）
 
@@ -339,7 +362,9 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 1. **scheme 名字**：**✅ 已裁定 `vrcxk`**（2026-09-28，遵循建议）。
 2. **unregister 暴露面**：**✅ 已裁定「选择性暴露」**，本文把它落成三条硬约束（见 §7.1 的说明）。
 3. **安装器范围**：**✅ 已裁定「双持」** —— 继续 `targets="all"`（NSIS + MSI 都发）；由此派生的 MSI 侧 root/清理问题见 §7.2。
-4. **URL 丢失语义**：**待 owner 选择** —— owner 要求先重新解释（解释见下），三个选项见 §5.1。
+4. **URL 丢失语义**：**✅ 已裁定 A** —— 有界队列（上限 8、溢出丢最旧并记日志）+ 宿主就绪后按序重放 +
+   **重放后把主窗口带到前台**。理由见 §5.1(A)：用户刚点了链接，应用必须出现在前面，
+   而不是在别的窗口后面默默做事。
 
 ---
 
@@ -347,8 +372,9 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 
 | 项 | 状态 |
 |---|---|
-| 真机注册表行为（`HKCU\Software\Classes\<scheme>` 的写入/删除/冲突） | **本轮零验证** —— 写这份文档时 `pwsh` 不可用（`0xC0000142`），连 `cargo test` 都跑不了 |
+| 真机注册表行为（`HKCU\Software\Classes\<scheme>` 的写入/删除/冲突） | ⚠ **截至本文撰写轮（2026-09-28）零验证**（当时 `pwsh` 不可用，连 `cargo test` 都跑不了）。**其后已由 CI 真机补上**：`installer-acceptance` 在 `windows-latest` 上真装真卸，断言装出键、卸后删键、别人的 `vrcx` 键逐字节未变（首个全绿 run **36462916457**，§6.1 第 2 层） |
 | MSI 侧的深链注册与卸载清理 | 只读了模板（`Root="HKLM"` + perUser 注释），**未实测** |
+| **安装器侧的归属探测** | ❌ **未实现**（与上一行的"未实测"是两件事：这条是根本没写）。上游 NSIS 模板的 Install 段是四次裸 `WriteRegStr`；模板在最前面留了 `NSIS_HOOK_PREINSTALL` 落点。⇒ 「认领已存在的类键会被拒绝」这条不变量**今天只在运行时路径上成立**，见 §4.2 |
 | macOS 的 `CFBundleURLTypes` 实际投递 | ✅ **已实测**（2026-09-28，macOS 26.6.2 arm64，经 SSH）：`CFBundleURLTypes` → `kAEGetURL` Apple Event → **delegate `application:openURLs:`**（即 Tauri 的 `RunEvent::Opened` 路径）。探针与原始输出见 [`docs/probes/mac-deeplink/`](probes/mac-deeplink/FINDINGS.md) |
 | macOS 上**真实 Tauri 应用**的端到端（含 bundler 生成 `Info.plist`） | ✅ **已实测**（§5.5）：临时 scheme 构建出的 `.app` 确实带 `CFBundleURLTypes`，LaunchServices 认领，且 `open "…://…"` 从 SSH 会话投到**宿主日志**。⚠ 限定：用的是**临时 scheme 名**，且「宿主收到」靠**临时插入的一行日志**观测（产品暂无④的消费方）；未测 single-instance 转发与 `LSUIElement` |
 | 上游 `tauri-plugin-deep-link` 2.4.10 的 `unregister` 实现 | 本轮**未重读源码**，采信 issue 与 `shell_sys.rs` 注释的引用 |
@@ -363,10 +389,11 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 | issue 的验收标准 | 对应本建议的哪一步 | 怎么测 |
 |---|---|---|
 | ①②③④ 全有明确结论后才重新暴露 `register` | §7 四条裁定 + 本文档本身 | 本文档即「写下来」的载体；裁定结论回填到本节 |
-| 一条测试钉住「认领已存在的类键会被拒绝」，且**在真实注册表语义下成立** | 第 0 步 §6.2 | 单元层已有一半（`validate_deep_link_scheme` 的 11 条用例）；缺的是**真机**：先人工建 `HKCU\Software\Classes\vrcxktest`，再断言注册被拒且原值未变 |
-| 若实现 `unregister`：注册 → 注销后键回到注册前状态（含被覆盖的既有键） | 第 0 步 §6.1 | 「自有新键」可断言全等；「被覆盖的既有键」**结构上无法恢复** ⇒ 按本文 §4.2 写进文档明说，并把测试限定为前者 |
+| 一条测试钉住「认领已存在的类键会被拒绝」，且**在真实注册表语义下成立** | §6 第 0 步 **第 2 项** | 单元层已有一半（`validate_deep_link_scheme` 的 11 条用例）；缺的是**真机**：先人工建 `HKCU\Software\Classes\vrcxktest`，再断言注册被拒且原值未变。⚠ **该判据当前只覆盖运行时注册路径**——安装器那条（用户实际走的）**没有**归属判据，见 §8 与 PR #49 评审 ③ |
+| 若实现 `unregister`：注册 → 注销后键回到注册前状态（含被覆盖的既有键） | §6 第 0 步 **第 1 项** | 「自有新键」可断言全等；「被覆盖的既有键」**结构上无法恢复** ⇒ 按本文 §4.2 写进文档明说，并把测试限定为前者 |
 | 若写 `schemes`：macOS 真机验证 | 已**完成**（§5.4 机制 → §5.5 真实应用 → **`docs/probes/mac-deeplink/run-real-name.sh` 用真名 `vrcxk` 的冷启动 + 热启动验收**） | 机制与 bundler 两半都已实测；真名验收在生产代码上全绿：内置 `.app` 的 `CFBundleURLTypes` 带 `vrcxk`、LaunchServices 认领、**冷启动**（应用未运行 → URL 拉起它）与热启动都落到宿主日志。⚠ 判据**不能**用 `open` 的退出码（实测会给假绿），也**不能**把 bundle 建在 `/tmp`（会假红），也**不能**只送壳分支的树（会得到一个看起来一模一样的假失败 —— FINDINGS §6.3） |
-| **Windows 真机**：装 → 双击/打开链接 → 到达宿主（冷启动 + 热启动） | 已**完成**（FINDINGS §7） | 按渲染出的 NSIS 脚本**等价安装**（文件布局 + 脚本原文的注册表写入），由**人手动**用 URL 启动。宿主日志实测：`ready` 之后 **6 ms** 出现 `deepLink.opened vrcxk://user/usr_1`（冷启动），随后 `wrld_2`（热启动）。⚠ 这条同时验证了 **`get_current()` 冷启动修复** —— 修复前 Windows 上这行**从不出现**（macOS 走 `RunEvent::Opened` 所以掩盖了它）。同时 5 次逐字节比对确认 **VRCX 自己的 `vrcx` 类键始终未变** |
+| **Windows 装/卸**（安装器自己的文件与注册表写入） | 已**完成**（CI 真机，`.github/workflows/installer-acceptance.yml` + `scripts/installer-acceptance.ps1`） | `windows-latest` 上构建 NSIS → 静默装 → 断言自有类键/命令串/`URL Protocol`/`Uninstall` 条目 → 静默卸 → 断言自有类键确实被删。首个全绿 run **36462916457**（详见下一行） |
+| **Windows URL → 宿主**（冷启动 + 热启动） | 已**完成**，但用的是**等价安装**而**不是**安装器（FINDINGS §7） | ⚠ 这一格与上一格是**两次不同性质的验证**，不要合并读：上一格跑的是安装器（只断言注册表/文件/卸载），这一格是**按渲染脚本手工铺好文件与注册表**后由**人手动**打开 URL。宿主日志实测：`ready` 之后 **6 ms** 出现 `deepLink.opened vrcxk://user/usr_1`（冷启动），随后 `wrld_2`（热启动）；这条同时验证了 **`get_current()` 冷启动修复**（修复前 Windows 上这行从不出现）。**「安装器装出来的应用能收 URL」仍未被一次运行同时覆盖** |
 | 卸载路径：卸载后自有前缀的键确实被删 | 已**完成**（CI 真机：`.github/workflows/installer-acceptance.yml` + `scripts/installer-acceptance.ps1`） | `windows-latest` 上构建 NSIS → 静默装（**注册表与文件全部由安装器自己写**）→ 断言自有类键/命令串指向安装出来的 exe/`URL Protocol`/`Uninstall` 条目 → 静默卸 → **断言自有类键确实被删**、`Uninstall` 条目消失；全程用 `reg export` 逐字节比对**预置的「别人的 `vrcx` 类键」**作为对照。首个全绿 run **36462916457**。⚠ 脚本刻意堵了一个假绿：安装阶段没写成键时，「卸载后键消失」按**无法验证**记 FAIL 而非空过成 PASS。⚠ 仍未做：**MSI/WiX 侧**（本机连 `light.exe` 都跑不起来，见 §6.1），以及「命令串被改过时键会残留」这条模板判据边界的用例 |
 
 ---
