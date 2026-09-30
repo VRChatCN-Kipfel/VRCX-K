@@ -361,6 +361,77 @@ It also demonstrated a separate, harder constraint by crashing on the first run:
 **`this` inside a Service method is a per-caller shadow object, not the instance**, so
 `this.#privateMethod()` throws. See the proposal §6.2a and cordis `lib/index.js:136-143`.
 
+## `mac-deeplink/` (subdirectory, **macOS only**)
+
+Does a custom URL scheme actually reach an app on macOS — and can that be verified
+**over SSH**? `run.sh` builds three tiny bundles from two sources:
+
+- **mode A** — AppKit, measuring **only** the `application:openURLs:` **delegate** path (the one
+  Tauri/WRY maps to `RunEvent::Opened`);
+- **mode B** — AppKit plus a hand-installed `kAEGetURL` handler;
+- **mode C** — **plain C, no AppKit at all**: it logs `argc`/`argv` and exits, so it is the instrument
+  behind "argv is never the carrier" (5 deliveries, every launch logged `argc=1`, no URL in argv).
+
+It registers them with `lsregister`, delivers a URL, and **asserts on the app side** —
+`open`'s exit status is recorded as a **note**, never as a pass/fail gate (it lies in both
+directions: §3.1). The script-executable control is likewise asserted on **its own log**, not on
+`open`'s status. Read [`mac-deeplink/FINDINGS.md`](mac-deeplink/FINDINGS.md) §0 first.
+Written for issue #41's acceptance criterion "若写 `schemes`：macOS 上一条真机验证".
+
+```bash
+ssh mac 'bash -s' < docs/probes/mac-deeplink/run.sh   # needs only clang + python3
+```
+
+Three findings that bite anyone writing a macOS deep-link test:
+
+- **argv is never the carrier.** The URL arrives as an Apple Event (`kAEGetURL`), which
+  `NSApplication` forwards to the delegate. Mode C (plain C handler) logs `argc=1` on every
+  launch while `open` reports success.
+- **`open`'s exit status is not evidence of delivery** — measured both ways (exit 0 with
+  nothing delivered; non-zero while the LaunchServices claim exists).
+- **A bundle under `/tmp` gets a claim but is never handed the URL** (`-10814`). That is a
+  trap for hand-made probes and CI, not for the installed app.
+
+It also carries a control for **script-executable bundles** (refused: `-10669`), and a
+location A/B driven by `PROBE_ROOT=…`.
+
+### `mac-deeplink/run-real-app.sh` — the real Tauri app, without waiting for the name
+
+`run.sh` proves macOS *delivers*; this one proves **our** chain does. It patches a **scratch tree**
+(declares a scratch scheme, and inserts a temporary logging consumer — required, because the host
+has no `deepLink` consumer today, which *is* gap ④), runs `bun run tauri build --bundles app`, and
+asserts **on the host side**. Measured result (macOS 26.6.2 arm64, rustc 1.98.1, bun 1.4.2):
+build **4 m 53 s**, bundler emits `CFBundleURLTypes`, LaunchServices claims the scheme, and
+`open "scheme://hello?a=1"` from SSH lands in the host log as
+`[probe] deepLink.opened received urls=["…"]` — the full chain.
+
+```bash
+bash docs/probes/mac-deeplink/run-real-app.sh <scratch-tree> [scheme]
+```
+
+⚠ Two traps it documents the hard way: the bundle lands in **`<tree>/target`** (cargo workspace
+root), not `<tree>/src-tauri/target` — a wrong path reads exactly like a failed build; and a
+`PASS` on the LaunchServices claim can be **inherited from a previous run**, so assert on the app
+side too. Getting the source onto that Mac is its own problem: **github.com is ~20 s to first byte
+and a clone timed out at 75 s**, so ship the tracked tree over the LAN (`git archive` + `scp`).
+
+### `mac-deeplink/run-real-name.sh` — the acceptance run, on production code
+
+Patches **nothing**: the tree declares the real scheme (`vrcxk`) and the host's own `ctx.deepLink`
+logs arrivals, so this measures production wiring. It needs a tree with **both** halves (the shell
+change *and* the host consumer) — against the shell branch alone it reports a **false failure**,
+because a delivered URL then leaves no trace anywhere.
+
+```bash
+bash docs/probes/mac-deeplink/run-real-name.sh <tree-with-both-halves> [scheme]
+```
+
+It is the run that exposed a **real defect** (macOS cold start: the app is launched by the URL, the
+URL arrives *after* `ready`, and the host dropped it in the window between its `expose` table being
+registered and `ctx.deepLink` subscribing) and then proved the fix: the URL line lands **3 ms after
+`ready`**, handed over by the host-side retention slot. All of it — raw output included — is in
+[`mac-deeplink/FINDINGS.md`](mac-deeplink/FINDINGS.md) §6.
+
 ## Re-running
 
 ```
