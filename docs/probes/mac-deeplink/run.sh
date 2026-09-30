@@ -245,15 +245,32 @@ run_argv_mode() { # $1 = scheme — the instrument behind "argv is never the car
   # of this bundle sees exactly one argv entry**. Both are asserted, because the PASS text used to
   # claim the second while only checking `grep '://'` — a verdict stronger than its evidence
   # (review finding). `probe.c` prints `argc=<n> argv=[…]`, so the log itself is the instrument.
-  local launches=0 exact=0
+  #
+  # ⚠ NO `|| echo 0` ON THE TWO COUNTERS, and that is load-bearing (review finding, reproduced with
+  # real bash): `grep -c` prints `0` **and exits 1** when nothing matches, so the fallback fires too
+  # and appends a second line — `exact` becomes `"0\n0"`. Then `[ "0\n0" -ne 5 ]` fails with
+  # "integer expected", which is NOT fatal (this script has `set -u` but no `set -e`), so the
+  # comparison is false and control falls through to the PASS branch — the assertion added for
+  # "argv carried something" would be unreachable in the one case it exists for. `grep -c` always
+  # prints a count, so the fallback was both unnecessary and the bug.
+  #
+  # ⚠ The shape check below is the second half of the fix: a malformed counter must produce a LOUD
+  # failure instead of a silent pass, so re-introducing a polluted value fails rather than quietly
+  # going green (that silent direction is what made the defect invisible to CI, which has no
+  # shell static analysis for `docs/probes/**` by design).
+  local launches=0 exact=0 counters_ok=1
   if [ -s "$log" ]; then
-    launches=$(grep -c '^argc=' "$log" 2>/dev/null || echo 0)
-    exact=$(grep -c '^argc=1 ' "$log" 2>/dev/null || echo 0)
+    launches=$(grep -c '^argc=' "$log" 2>/dev/null)
+    exact=$(grep -c '^argc=1 ' "$log" 2>/dev/null)
+    case "$launches" in '' | *[!0-9]*) counters_ok=0 ;; esac
+    case "$exact" in '' | *[!0-9]*) counters_ok=0 ;; esac
   fi
   note "argv-mode: the C bundle was launched $launches time(s) across 5 deliveries ($exact logged argc=1)"
   [ -s "$log" ] && sed 's/^/       /' "$log"
 
-  if [ "$launches" -eq 0 ]; then
+  if [ "$counters_ok" -eq 0 ]; then
+    fail "argv-mode: the launch counters are not plain integers (launches=[$launches] exact=[$exact]) — refusing to PASS on a malformed measurement"
+  elif [ "$launches" -eq 0 ]; then
     fail "argv-mode: the C bundle was never launched, so this run does NOT test the argv claim"
   elif grep -q '://' "$log" 2>/dev/null; then
     fail "argv-mode: the URL APPEARED in argv — argv would be a delivery path after all"
