@@ -120,6 +120,14 @@ fn autostart_flag(args: &[Value]) -> Result<bool, Value> {
 //   `#[cfg(desktop)]`-gated AND that this comment still names them. Adding a
 //   desktop-only helper without updating both is a red test, which is the point.
 //
+//   ⚠ The deep-link gate added for issue #41 is desktop-only for the same reason:
+//   `declared_schemes`, `declared_schemes_of`, `registration_verdict` and
+//   `claims_of` are reached ONLY from the `shell.deepLink.register` /
+//   `shell.deepLink.unregister` handlers in the desktop block. (`claim_in_root` and
+//   `claims_from_registry` are additionally `target_os = "windows"`-gated, so they are
+//   deliberately NOT in the list — the list covers `#[cfg(desktop)]` items that exist on
+//   every desktop.)
+//
 //   Do NOT "clean these up" by deleting them: the day deep-link or autostart is
 //   wired for Android, these are exactly what must be reached.
 
@@ -333,10 +341,11 @@ fn is_scheme_char(c: char) -> bool {
 ///
 /// ⚠ That matters for the residual-risk argument: an unregister route would make
 /// a bad registration recoverable, and its absence is the reason the collision
-/// checks below have to be strict rather than merely advisory. Adding
-/// `shell.deepLink.unregister` is a legitimate follow-up (it touches the host's
-/// capability mirror too, so it is out of scope for a review-fix round) — but do
-/// not cite "the plugin cannot unregister" as a reason it is impossible.
+/// checks below have to be strict rather than merely advisory. **That route now exists**
+/// (`shell.deepLink.unregister`, added for issue #41 §7.1 item 2) — and it is bounded by the
+/// same per-root collision check as the write path, precisely because upstream's undo removes
+/// **two** roots: see [`DEEP_LINK_ROOTS`]. Do not cite "the plugin cannot unregister" as a
+/// reason anything is impossible.
 ///
 /// # ⚠ What this function is and is NOT
 ///
@@ -410,6 +419,258 @@ fn validate_deep_link_scheme(scheme: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(desktop)]
+/// Who currently owns the OS handler entry for `scheme`.
+///
+/// ⚠ This type exists because "is the scheme already registered?" is the **wrong
+/// question** for a write path. `DeepLinkExt::is_registered` answers that yes/no, and on
+/// Windows a third-party class key carrying our requested name is "registered" too —
+/// registering over it **overwrites its `shell\open\command` with no way back** (see
+/// `RESERVED_REGISTRY_CLASSES`: `unregister` is a `remove_tree`, not a restore). So the
+/// probe distinguishes three cases and the verdict refuses the third.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemeClaim {
+    /// Nothing is registered under this name — nothing to collide with.
+    Absent,
+    /// Something is registered **and it is this very executable**: re-registering is a
+    /// no-op and removing it is our own undo.
+    ///
+    /// ⚠ `allow(dead_code)` is deliberate, platform-scoped, and load-bearing — the lint is
+    /// denied crate-wide, and it **did** fail CI (ubuntu's `clippy -D warnings`) the first
+    /// time this landed:
+    ///
+    ///   - only the **Windows** probe can construct `Ours`: it reads
+    ///     `Software\Classes\<scheme>\shell\open\command` and compares it with our own path;
+    ///   - every other desktop reports an existing handler as [`SchemeClaim::Foreign`],
+    ///     because those platforms expose no way to tell *whose* it is.
+    ///
+    /// Deleting the variant is not an option: the Windows build constructs it, and the
+    /// verdict's truth table is unit-tested on all platforms. So the honest statement is
+    /// "part of the contract here, never built on this target".
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    Ours,
+    /// Something is registered and we cannot show it is ours; the string is what the OS
+    /// reports as the current handler, so the error text can name it.
+    Foreign(String),
+}
+
+#[cfg(desktop)]
+/// The schemes declared by `plugins.deep-link.desktop` in `tauri.conf.json`.
+///
+/// # ⚠ Why this is read rather than written down here
+///
+/// The declared name lives in the config (that is what the bundler turns into
+/// `CFBundleURLTypes` / `Software\Classes\<scheme>`). A `const` list in Rust would be a
+/// **second copy** of it, and the drift between the two is invisible: the installer would
+/// register one name while the runtime gate allowed another. So the runtime gate reads the
+/// same value the bundler reads.
+///
+/// Both shapes the upstream CLI accepts are handled — a single protocol object, or a list
+/// of them (`DesktopDeepLinks::One | List` in `tauri-cli/src/interface/rust.rs`). Names are
+/// lowercased and de-duplicated because URL schemes and registry key names are both
+/// case-insensitive.
+pub fn declared_schemes(plugin_config: Option<&Value>) -> Vec<String> {
+    let Some(desktop) = plugin_config.and_then(|config| config.get("desktop")) else {
+        return Vec::new();
+    };
+    let entries: Vec<&Value> = match desktop {
+        Value::Array(items) => items.iter().collect(),
+        single => vec![single],
+    };
+    let mut schemes: Vec<String> = Vec::new();
+    for entry in entries {
+        let Some(list) = entry.get("schemes").and_then(Value::as_array) else {
+            continue;
+        };
+        for scheme in list.iter().filter_map(Value::as_str) {
+            let lowered = scheme.to_ascii_lowercase();
+            if !lowered.is_empty() && !schemes.contains(&lowered) {
+                schemes.push(lowered);
+            }
+        }
+    }
+    schemes
+}
+
+#[cfg(desktop)]
+/// This build's declared schemes, read from its own config.
+fn declared_schemes_of(app: &AppHandle) -> Vec<String> {
+    declared_schemes(app.config().plugins.0.get("deep-link"))
+}
+
+#[cfg(desktop)]
+/// The **one** gate both `register` and `unregister` pass through.
+///
+/// Refuses, in order:
+///
+/// 1. a syntactically illegal or reserved name ([`validate_deep_link_scheme`]);
+/// 2. a name this build does **not declare** — the owner's decision (issue #41 §7.1 item 2)
+///    is that runtime registration is limited to the declared allowlist, so the blacklist
+///    in (1) is a floor, not the gate;
+/// 3. an existing handler we cannot show is ours ([`SchemeClaim::Foreign`]).
+///
+/// ⚠ (3) is not a formality. It is the only thing standing between a plugin-visible
+/// capability and "this machine's `Software\Classes\<name>` now points at us, and no
+/// recorded value can bring it back".
+///
+/// ⚠ `claims` is **per root** and every root must pass: the caller writes one root but
+/// upstream's `unregister` removes two, and `HKCU` shadows `HKLM`. A foreign handler in *any*
+/// of them is a refusal — see [`DEEP_LINK_ROOTS`].
+pub fn registration_verdict(
+    scheme: &str,
+    declared: &[String],
+    claims: &[(&str, SchemeClaim)],
+) -> Result<(), String> {
+    validate_deep_link_scheme(scheme)?;
+    let lowered = scheme.to_ascii_lowercase();
+    if !declared.iter().any(|name| name == &lowered) {
+        return Err(format!(
+            "scheme {lowered:?} is not declared in tauri.conf.json \
+             (plugins.deep-link.desktop.schemes); runtime registration is limited to the \
+             declared names"
+        ));
+    }
+    for (root, claim) in claims {
+        if let SchemeClaim::Foreign(owner) = claim {
+            return Err(format!(
+                "scheme {lowered:?} is already handled by something this app does not own \
+                 in {root} ({owner}); refusing to overwrite it — an existing class key cannot \
+                 be restored"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(desktop, target_os = "windows"))]
+/// The executable path a `shell\open\command` line names, as far as it can be read.
+///
+/// Quoted is the shape both writers produce (`"<exe>" "%1"`), so the quoted branch is the
+/// one that matters in practice. An **unquoted** command is ambiguous by construction on
+/// Windows, because an installed path contains spaces — [`command_owner_matches`] therefore
+/// also accepts a whole-path prefix rather than trusting this function alone.
+fn command_executable(command: &str) -> &str {
+    let trimmed = command.trim();
+    match trimmed.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or(""),
+        None => trimmed.split_whitespace().next().unwrap_or(""),
+    }
+}
+
+#[cfg(all(desktop, target_os = "windows"))]
+/// Does `command` — a `shell\open\command` DEFAULT value — launch `exe`?
+///
+/// Case-insensitive, like the registry's own comparison of key names.
+fn command_owner_matches(command: &str, exe: &std::path::Path) -> bool {
+    let exe = exe.to_string_lossy();
+    if exe.is_empty() {
+        return false;
+    }
+    if command_executable(command).eq_ignore_ascii_case(&exe) {
+        return true;
+    }
+    // An unquoted command whose path contains spaces (`C:\Program Files\…\vrcx-k.exe "%1"`)
+    // is what a human hand-editing the key would leave behind. The whole trimmed string is
+    // compared against the path plus a BOUNDARY — without that boundary check,
+    // `…\vrcx-k.exe.old` would count as ours, which is exactly the mistake that would let a
+    // stale entry be overwritten in place of a foreign one.
+    let lowered = command.trim().to_ascii_lowercase();
+    match lowered.strip_prefix(&exe.to_ascii_lowercase()) {
+        Some(rest) => matches!(
+            rest.chars().next(),
+            None | Some(' ') | Some('\t') | Some('"')
+        ),
+        None => false,
+    }
+}
+
+#[cfg(all(desktop, target_os = "windows"))]
+/// The hives a scheme's class key can live in — **both** of them, on purpose.
+///
+/// ⚠ Why this is a pair rather than `CURRENT_USER` alone (it *was* alone, and that was a real
+/// hole — found in review, not in a test):
+///
+///   - upstream `DeepLink::unregister` deletes from **both** roots
+///     (`if LOCAL_MACHINE.open(..).is_ok() { remove_tree(..) }` then the same for
+///     `CURRENT_USER`), so a probe that reads one root is inspecting a *different* set of keys
+///     than the one the undo is about to touch;
+///   - the shell resolves `HKCU` **before** `HKLM`, so writing `HKCU` while `HKLM` holds
+///     somebody else's handler does not avoid the collision — it **shadows** that handler,
+///     which is the very takeover this gate exists to prevent, only harder to see.
+///
+/// ⇒ 探的 root 集合必须等于**将要写/删的** root 集合，且任一 root 外来就拒绝。
+const DEEP_LINK_ROOTS: [(&str, &windows_registry::Key); 2] = [
+    ("HKCU", windows_registry::CURRENT_USER),
+    ("HKLM", windows_registry::LOCAL_MACHINE),
+];
+
+#[cfg(all(desktop, target_os = "windows"))]
+/// The ownership probe for **one** hive, without a Tauri handle.
+///
+/// Split out from [`claims_of`] so the **real-registry** test can call it: a unit test cannot
+/// build an `AppHandle`, and the whole point of that test is that it runs against the actual
+/// registry rather than a mock.
+fn claim_in_root(root: &windows_registry::Key, scheme: &str) -> SchemeClaim {
+    // ⚠ ERROR_FILE_NOT_FOUND is the ONLY error that means "nothing is there". Treating any
+    // error as "absent" would turn an unreadable key (permissions, a damaged hive) into
+    // permission to overwrite it — the exact failure this check exists to stop.
+    const ERROR_FILE_NOT_FOUND: i32 = 0x8007_0002u32 as i32;
+    let path = format!("Software\\Classes\\{scheme}\\shell\\open\\command");
+    match root.open(&path) {
+        Ok(key) => match key.get_string("") {
+            Ok(command) => {
+                let exe = std::env::current_exe().unwrap_or_default();
+                if command_owner_matches(&command, &exe) {
+                    SchemeClaim::Ours
+                } else {
+                    SchemeClaim::Foreign(command)
+                }
+            }
+            Err(err) => SchemeClaim::Foreign(format!("unreadable command value: {err}")),
+        },
+        Err(err) if err.code().0 == ERROR_FILE_NOT_FOUND => SchemeClaim::Absent,
+        Err(err) => SchemeClaim::Foreign(format!("unreadable key: {err}")),
+    }
+}
+
+#[cfg(all(desktop, target_os = "windows"))]
+/// What **every** root we might write or delete reports about `scheme`.
+fn claims_from_registry(scheme: &str) -> Vec<(&'static str, SchemeClaim)> {
+    DEEP_LINK_ROOTS
+        .iter()
+        .map(|(name, root)| (*name, claim_in_root(root, scheme)))
+        .collect()
+}
+
+#[cfg(desktop)]
+/// What is registered under `scheme` right now, per root, on this platform.
+///
+/// ⚠ The **Windows** branch reads both `HKCU` and `HKLM` (see [`DEEP_LINK_ROOTS`]); every other
+/// desktop reports a single pseudo-root, and an existing registration there counts as foreign
+/// because those platforms expose no way to tell *whose* it is. That is the safe direction on
+/// purpose: on Linux the name this build would register is the one its own installer already
+/// claimed (`x-scheme-handler/vrcxk`), so refusing costs a redundant runtime call and buys the
+/// guarantee that we never overwrite a foreign handler. macOS cannot register at runtime at all.
+fn claims_of(app: &AppHandle, scheme: &str) -> Vec<(&'static str, SchemeClaim)> {
+    #[cfg(target_os = "windows")]
+    {
+        // The registry is the whole story on Windows; no Tauri API is involved.
+        let _ = app;
+        claims_from_registry(scheme)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let claim = match app.deep_link().is_registered(scheme) {
+            Ok(false) => SchemeClaim::Absent,
+            Ok(true) => SchemeClaim::Foreign(
+                "an existing handler (this platform cannot report whose it is)".to_string(),
+            ),
+            Err(err) => SchemeClaim::Foreign(format!("unreadable registration state: {err}")),
+        };
+        vec![("this-platform", claim)]
+    }
 }
 
 /// Register every `shell.*` capability handler on the peer.
@@ -674,12 +935,14 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
         // machine-wide change, not a failed call. A rejected scheme never
         // touches the plugin.
         //
-        // ⚠ There is deliberately only `register` and `isRegistered` here — no
-        // `unregister` route. That is a real asymmetry: the plugin CAN unregister
-        // on Windows (see the correction on `validate_deep_link_scheme`), so this
-        // surface currently offers no way to undo what it does. Adding the route
-        // means touching the host's capability mirror too, so it is left as a
-        // follow-up rather than smuggled into a review-fix round.
+        // ⚠ TWO GATES before the OS is touched, and both are load-bearing:
+        //
+        //   1. `validate_deep_link_scheme` — syntax plus the reserved-name/class lists.
+        //      Run FIRST because it is pure: a caller sending `*` must not even cause a
+        //      registry read.
+        //   2. `registration_verdict` — AFTER the platform ownership probe, i.e. after
+        //      I/O. It enforces the declared allowlist AND refuses to overwrite a handler
+        //      this app does not own (issue #41 §7.1 item 2; see its doc comment).
         //
         // ⚠ `scheme` IS PRESENT ON ALL THREE PATHS, and its meaning is "the value
         // you asked to register" — NOT "what the OS now routes".
@@ -700,11 +963,79 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
                     // No `scheme` is registered — `ok: false` says so.
                     return json!({ "ok": false, "scheme": scheme, "error": reason });
                 }
+                let declared = declared_schemes_of(app);
+                let claims = claims_of(app, &scheme);
+                if let Err(reason) = registration_verdict(&scheme, &declared, &claims) {
+                    eprintln!("[shell] deep-link register {scheme:?}: {reason}");
+                    return json!({ "ok": false, "scheme": scheme, "error": reason });
+                }
                 match app.deep_link().register(scheme.clone()) {
                     Ok(()) => json!({ "ok": true, "scheme": scheme }),
                     Err(err) => {
                         eprintln!("[shell] deep-link register {scheme}: {err}");
                         json!({ "ok": false, "scheme": scheme, "error": err.to_string() })
+                    }
+                }
+            }),
+        );
+        // shell.deepLink.unregister(scheme) -> { ok, scheme, removed, error? }
+        //
+        // The undo issue #41 §7.1 item 2 asked for, with the shape that decision settled:
+        // reachable from the HOST (and therefore the UI), **not** from plugins — the
+        // capability mirror in `capability.ts` deliberately does not list it — and bounded
+        // to the declared names by the same `registration_verdict` the write path uses.
+        //
+        // ⚠ It will NOT remove a foreign handler, and that is the point: upstream
+        // `unregister` is a `remove_tree`, so removing a key we did not write would delete
+        // somebody else's class key outright. An absent handler answers
+        // `ok: true, removed: false` — idempotent, because "make sure this is not
+        // registered" is a legitimate thing to ask twice.
+        //
+        // ⚠ Platform note (upstream docs, 2.4.10): Linux can only unregister a scheme that
+        // was registered through `register` in the first place, and macOS/Android/iOS
+        // return `UnsupportedPlatform`. The error is forwarded rather than swallowed, so a
+        // caller learns which of those it hit.
+        peer.on(
+            "shell.deepLink.unregister",
+            handler(app.clone(), |app, args| {
+                let scheme = str_arg(args, 0);
+                if let Err(reason) = validate_deep_link_scheme(&scheme) {
+                    eprintln!("[shell] deep-link unregister {scheme:?}: {reason}");
+                    return json!({
+                        "ok": false,
+                        "scheme": scheme,
+                        "removed": false,
+                        "error": reason
+                    });
+                }
+                let declared = declared_schemes_of(app);
+                let claims = claims_of(app, &scheme);
+                if let Err(reason) = registration_verdict(&scheme, &declared, &claims) {
+                    eprintln!("[shell] deep-link unregister {scheme:?}: {reason}");
+                    return json!({
+                        "ok": false,
+                        "scheme": scheme,
+                        "removed": false,
+                        "error": reason
+                    });
+                }
+                // "Nothing anywhere" ⇒ nothing to remove; idempotent by design.
+                if claims
+                    .iter()
+                    .all(|(_, claim)| matches!(claim, SchemeClaim::Absent))
+                {
+                    return json!({ "ok": true, "scheme": scheme, "removed": false });
+                }
+                match app.deep_link().unregister(scheme.clone()) {
+                    Ok(()) => json!({ "ok": true, "scheme": scheme, "removed": true }),
+                    Err(err) => {
+                        eprintln!("[shell] deep-link unregister {scheme}: {err}");
+                        json!({
+                            "ok": false,
+                            "scheme": scheme,
+                            "removed": false,
+                            "error": err.to_string()
+                        })
                     }
                 }
             }),
@@ -1352,8 +1683,12 @@ mod tests {
             "RESERVED_REGISTRY_CLASSES",
             "RESERVED_SCHEMES",
             "autostart_flag",
+            "claims_of",
+            "declared_schemes",
+            "declared_schemes_of",
             "is_scheme_char",
             "json_type_name",
+            "registration_verdict",
             "validate_deep_link_scheme",
         ];
 
@@ -1369,10 +1704,21 @@ mod tests {
 
         for name in NAMED {
             // Find the DECLARATION, not a mention inside a comment.
+            //
+            // ⚠ The optional visibility prefix is load-bearing: a desktop-only helper that
+            // must be reachable from another module in this crate (e.g. `declared_schemes`,
+            // which the packaging test calls) is `pub fn`, and an earlier version of this
+            // walk only accepted a bare `fn`/`const`. It then reported a *correct* entry as
+            // "no longer declared here", which is the worst kind of red: it punishes the
+            // right answer.
             let declared = lines.iter().position(|line| {
                 let trimmed = line.trim_start();
-                (trimmed.starts_with("fn ") || trimmed.starts_with("const "))
-                    && trimmed
+                let declaration = trimmed
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| trimmed.strip_prefix("pub "))
+                    .unwrap_or(trimmed);
+                (declaration.starts_with("fn ") || declaration.starts_with("const "))
+                    && declaration
                         .split(|c: char| !c.is_alphanumeric() && c != '_')
                         .nth(1)
                         .is_some_and(|word| word == *name)
@@ -1491,5 +1837,318 @@ mod tests {
                  set of desktop-only helpers, so add it (and the note) together."
             );
         }
+    }
+
+    // ── the declared-scheme allowlist (issue #41 §7.1 item 1/2) ──────────────
+    //
+    // These exercise the pure reader, because the alternative — trusting that a
+    // hand-written `const` in Rust matches the config — is exactly the silent drift the
+    // runtime read exists to remove.
+
+    #[test]
+    fn declared_schemes_reads_the_object_shape() {
+        let config = json!({ "desktop": { "schemes": ["vrcxk", "VRCXK-App"] } });
+        assert_eq!(
+            declared_schemes(Some(&config)),
+            vec!["vrcxk".to_string(), "vrcxk-app".to_string()],
+            "names must be lowercased (registry keys and URL schemes are case-insensitive) \
+             and de-duplicated"
+        );
+    }
+
+    #[test]
+    fn declared_schemes_reads_the_list_shape() {
+        // `DesktopDeepLinks::List` — the second shape the upstream CLI accepts.
+        let config = json!({
+            "desktop": [{ "schemes": ["vrcxk"] }, { "schemes": ["other"] }]
+        });
+        assert_eq!(
+            declared_schemes(Some(&config)),
+            vec!["vrcxk".to_string(), "other".to_string()]
+        );
+    }
+
+    #[test]
+    fn declared_schemes_is_empty_when_nothing_is_declared() {
+        // The state this repo was in before issue #41: no `schemes` key at all. It must
+        // read as "nothing is declared", NOT as "everything is allowed" — the allowlist is
+        // the gate, so an empty list has to refuse every name.
+        assert!(declared_schemes(None).is_empty());
+        assert!(declared_schemes(Some(&json!({}))).is_empty());
+        assert!(declared_schemes(Some(&json!({ "desktop": {} }))).is_empty());
+        assert!(declared_schemes(Some(&json!({ "desktop": { "schemes": [] } }))).is_empty());
+        // A mobile-only declaration is not a desktop one.
+        assert!(
+            declared_schemes(Some(&json!({ "mobile": [{ "host": "example.com" }] }))).is_empty()
+        );
+    }
+
+    #[test]
+    fn the_verdict_requires_a_declared_name() {
+        let declared = vec!["vrcxk".to_string()];
+        // Declared + nothing registered ⇒ allowed (the ordinary cold install).
+        assert_eq!(
+            registration_verdict("vrcxk", &declared, &[("HKCU", SchemeClaim::Absent)]),
+            Ok(())
+        );
+        // Declared + already ours ⇒ allowed (re-registering is a no-op).
+        assert_eq!(
+            registration_verdict("vrcxk", &declared, &[("HKCU", SchemeClaim::Ours)]),
+            Ok(())
+        );
+        // Case-insensitive, like the registry itself.
+        assert_eq!(
+            registration_verdict("VRCXK", &declared, &[("HKCU", SchemeClaim::Absent)]),
+            Ok(())
+        );
+        // NOT declared ⇒ refused, even though it is a perfectly legal scheme name.
+        // ⚠ NOT `vrcx`: that one is refused by the RESERVED list before the allowlist ever
+        // runs, so it would prove nothing about this gate. The example must be a name that
+        // passes `validate_deep_link_scheme` and is nonetheless undeclared.
+        let refusal = registration_verdict(
+            "someotherscheme",
+            &declared,
+            &[("HKCU", SchemeClaim::Absent)],
+        )
+        .expect_err("an undeclared name must be refused");
+        assert!(
+            refusal.contains("not declared"),
+            "the refusal must say the name is not declared, got: {refusal}"
+        );
+    }
+
+    /// ⚠ The review finding this pins: the probe used to read **`HKCU` only**, while upstream's
+    /// `unregister` removes from `HKCU` **and** `HKLM`. Two consequences, both fixed here:
+    /// a foreign handler under `HKLM` alone was invisible (and `HKCU` *shadows* `HKLM`, so our
+    /// write would silently take the scheme over), and the undo could delete a root nobody had
+    /// verified. Every root must therefore pass before anything is written or removed.
+    #[test]
+    fn every_root_must_pass_not_just_the_first_one() {
+        let declared = vec!["vrcxk".to_string()];
+        let foreign = SchemeClaim::Foreign("\"C:\\Other\\app.exe\" \"%1\"".to_string());
+
+        // The case the old single-root probe let through: nothing in HKCU, somebody else in HKLM.
+        let refusal = registration_verdict(
+            "vrcxk",
+            &declared,
+            &[("HKCU", SchemeClaim::Absent), ("HKLM", foreign.clone())],
+        )
+        .expect_err("a machine-wide foreign handler must be refused even when HKCU is empty");
+        assert!(
+            refusal.contains("HKLM"),
+            "the refusal must name the root that collided, got: {refusal}"
+        );
+
+        // Ours in HKCU but somebody else in HKLM is still a collision: HKCU *shadows* HKLM,
+        // which is exactly the takeover this gate exists to prevent.
+        assert!(
+            registration_verdict(
+                "vrcxk",
+                &declared,
+                &[("HKCU", SchemeClaim::Ours), ("HKLM", foreign.clone())],
+            )
+            .is_err(),
+            "ours in one root must not excuse a foreign handler in another"
+        );
+
+        // The ordinary states still pass: absent everywhere, or ours in one root and absent
+        // in the other (what a per-user install actually leaves behind).
+        assert_eq!(
+            registration_verdict(
+                "vrcxk",
+                &declared,
+                &[("HKCU", SchemeClaim::Absent), ("HKLM", SchemeClaim::Absent)],
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            registration_verdict(
+                "vrcxk",
+                &declared,
+                &[("HKCU", SchemeClaim::Ours), ("HKLM", SchemeClaim::Absent)],
+            ),
+            Ok(())
+        );
+    }
+
+    /// The acceptance criterion of issue #41: claiming an **existing** class key is
+    /// refused. This is the logic half; the real-registry half is below (Windows only).
+    #[test]
+    fn an_existing_foreign_handler_is_refused_even_when_the_name_is_declared() {
+        let declared = vec!["vrcxk".to_string()];
+        let claim = SchemeClaim::Foreign("\"C:\\Other\\app.exe\" \"%1\"".to_string());
+        let refusal = registration_verdict("vrcxk", &declared, &[("HKCU", claim)])
+            .expect_err("a foreign handler must be refused");
+        assert!(
+            refusal.contains("does not own"),
+            "the refusal must name the reason (not ours), got: {refusal}"
+        );
+        assert!(
+            refusal.contains("cannot be restored"),
+            "the refusal must say why it is permanent, got: {refusal}"
+        );
+        assert!(
+            refusal.contains("C:\\Other\\app.exe"),
+            "the refusal must quote the current handler so the caller can see whose it is, \
+             got: {refusal}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn command_ownership_matches_the_first_token_only() {
+        let exe = std::path::Path::new(r"C:\Program Files\vrcx-k\vrcx-k.exe");
+        for command in [
+            // What the Tauri installer and the plugin both write.
+            r#""C:\Program Files\vrcx-k\vrcx-k.exe" "%1""#,
+            r#""C:\Program Files\vrcx-k\vrcx-k.exe""#,
+            // A hand-edited UNQUOTED command whose path contains spaces. `command_executable`
+            // cannot see past the first space here, which is why the whole-path prefix
+            // branch exists.
+            r#"C:\Program Files\vrcx-k\vrcx-k.exe "%1""#,
+            // The registry is case-insensitive for this comparison too.
+            r#""c:\program files\VRCX-K\VRCX-K.EXE" "%1""#,
+        ] {
+            assert!(
+                command_owner_matches(command, exe),
+                "{command:?} launches our executable and must count as ours"
+            );
+        }
+        for command in [
+            r#""C:\Other\app.exe" "%1""#,
+            r#""C:\Program Files\vrcx-k\vrcx-k-helper.exe" "%1""#,
+            // ⚠ The boundary case the whole-path branch would get wrong without its check:
+            // a NEIGHBOUR of our own executable, whose path starts with ours.
+            r#""C:\Program Files\vrcx-k\vrcx-k.exe.old" "%1""#,
+            r#"C:\Program Files\vrcx-k\vrcx-k.exe.old "%1""#,
+            "",
+        ] {
+            assert!(
+                !command_owner_matches(command, exe),
+                "{command:?} does not launch our executable and must count as foreign"
+            );
+        }
+    }
+
+    /// ⚠ **The real-registry half of the acceptance criterion** — not a mock.
+    ///
+    /// It writes a throwaway class key under `HKCU` whose `shell\open\command` belongs to
+    /// another app, then asserts that (a) the probe reports it as foreign, (b) the verdict
+    /// refuses, and (c) **the key is still exactly as it was** — because "refused" is only
+    /// worth anything if nothing was written. It never calls the plugin's `register`, so it
+    /// cannot leave a real scheme registration behind.
+    ///
+    /// # ⚠ Why the fixture can come from the environment
+    ///
+    /// Some environments let this process **read** the registry but not **write** it (a
+    /// restricted token — measured on this project's dev machine, where the harness denies
+    /// `RegCreateKeyEx` to descendants while the user itself can write `HKCU`). Refusing to
+    /// run there would throw away the coverage that matters most: the *read* path being
+    /// asserted against a real hive. So a pre-created fixture can be pointed at with
+    /// `VRCXK_DEEPLINK_FOREIGN_FIXTURE=<scheme>`; the assertions are identical, only the
+    /// fixture's provenance changes, and the test never deletes a key it did not create.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_real_existing_class_key_is_left_untouched_by_a_refused_registration() {
+        use windows_registry::CURRENT_USER;
+
+        const ACCESS_DENIED: i32 = 0x8007_0005u32 as i32;
+        const FIXTURE_ENV: &str = "VRCXK_DEEPLINK_FOREIGN_FIXTURE";
+        let foreign = "\"C:\\Program Files\\SomeOtherApp\\other.exe\" \"%1\"";
+
+        let fixture = std::env::var(FIXTURE_ENV)
+            .ok()
+            .filter(|name| !name.is_empty());
+        // Unique per process: two `cargo test` runs must not fight over one key.
+        let scheme = fixture
+            .clone()
+            .unwrap_or_else(|| format!("vrcxktest{}", std::process::id()));
+        let class_key = format!("Software\\Classes\\{scheme}");
+        let command_key = format!("{class_key}\\shell\\open\\command");
+
+        let mut created_here = false;
+        if fixture.is_none() {
+            // A pre-existing key owned by somebody else.
+            match CURRENT_USER.create(&command_key) {
+                Ok(key) => {
+                    key.set_string("", foreign)
+                        .expect("write the foreign command");
+                    created_here = true;
+                }
+                Err(err) if err.code().0 == ACCESS_DENIED => {
+                    // ⚠ Loud, and it says what was NOT verified. A silent skip here would
+                    // read as coverage that does not exist.
+                    eprintln!(
+                        "\n⚠ SKIPPED — nothing was verified: this process may read the \
+                         registry but not write it, so the fixture cannot be created.\n  \
+                         Either run with {FIXTURE_ENV}=<scheme> after creating \
+                         HKCU\\{class_key}\\shell\\open\\command yourself, or run under an \
+                         unrestricted token (CI's windows-latest runner is one).\n"
+                    );
+                    return;
+                }
+                Err(err) => panic!("create the throwaway class key: {err}"),
+            }
+        }
+
+        let claims = claims_from_registry(&scheme);
+        assert!(
+            claims.iter().any(|(root, claim)| *root == "HKCU"
+                && *claim == SchemeClaim::Foreign(foreign.to_string())),
+            "a key whose command points at another executable must read as foreign in HKCU \
+             (fixture {FIXTURE_ENV}={scheme}); got {claims:?}"
+        );
+
+        let declared = vec![scheme.clone()];
+        let refusal = registration_verdict(&scheme, &declared, &claims)
+            .expect_err("registering over an existing foreign class key must be refused");
+        assert!(refusal.contains("does not own"), "got: {refusal}");
+
+        // ⚠ The assertion that makes the refusal meaningful: the key is unchanged.
+        let readback = CURRENT_USER
+            .open(&command_key)
+            .expect("the key must still exist after a refused registration")
+            .get_string("")
+            .expect("the command value must still be readable");
+        assert_eq!(
+            readback, foreign,
+            "a refused registration must not have touched the existing value"
+        );
+
+        if created_here {
+            // No key at all ⇒ Absent, so the ordinary path is still open.
+            CURRENT_USER
+                .remove_tree(&class_key)
+                .expect("remove the throwaway class key");
+            assert!(
+                claims_from_registry(&scheme)
+                    .iter()
+                    .all(|(_, claim)| *claim == SchemeClaim::Absent),
+                "after cleanup the probe must report the name as free in every root again"
+            );
+        }
+    }
+
+    /// ⚠ The `HKLM` leg of the probe, asserted against the **real** registry without needing
+    /// write access to it: a fresh random scheme name is absent in *both* roots on any machine,
+    /// so this pins that the machine-wide root is actually read (and read as `Absent`), rather
+    /// than skipped because the code only ever looked at `CURRENT_USER`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_machine_wide_root_is_read_too() {
+        let scheme = format!("vrcxkprobe{}", std::process::id());
+        let claims = claims_from_registry(&scheme);
+        let roots: Vec<&str> = claims.iter().map(|(root, _)| *root).collect();
+        assert_eq!(
+            roots,
+            vec!["HKCU", "HKLM"],
+            "the probe must cover both roots (that is the review finding this pins)"
+        );
+        assert!(
+            claims
+                .iter()
+                .all(|(_, claim)| *claim == SchemeClaim::Absent),
+            "a never-registered name must be Absent in every root; got {claims:?}"
+        );
     }
 }

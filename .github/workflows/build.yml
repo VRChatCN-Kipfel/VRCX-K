@@ -22,8 +22,11 @@ name: build
 on:
   push:
     branches: [rewrite]
+  # ⚠ pull_request **不能**按分支过滤：stacked PR 的 base 是**上一层分支**，不是 `rewrite`，
+  # 于是 `branches: [rewrite]` 会让第 2/3 层**完全没有 CI**（实测：主仓库上按 stack 建的
+  # #49/#50 一个检查都没有，而层内的验证恰恰是 stack 最需要的东西）。去掉过滤后，
+  # 任何 base 的 PR 都会跑；`push` 仍只限 `rewrite`，不会因为 push 到别的分支而重复跑。
   pull_request:
-    branches: [rewrite]
   workflow_dispatch:
     inputs:
       # ⚠ 默认 0 = 「照常构建 debuggable 变体」。语义上这不是「开一个开关」，

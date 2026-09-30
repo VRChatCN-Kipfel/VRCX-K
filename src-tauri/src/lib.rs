@@ -7,6 +7,10 @@ mod app_lifecycle;
 // no capability: `policy` is pure, and `imp` refuses to serve unless the platform
 // says this very process is debuggable.
 pub mod debug_probe;
+// The bounded deep-link replay queue (issue #41 §7.1 item 4). Desktop-only because the
+// entire deep-link surface is: the shell registers no such route on mobile.
+#[cfg(desktop)]
+mod deeplink;
 mod dialog_opts;
 // ⚠ These three are `pub` so the `hands-e2e` EXAMPLE can mount them on a bare
 // stdio loop and exercise the real wire protocol without a webview (see
@@ -151,6 +155,28 @@ fn dispatch_app_command(
     result
 }
 
+/// Where one activation should go, given what the peer said.
+///
+/// ⚠ **A failed write is the same case as a missing peer**, and this function exists so that
+/// rule is testable without an `AppHandle`. The queue used to cover only `None` — but §5.1 names
+/// **two** windows it is for: the cold start (peer does not exist yet) and the **host restart**
+/// (crash / upgrade / `host_reload`), where the peer *exists and is already dead*. The second one
+/// reported `write-failed` and dropped the URL with a single stderr line (found in review).
+#[cfg(desktop)]
+#[derive(Debug, PartialEq, Eq)]
+enum DeepLinkDelivery {
+    Delivered,
+    Queued,
+}
+
+#[cfg(desktop)]
+fn deeplink_delivery(notify: &Option<Result<(), String>>) -> DeepLinkDelivery {
+    match notify {
+        Some(Ok(())) => DeepLinkDelivery::Delivered,
+        Some(Err(_)) | None => DeepLinkDelivery::Queued,
+    }
+}
+
 /// Forward one deep link to the host, and mirror it to the face.
 ///
 /// A received URL that nobody consumes is indistinguishable from a link that
@@ -161,24 +187,48 @@ fn dispatch_app_command(
 /// The brain owns what a URL MEANS (log in, join an instance); the shell only
 /// proves it arrived.
 ///
-/// ⚠ Its only caller is the `on_open_url` hook in `.setup()`. With no scheme
-/// declared in `tauri.conf.json` that hook never fires today, so this function
-/// has never run in a real launch — it is the consumer waiting for a scheme,
-/// not evidence that deep links work. See the note at
-/// `tauri_plugin_deep_link::init()` above.
+/// ⚠ Its only caller is the `on_open_url` hook in `.setup()`. As of issue #41 a scheme IS
+/// declared (`plugins.deep-link.desktop.schemes = ["vrcxk"]` in `tauri.conf.json`), so on
+/// Windows/Linux and macOS this hook is now reachable — before that it had never run in a
+/// real launch. The wiring itself is verified on real hardware: see
+/// `docs/probes/mac-deeplink/FINDINGS.md` §5.
+///
+/// ⚠ Whenever the host cannot take it — not up yet **or** the write failed — the URL is
+/// **queued, not dropped**: see [`deeplink_delivery`] and [`replay_pending_deep_links`].
 #[cfg(desktop)]
 fn forward_deep_link(app: &tauri::AppHandle, urls: Vec<String>) {
-    let delivery = {
+    let notify: Option<Result<(), String>> = {
         let state = app.state::<HostState>();
-        match state.peer() {
-            Some(peer) => match peer.notify("deepLink.opened", vec![json!({ "urls": urls })]) {
-                Ok(()) => "delivered",
-                Err(err) => {
-                    eprintln!("[shell] deep link notify failed: {err}");
-                    "write-failed"
-                }
-            },
-            None => "no-host",
+        state.peer().map(|peer| {
+            peer.notify("deepLink.opened", vec![json!({ "urls": urls.clone() })])
+                .map_err(|err| err.to_string())
+        })
+    };
+    let delivery = match deeplink_delivery(&notify) {
+        DeepLinkDelivery::Delivered => "delivered",
+        DeepLinkDelivery::Queued => {
+            if let Some(Err(err)) = &notify {
+                eprintln!(
+                    "[shell] deep link notify failed ({err}) — queueing it instead of dropping it"
+                );
+            }
+            // ⚠ This is the ORDINARY case on a cold start, not an edge case: the URL is
+            // what launched us, so the OS delivers it in milliseconds while the sidecar
+            // (bun + Cordis + include tree) still needs seconds. Dropping it here is
+            // what made "double-click a link" open the app and do nothing, with no
+            // signal anywhere. Remember it instead; `replay_pending_deep_links` hands
+            // it over when the host is up (issue #41 §7.1 item 4).
+            let pending = app.state::<DeepLinkPending>();
+            let dropped = pending.push(urls.clone());
+            if dropped > 0 {
+                eprintln!(
+                    "[shell] deep link queued: {} waiting, {dropped} older activation(s) \
+                     dropped by the {}-entry cap",
+                    pending.len(),
+                    deeplink::PENDING_CAP
+                );
+            }
+            "queued"
         }
     };
     if let Err(err) = app.emit(
@@ -186,6 +236,80 @@ fn forward_deep_link(app: &tauri::AppHandle, urls: Vec<String>) {
         json!({ "urls": urls, "delivery": delivery }),
     ) {
         eprintln!("[shell] emit deep-link-opened: {err}");
+    }
+}
+
+/// Deep links that arrived while no host was attached (issue #41 §7.1 item 4 = option A).
+///
+/// A thin managed wrapper so the queue can live in Tauri state; the bounded FIFO itself is
+/// in [`deeplink`], where it is unit-tested without a running app.
+#[cfg(desktop)]
+#[derive(Default)]
+struct DeepLinkPending(std::sync::Mutex<deeplink::PendingDeepLinks>);
+
+#[cfg(desktop)]
+impl DeepLinkPending {
+    /// Remember one activation. Returns how many older batches the cap dropped.
+    fn push(&self, urls: Vec<String>) -> u64 {
+        self.0.lock().expect("deep link queue").push(urls)
+    }
+
+    /// Take every queued activation (oldest first) plus the running drop count.
+    fn take(&self) -> (Vec<Vec<String>>, u64) {
+        let mut queue = self.0.lock().expect("deep link queue");
+        let batches = queue.drain();
+        (batches, queue.dropped())
+    }
+
+    fn len(&self) -> usize {
+        self.0.lock().expect("deep link queue").len()
+    }
+}
+
+/// Hand over every URL remembered while no host was attached, then surface the window.
+///
+/// Called from the supervisor's ready callback. **Focusing the window is part of the
+/// decision, not a nicety**: the user just clicked a link, so the app must come to the
+/// front instead of doing something invisible behind other windows.
+///
+/// ⚠ If the peer has vanished again between ready and here, the batches go **back into the
+/// queue** rather than being dropped — that is the whole point of having one.
+#[cfg(desktop)]
+fn replay_pending_deep_links(app: &tauri::AppHandle) {
+    let (batches, dropped) = app.state::<DeepLinkPending>().take();
+    if batches.is_empty() {
+        return;
+    }
+    let Some(peer) = app.state::<HostState>().peer() else {
+        let pending = app.state::<DeepLinkPending>();
+        for batch in batches {
+            pending.push(batch);
+        }
+        eprintln!("[shell] deep link replay deferred: the host peer is gone again");
+        return;
+    };
+
+    let mut delivered = 0usize;
+    for urls in &batches {
+        match peer.notify("deepLink.opened", vec![json!({ "urls": urls })]) {
+            Ok(()) => delivered += 1,
+            Err(err) => eprintln!("[shell] deep link replay failed: {err}"),
+        }
+    }
+    let all_urls: Vec<String> = batches.into_iter().flatten().collect();
+    eprintln!(
+        "[shell] deep link replay: {delivered} activation(s) delivered after the host became \
+         ready ({dropped} dropped earlier by the {}-entry cap)",
+        deeplink::PENDING_CAP
+    );
+    if let Err(err) = app.emit(
+        "deep-link-opened",
+        json!({ "urls": all_urls, "delivery": "replayed" }),
+    ) {
+        eprintln!("[shell] emit deep-link-opened (replay): {err}");
+    }
+    if let Err(err) = tray::show_main_window(app) {
+        eprintln!("[shell] deep link replay could not focus the window: {err}");
     }
 }
 
@@ -238,6 +362,13 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(HostState::default())
         .manage(AppLifecycle::default());
+
+    // Deep links that arrived while no host was attached (issue #41 §7.1 item 4 = option A).
+    // Managed on desktop only, because the whole deep-link surface is.
+    #[cfg(desktop)]
+    {
+        builder = builder.manage(DeepLinkPending::default());
+    }
 
     // Desktop-only plugins. Declared under a `cfg(any(windows, macos, linux))`
     // target section in Cargo.toml AND gated here: the catalog's platform matrix
@@ -388,16 +519,30 @@ pub fn run() {
             // owns what a URL MEANS (log in, join an instance); the shell only
             // proves it arrived.
             //
-            // ⚠ This hook is currently UNREACHABLE, so it is the intended
-            // consumer for the day a scheme is chosen — not a working delivery
-            // path today. On Windows/Linux the emission is the config-gated
-            // `handle_cli_arguments` described on `init()` above, and no scheme
-            // is declared in `tauri.conf.json`. Registering one at runtime via
-            // `shell.deepLink.register` does NOT change that: the plugin's own
-            // docs say dynamic schemes "WON'T be processed" there. On macOS the
-            // plugin uses `RunEvent::Opened` instead (which does not read the
-            // config), but the bundle only advertises URL types the config
-            // declares, so the OS still has nothing to deliver.
+            // ⚠ Since issue #41 a scheme IS declared
+            // (`plugins.deep-link.desktop.schemes = ["vrcxk"]`), so on Windows/Linux the
+            // emission is the config-gated `handle_cli_arguments` and on macOS it is
+            // `RunEvent::Opened`. Before that the hook was wired but unreachable: the plugin's
+            // docs are explicit that dynamically registered schemes "WON'T be processed"
+            // there, so a runtime `register` could never have made it fire.
+            // ⚠ THE HOOK ALONE IS NOT ENOUGH ON WINDOWS/LINUX — the URL that LAUNCHED the app
+            // arrives before this listener exists, and is emitted into nothing:
+            //
+            //   - Tauri runs every plugin's `setup` inside `Builder::build()`
+            //     (`tauri-2.11.5/src/app.rs:2440` → `initialize_plugins`), and the deep-link
+            //     plugin's `init_deep_link` calls `handle_cli_arguments` there — which on
+            //     Windows/Linux parses argv and does `emit("deep-link://new-url", …)`
+            //     (`tauri-plugin-deep-link-2.4.10/src/lib.rs:75-81`, `:196-222`);
+            //   - THIS closure runs later (`app.rs:2521` → `setup(app)` → `app.setup.take()`).
+            //
+            // So a cold-start `vrcxk://…` fires into an empty listener set and is lost —
+            // measured: on Windows the app started, the host came up, and no URL ever arrived,
+            // while the same URL worked whenever the app was already running. macOS is
+            // unaffected because it uses `RunEvent::Opened` (after setup) instead of argv.
+            //
+            // `get_current()` is the plugin's own answer to this: it holds the URLs that
+            // triggered the launch. Draining it right after registering the listener makes the
+            // two orders equivalent, and it is harmless when nothing triggered the app.
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt as _;
@@ -407,6 +552,17 @@ pub fn run() {
                         event.urls().iter().map(|url| url.to_string()).collect();
                     forward_deep_link(&deeplink_handle, urls);
                 });
+                let launch_handle = app.handle().clone();
+                match app.deep_link().get_current() {
+                    Ok(Some(urls)) if !urls.is_empty() => {
+                        forward_deep_link(
+                            &launch_handle,
+                            urls.iter().map(|url| url.to_string()).collect(),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => eprintln!("[shell] deep link get_current: {err}"),
+                }
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -423,6 +579,14 @@ pub fn run() {
                     move |ready| {
                         if let Err(err) = ready_handle.emit("host-ready", &ready) {
                             eprintln!("[shell] emit host-ready: {err}");
+                        }
+                        // The peer is attached by now (`adopt_inflight` runs before this
+                        // callback), so anything the OS handed us while the host was still
+                        // coming up can be handed over instead of lost. See
+                        // `replay_pending_deep_links`.
+                        #[cfg(desktop)]
+                        {
+                            replay_pending_deep_links(&ready_handle);
                         }
                     },
                     &mut move |snapshot| {
@@ -510,6 +674,32 @@ pub fn run() {
 #[cfg(test)]
 mod packaging_tests {
     use serde_json::Value;
+
+    /// ⚠ The review finding this pins: the queue used to cover only "no peer yet", so the
+    /// **host-restart** window (peer present but dead → write fails) dropped the URL with a
+    /// lone stderr line — while §5.1 names that window as one of the two the queue exists for.
+    /// "The write failed" and "there is no peer" must therefore take the same path.
+    #[cfg(desktop)]
+    #[test]
+    fn a_failed_write_is_queued_exactly_like_a_missing_peer() {
+        use super::{deeplink_delivery, DeepLinkDelivery};
+
+        assert_eq!(
+            deeplink_delivery(&Some(Ok(()))),
+            DeepLinkDelivery::Delivered,
+            "a successful notify is still delivered"
+        );
+        assert_eq!(
+            deeplink_delivery(&None),
+            DeepLinkDelivery::Queued,
+            "no peer yet (cold start) queues"
+        );
+        assert_eq!(
+            deeplink_delivery(&Some(Err("broken pipe".to_string()))),
+            DeepLinkDelivery::Queued,
+            "⚠ a failed write is the host-restart window and must queue too, not be dropped"
+        );
+    }
 
     fn conf(name: &str) -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
@@ -602,6 +792,169 @@ mod packaging_tests {
             !hook.contains("build:host"),
             "the effective Android beforeBuildCommand must not run build:host: its product \
              is not bundled there (externalBin is empty), so the work is wasted. Got {hook:?}"
+        );
+    }
+
+    /// The deep-link scheme is **declared**, and this build's runtime gate reads the same
+    /// value — so the two can never disagree.
+    ///
+    /// ⚠ Why this is a test and not a comment. Issue #41's whole point is that the
+    /// capability was exposed while *nothing was declared*: the side effect (a registry /
+    /// `Info.plist` claim) existed but no URL could ever arrive. The failure is silent in
+    /// both directions, so it needs a gate:
+    ///
+    ///   - config without the key ⇒ the OS never delivers a URL (what the shell looked
+    ///     like before), and the runtime allowlist would refuse every name;
+    ///   - a name declared here that nobody meant ⇒ the installer claims it machine-wide.
+    ///
+    /// The declared deep-link schemes, lowercased, straight out of the config.
+    ///
+    /// Shared by the two tests below so "what is declared" has one reading in the tests as
+    /// well — a second extraction is how a test starts passing for the wrong reason.
+    fn declared_schemes_in(conf: &Value) -> Vec<String> {
+        at(conf, &["plugins", "deep-link", "desktop"])
+            .as_ref()
+            .and_then(|value| at(value, &["schemes"]))
+            .and_then(|value| {
+                value.as_array().map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_ascii_lowercase)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// The owner's decision (issue #41 §7.1 item 1) is the single name `vrcxk`;
+    /// `docs/hands-prior-art.md` §2.1/§2.3 records why `vrcx` and `vrchat` cannot be used.
+    #[test]
+    fn the_deep_link_scheme_is_declared_and_is_exactly_vrcxk() {
+        let base = conf("tauri.conf.json");
+        let schemes = declared_schemes_in(&base);
+        assert_eq!(
+            schemes,
+            vec!["vrcxk".to_string()],
+            "plugins.deep-link.desktop.schemes must declare exactly [\"vrcxk\"] (issue #41 \
+             §7.1 item 1). Declaring none means the OS never delivers a URL; declaring extra \
+             names means the installer claims them machine-wide. Got {:?}",
+            at(&base, &["plugins", "deep-link", "desktop"])
+        );
+
+        // The runtime gate parses this very subtree, so pin the shape it must accept —
+        // a single object, which is `DesktopDeepLinks::One` upstream.
+        let parsed = crate::shell_sys::declared_schemes(
+            base.get("plugins").and_then(|p| p.get("deep-link")),
+        );
+        assert_eq!(
+            parsed,
+            vec!["vrcxk".to_string()],
+            "the runtime allowlist must read the declared name from the config; a mismatch \
+             here makes every registration refuse with 'not declared'"
+        );
+    }
+
+    /// Declaring a scheme and cleaning it up on uninstall are **one** change.
+    ///
+    /// ⚠ This is the test that makes "add another scheme" safe. `plugins.deep-link.desktop.schemes`
+    /// makes the bundler register the name on four platforms; the NSIS uninstall path is what
+    /// removes the Windows one again. A name added to the config without a matching
+    /// `DeleteRegKey` in `windows/hooks.nsh` leaves a machine-wide registry key behind on every
+    /// uninstall — and **nothing else in the build could notice**, because the two live in
+    /// different files with no compiler, generator or schema between them. That is exactly the
+    /// class of drift this project keeps replacing with a gate.
+    ///
+    /// The hook file is read as TEXT on purpose: the property is about the file's content, and
+    /// no amount of running the app can observe it (the same technique as
+    /// `the_desktop_only_helpers_are_gated_and_listed`).
+    ///
+    /// ⚠ What this test does NOT cover: the MSI/WiX path writes the scheme under
+    /// `Root="HKLM"` and is cleaned up by MSI component semantics instead. That half is
+    /// unverified and is recorded as such in `docs/deep-link-decisions.md` §7.2.
+    #[test]
+    fn the_uninstaller_cleans_up_every_declared_scheme() {
+        let base = conf("tauri.conf.json");
+        let schemes = declared_schemes_in(&base);
+        assert!(
+            !schemes.is_empty(),
+            "there is nothing to clean up only because nothing is declared — which is itself \
+             the #41 defect, and it is pinned by the test above"
+        );
+
+        let hook_rel = at(&base, &["bundle", "windows", "nsis", "installerHooks"])
+            .and_then(|value| value.as_str().map(str::to_string))
+            .expect(
+                "bundle.windows.nsis.installerHooks must point at the cleanup hook: the \
+                 upstream template's own delete is guarded by exact command-string equality, \
+                 so four real cases leave the key registered machine-wide",
+            );
+        let hook_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&hook_rel);
+        let hook = std::fs::read_to_string(&hook_path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", hook_path.display()));
+
+        assert!(
+            hook.contains("!macro NSIS_HOOK_POSTUNINSTALL"),
+            "{} must define the uninstall hook, or Tauri includes a file that does nothing",
+            hook_path.display()
+        );
+        for scheme in &schemes {
+            let expected = format!("DeleteRegKey HKCU \"Software\\Classes\\{scheme}\"");
+            assert!(
+                hook.contains(&expected),
+                "{} declares the scheme {scheme:?} but does not delete it on uninstall \
+                 (expected a line containing `{expected}`). Adding a scheme means adding its \
+                 cleanup — see the file's header for why the bound is one exact name.",
+                hook_path.display()
+            );
+        }
+    }
+
+    /// ⚠ The write side of the same invariant (PR #49 review ③): the installer must **refuse** to
+    /// take over a class key it does not own, and that refusal lives in our hooks file — upstream
+    /// writes the key with four bare `WriteRegStr` calls and no check at all.
+    ///
+    /// Same drift risk as the cleanup test, same technique: the two sides live in different files
+    /// (`tauri.conf.json` and `windows/hooks.nsh`) with nothing between them, so a scheme added to
+    /// the config without a matching pre-install probe would silently install over somebody else's
+    /// handler on every machine.
+    #[test]
+    fn the_installer_refuses_to_take_over_every_declared_scheme() {
+        let base = conf("tauri.conf.json");
+        let schemes = declared_schemes_in(&base);
+        assert!(
+            !schemes.is_empty(),
+            "nothing declared — pinned by the test above"
+        );
+
+        let hook_rel = at(&base, &["bundle", "windows", "nsis", "installerHooks"])
+            .and_then(|value| value.as_str().map(str::to_string))
+            .expect("bundle.windows.nsis.installerHooks must point at the hook file");
+        let hook_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&hook_rel);
+        let hook = std::fs::read_to_string(&hook_path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", hook_path.display()));
+
+        assert!(
+            hook.contains("!macro NSIS_HOOK_PREINSTALL"),
+            "{} must define the pre-install hook: without it the installer overwrites whatever \
+             already owns the scheme name, and an existing class key cannot be restored",
+            hook_path.display()
+        );
+        for scheme in &schemes {
+            let expected = format!("Software\\Classes\\{scheme}\\shell\\open\\command");
+            assert!(
+                hook.contains(&expected),
+                "{} declares the scheme {scheme:?} but the pre-install hook never reads \
+                 `{expected}` ('{scheme}' is the argument to the whole pre-install check). \
+                 Adding a scheme means adding both its probe and its cleanup.",
+                hook_path.display()
+            );
+        }
+        // A refusal that reports success is not a refusal: silent runs show no dialog, so the
+        // abort has to set the exit code (measured: aborted ⇒ 1, successful ⇒ 0).
+        assert!(
+            hook.contains("SetErrorLevel 1"),
+            "the pre-install refusal must force a non-zero exit code, or a silent install that \
+             refused looks exactly like one that succeeded"
         );
     }
 }
