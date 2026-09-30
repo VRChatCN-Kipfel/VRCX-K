@@ -122,16 +122,27 @@ fn autostart_flag(args: &[Value]) -> Result<bool, Value> {
 //
 //   ⚠ The deep-link gate added for issue #41 is desktop-only for the same reason:
 //   `declared_schemes`, `declared_schemes_of`, `registration_verdict` and
-//   `claims_of` are reached ONLY from the `shell.deepLink.register` /
+//   `claims_of` are reached ONLY from the `shell.deepLink.registerAll` /
 //   `shell.deepLink.unregister` handlers in the desktop block. (`claim_in_root` and
 //   `claims_from_registry` are additionally `target_os = "windows"`-gated, so they are
 //   deliberately NOT in the list — the list covers `#[cfg(desktop)]` items that exist on
 //   every desktop.)
 //
+//   ⚠ Since **stack layer 4** the syntax/reserved-name cluster (`MAX_SCHEME_LEN`,
+//   `RESERVED_SCHEMES`, `RESERVED_REGISTRY_CLASSES`, `is_scheme_char`,
+//   `validate_deep_link_scheme`) is `#[cfg(test)]` instead: the write route lost its name
+//   parameter, so that knowledge is now enforced against `tauri.conf.json` at config time and
+//   must not be compiled into the shell. The reverse check in the test below would flag a
+//   `#[cfg(desktop)]` item missing from the list, so this split is enforced, not merely noted.
+//
 //   Do NOT "clean these up" by deleting them: the day deep-link or autostart is
 //   wired for Android, these are exactly what must be reached.
 
-#[cfg(desktop)]
+/// ⚠ `#[cfg(test)]`, NOT `#[cfg(desktop)]`, since **stack layer 4** (issue #41): the write route
+/// no longer takes a name, so a scheme can only be wrong by being **declared in
+/// `tauri.conf.json`** — that is where this knowledge is now enforced
+/// (`every_declared_scheme_is_a_legal_name` in the tests below), and it must not ship.
+#[cfg(test)]
 /// Longest scheme this surface accepts.
 ///
 /// RFC 3986 sets no length limit, so the number is a deliberate choice rather
@@ -143,7 +154,10 @@ fn autostart_flag(args: &[Value]) -> Result<bool, Value> {
 /// value whose only notable property is being long.
 const MAX_SCHEME_LEN: usize = 32;
 
-#[cfg(desktop)]
+/// ⚠ `#[cfg(test)]` since stack layer 4 (issue #41) — see [`MAX_SCHEME_LEN`]. The list is kept
+/// in full because it is the CONFIG-time assertion's input: declaring one of these names in
+/// `tauri.conf.json` is now the only way to hit it.
+#[cfg(test)]
 /// Windows registry classes that EXIST on a stock install, under
 /// `HKEY_CLASSES_ROOT` / `HKCU\Software\Classes`.
 ///
@@ -272,7 +286,8 @@ const RESERVED_REGISTRY_CLASSES: &[&str] = &[
     "printto",
 ];
 
-#[cfg(desktop)]
+/// ⚠ `#[cfg(test)]` since stack layer 4 (issue #41) — see [`MAX_SCHEME_LEN`].
+#[cfg(test)]
 /// Schemes this app must never claim.
 ///
 /// ⚠ The last two entries are deliberate — do NOT "helpfully" remove them:
@@ -297,7 +312,8 @@ const RESERVED_SCHEMES: &[&str] = &[
     "vrcx",
 ];
 
-#[cfg(desktop)]
+/// ⚠ `#[cfg(test)]` since stack layer 4 (issue #41) — see [`MAX_SCHEME_LEN`].
+#[cfg(test)]
 /// Is `c` allowed in a scheme **after** the first character?
 ///
 /// RFC 3986 §3.1: `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. The set
@@ -309,18 +325,26 @@ fn is_scheme_char(c: char) -> bool {
     matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '+' | '-' | '.')
 }
 
-#[cfg(desktop)]
+/// ⚠ `#[cfg(test)]` since stack layer 4 (issue #41) — the runtime write route no longer accepts
+/// a name, so this is now the CONFIG-time assertion's implementation
+/// (`every_declared_scheme_is_a_legal_name`), not a per-call gate.
+#[cfg(test)]
 /// Validate a scheme name before it reaches the OS.
 ///
 /// # Why this exists
 ///
+/// ⚠ **Read this with stack layer 4 in mind**: this function is `#[cfg(test)]` now, and it is
+/// the CONFIG-time assertion's implementation — the runtime write route has no name parameter
+/// left to validate. It is kept (rather than deleted) because the knowledge it carries is still
+/// the thing that must be true of `tauri.conf.json`: whatever is declared there lands in the
+/// registry verbatim.
+///
 /// On Windows `DeepLink::register` writes the string **straight into the
 /// registry**: it creates `Software\Classes\<scheme>` plus a `DefaultIcon` and a
 /// `shell\open\command` value (verified in `tauri-plugin-deep-link` 2.4.10,
-/// `src/lib.rs:259-281`). That is an unvalidated, **persistent** side effect on
-/// input that arrives from plugin code through the host, i.e. it is not trusted.
-/// A caller passing `"*"` would claim every file type, and — see the correction
-/// below — this surface offers no way back.
+/// `src/lib.rs:259-281`). That is an unvalidated, **persistent** side effect —
+/// which is why the name is now pinned at config time instead of arriving per call.
+/// A declared `"*"` would claim every file type on the machine.
 ///
 /// # ⚠ Correction: the plugin DOES ship an unregister, and we do not expose it
 ///
@@ -334,10 +358,9 @@ fn is_scheme_char(c: char) -> bool {
 ///     `Software\Classes\<scheme>` from **both** `LOCAL_MACHINE` and
 ///     `CURRENT_USER`. The mobile `imp` (line 145) is the stub that returns
 ///     `UnsupportedPlatform` — the desktop one is real.
-///   - This module registers only `shell.deepLink.register` and
-///     `shell.deepLink.isRegistered`. **There is no `shell.deepLink.unregister`
-///     route**, so no host or plugin caller can reach the working upstream
-///     function. The permanence is OUR gap, not the plugin's.
+///   - This module registers `shell.deepLink.registerAll`, `shell.deepLink.unregister` and
+///     `shell.deepLink.isRegistered`. (Before stack layer 4 the write route was
+///     `shell.deepLink.register(scheme)` — a parameter nobody passed; see the handler.)
 ///
 /// ⚠ That matters for the residual-risk argument: an unregister route would make
 /// a bad registration recoverable, and its absence is the reason the collision
@@ -501,17 +524,23 @@ fn declared_schemes_of(app: &AppHandle) -> Vec<String> {
 }
 
 #[cfg(desktop)]
-/// The **one** gate both `register` and `unregister` pass through.
+/// The gate both `registerAll` and `unregister` pass through.
 ///
 /// Refuses, in order:
 ///
-/// 1. a syntactically illegal or reserved name ([`validate_deep_link_scheme`]);
-/// 2. a name this build does **not declare** — the owner's decision (issue #41 §7.1 item 2)
-///    is that runtime registration is limited to the declared allowlist, so the blacklist
-///    in (1) is a floor, not the gate;
-/// 3. an existing handler we cannot show is ours ([`SchemeClaim::Foreign`]).
+/// 1. a name this build does **not declare** — the owner's decision (issue #41 §7.1 item 2)
+///    is that what reaches the OS is limited to the declared names. `registerAll` iterates the
+///    declared list itself, so this check passes by construction there; it is `unregister`
+///    (which still takes a caller-supplied name) that needs it as a gate;
+/// 2. an existing handler we cannot show is ours ([`SchemeClaim::Foreign`]).
 ///
-/// ⚠ (3) is not a formality. It is the only thing standing between a plugin-visible
+/// ⚠ **The syntax/reserved-name gate is no longer here** (stack layer 4, issue #41): the write
+/// route has no name parameter to validate, so that knowledge moved to where a name can still be
+/// wrong — `tauri.conf.json` — and is enforced by `every_declared_scheme_is_a_legal_name`. Keeping
+/// it here as well would have been a second copy of the same truth, checked at a point where the
+/// only possible inputs have already been validated.
+///
+/// ⚠ (2) is not a formality. It is the only thing standing between a plugin-visible
 /// capability and "this machine's `Software\Classes\<name>` now points at us, and no
 /// recorded value can bring it back".
 ///
@@ -523,7 +552,6 @@ pub fn registration_verdict(
     declared: &[String],
     claims: &[(&str, SchemeClaim)],
 ) -> Result<(), String> {
-    validate_deep_link_scheme(scheme)?;
     let lowered = scheme.to_ascii_lowercase();
     if !declared.iter().any(|name| name == &lowered) {
         return Err(format!(
@@ -923,59 +951,73 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
         );
 
         // --- deep link ------------------------------------------------------
-        // shell.deepLink.register(scheme) -> { ok, error? }
-        // Runtime registration works on Windows/Linux only; on macOS the scheme
-        // must be declared in tauri.conf.json. Reported rather than swallowed:
-        // a scheme that silently failed to register is indistinguishable from a
-        // link nobody clicked.
+        // shell.deepLink.registerAll() -> { ok, registered: [...], refused: [...], error? }
         //
-        // ⚠ The scheme is validated before it reaches the OS: the upstream
-        // Windows path writes it into the registry as a new class (see
-        // `validate_deep_link_scheme`), so a bad value here is a persistent
-        // machine-wide change, not a failed call. A rejected scheme never
-        // touches the plugin.
+        // ⚠ NO NAME PARAMETER, ON PURPOSE (stack layer 4; proposal recorded on issue #41).
+        // This route used to be `register(scheme)`: a write entry point that accepted an
+        // arbitrary name, guarded by a syntax gate, a 51-entry registry-class blacklist, a
+        // declared-name allowlist and a per-root ownership probe — **defended by four layers
+        // and called by nobody** (the plugin mirror was dropped in #40, the host type face
+        // never had it, and nothing else calls it). Upstream already ships the shape that
+        // makes the parameter disappear: `DeepLink::register_all()` registers exactly
+        // `config.desktop.schemes()`.
         //
-        // ⚠ TWO GATES before the OS is touched, and both are load-bearing:
+        // So the invariant "only names this build declares can be registered" is no longer
+        // *enforced* on every call — it is **structural**: there is no value to pass.
+        // The syntax/reserved-name/registry-class knowledge did not vanish; it moved to where
+        // a name can still be wrong, namely the CONFIG, and is enforced by
+        // `every_declared_scheme_is_a_legal_name` in this file's tests.
         //
-        //   1. `validate_deep_link_scheme` — syntax plus the reserved-name/class lists.
-        //      Run FIRST because it is pure: a caller sending `*` must not even cause a
-        //      registry read.
-        //   2. `registration_verdict` — AFTER the platform ownership probe, i.e. after
-        //      I/O. It enforces the declared allowlist AND refuses to overwrite a handler
-        //      this app does not own (issue #41 §7.1 item 2; see its doc comment).
+        // ⚠ What is NOT structural, and therefore stays a runtime gate: **ownership**. Writing
+        // a class key that somebody else owns is still possible (it is the same name we
+        // declared), it is still irreversible, and the installer side now refuses it too
+        // (`NSIS_HOOK_PREINSTALL`). So every scheme still goes through the per-root probe
+        // before the OS is touched.
         //
-        // ⚠ `scheme` IS PRESENT ON ALL THREE PATHS, and its meaning is "the value
-        // you asked to register" — NOT "what the OS now routes".
-        //
-        // A first version omitted it on the validation-rejection path, reasoning
-        // that an unregistered value beside `ok: false` would be misleading. The
-        // asymmetric SHAPE was the worse problem: a caller reading
-        // `result.scheme` would get the value on success and on plugin failure but
-        // `undefined` on rejection, so every error handler would have to know
-        // which failure it was looking at to read its own input back. Presence is
-        // now uniform and `ok` carries the outcome.
+        // ⚠ `args` is REFUSED rather than ignored: a caller that still passes a scheme gets a
+        // loud error naming the shape change, not a silent no-op that looks like success —
+        // silently ignoring an argument is how a caller keeps believing it chose the name.
         peer.on(
-            "shell.deepLink.register",
+            "shell.deepLink.registerAll",
             handler(app.clone(), |app, args| {
-                let scheme = str_arg(args, 0);
-                if let Err(reason) = validate_deep_link_scheme(&scheme) {
-                    eprintln!("[shell] deep-link register {scheme:?}: {reason}");
-                    // No `scheme` is registered — `ok: false` says so.
-                    return json!({ "ok": false, "scheme": scheme, "error": reason });
+                if !args.is_empty() {
+                    let reason = "shell.deepLink.registerAll takes no arguments: the writable \
+                                  set is exactly plugins.deep-link.desktop.schemes in \
+                                  tauri.conf.json (the route was `register(scheme)` before \
+                                  stack layer 4 of issue #41)";
+                    eprintln!("[shell] deep-link registerAll: {reason}");
+                    return json!({ "ok": false, "error": reason });
                 }
                 let declared = declared_schemes_of(app);
-                let claims = claims_of(app, &scheme);
-                if let Err(reason) = registration_verdict(&scheme, &declared, &claims) {
-                    eprintln!("[shell] deep-link register {scheme:?}: {reason}");
-                    return json!({ "ok": false, "scheme": scheme, "error": reason });
+                if declared.is_empty() {
+                    let reason =
+                        "this build declares no scheme (plugins.deep-link.desktop.schemes \
+                                  is empty), so there is nothing to register";
+                    eprintln!("[shell] deep-link registerAll: {reason}");
+                    return json!({ "ok": false, "error": reason, "registered": [] });
                 }
-                match app.deep_link().register(scheme.clone()) {
-                    Ok(()) => json!({ "ok": true, "scheme": scheme }),
-                    Err(err) => {
-                        eprintln!("[shell] deep-link register {scheme}: {err}");
-                        json!({ "ok": false, "scheme": scheme, "error": err.to_string() })
+                let mut registered: Vec<String> = Vec::new();
+                let mut refused: Vec<Value> = Vec::new();
+                for scheme in &declared {
+                    let claims = claims_of(app, scheme);
+                    if let Err(reason) = registration_verdict(scheme, &declared, &claims) {
+                        eprintln!("[shell] deep-link registerAll {scheme:?}: {reason}");
+                        refused.push(json!({ "scheme": scheme, "error": reason }));
+                        continue;
+                    }
+                    match app.deep_link().register(scheme.clone()) {
+                        Ok(()) => registered.push(scheme.clone()),
+                        Err(err) => {
+                            eprintln!("[shell] deep-link registerAll {scheme}: {err}");
+                            refused.push(json!({ "scheme": scheme, "error": err.to_string() }));
+                        }
                     }
                 }
+                json!({
+                    "ok": refused.is_empty(),
+                    "registered": registered,
+                    "refused": refused,
+                })
             }),
         );
         // shell.deepLink.unregister(scheme) -> { ok, scheme, removed, error? }
@@ -999,15 +1041,15 @@ pub fn register_shell_handlers(peer: &Arc<Peer>, app: AppHandle) {
             "shell.deepLink.unregister",
             handler(app.clone(), |app, args| {
                 let scheme = str_arg(args, 0);
-                if let Err(reason) = validate_deep_link_scheme(&scheme) {
-                    eprintln!("[shell] deep-link unregister {scheme:?}: {reason}");
-                    return json!({
-                        "ok": false,
-                        "scheme": scheme,
-                        "removed": false,
-                        "error": reason
-                    });
-                }
+                // ⚠ The syntax/reserved-name check that used to sit here is GONE (stack layer 4):
+                // the next two lines already narrow the input to a **declared** name, and every
+                // declared name is proven legal at config time
+                // (`every_declared_scheme_is_a_legal_name`). Keeping a third copy of the same
+                // truth would be a gate whose only possible inputs have passed it twice.
+                //
+                // ⚠ The registry probe below still runs with the raw string, and that is fine: it
+                // is a READ, and the verdict refuses anything undeclared before the write path
+                // (`remove_tree`) is reachable.
                 let declared = declared_schemes_of(app);
                 let claims = claims_of(app, &scheme);
                 if let Err(reason) = registration_verdict(&scheme, &declared, &claims) {
@@ -1678,18 +1720,18 @@ mod tests {
         const SOURCE: &str = include_str!("shell_sys.rs");
 
         // Keep this in lockstep with the note above the helpers.
+        //
+        // ⚠ `MAX_SCHEME_LEN` / `RESERVED_SCHEMES` / `RESERVED_REGISTRY_CLASSES` /
+        // `is_scheme_char` / `validate_deep_link_scheme` are NOT here since stack layer 4: they
+        // are `#[cfg(test)]` now (the config-time assertion's implementation), and this list is
+        // specifically the desktop-only helpers. The reverse check below enforces that split.
         const NAMED: &[&str] = &[
-            "MAX_SCHEME_LEN",
-            "RESERVED_REGISTRY_CLASSES",
-            "RESERVED_SCHEMES",
             "autostart_flag",
             "claims_of",
             "declared_schemes",
             "declared_schemes_of",
-            "is_scheme_char",
             "json_type_name",
             "registration_verdict",
-            "validate_deep_link_scheme",
         ];
 
         let lines: Vec<&str> = SOURCE.lines().collect();
@@ -1844,6 +1886,93 @@ mod tests {
     // These exercise the pure reader, because the alternative — trusting that a
     // hand-written `const` in Rust matches the config — is exactly the silent drift the
     // runtime read exists to remove.
+
+    /// ⚠ **The config-time assertion** (stack layer 4, issue #41): the write route no longer
+    /// takes a name, so the only remaining way to get a bad name into the registry is to declare
+    /// it in `tauri.conf.json`. That moves the syntax/reserved-name/registry-class checks from
+    /// "every call" to "every build" — and gives them a *better* subject, because a declared name
+    /// is exactly what the bundler will write on all four platforms.
+    ///
+    /// This reads the real config file (not a fixture): the property under test is about the file
+    /// that ships. The knowledge it enforces lives in [`validate_deep_link_scheme`], which is
+    /// `#[cfg(test)]` for the same reason — it must not be compiled into the shell.
+    #[test]
+    fn every_declared_scheme_is_a_legal_name() {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"),
+        )
+        .expect("tauri.conf.json must be readable");
+        let config: serde_json::Value =
+            serde_json::from_str(&text).expect("tauri.conf.json must be valid JSON");
+        let schemes = declared_schemes(config.get("plugins").and_then(|p| p.get("deep-link")));
+        assert!(
+            !schemes.is_empty(),
+            "no scheme is declared, so this test would pass without checking anything — that \
+             absence is itself the issue #41 defect and is pinned by the packaging test"
+        );
+
+        for scheme in &schemes {
+            if let Err(reason) = validate_deep_link_scheme(scheme) {
+                panic!(
+                    "tauri.conf.json declares the scheme {scheme:?}, which this build's own gate \
+                     refuses: {reason}. The bundler writes declared names verbatim into \
+                     Software\\Classes / CFBundleURLTypes / x-scheme-handler on all four \
+                     platforms, so the config IS the input now — fix the name, not the gate."
+                );
+            }
+        }
+        // A second, independent property: the parser lowercases, so comparing the declared
+        // spelling against the lowered one keeps a config that differs only in case from
+        // silently registering a name the allowlist would then refuse at runtime.
+        for scheme in &schemes {
+            assert_eq!(
+                scheme,
+                &scheme.to_ascii_lowercase(),
+                "declared names must already be lowercase in the config: the reader lowercases \
+                 them, and a mixed-case declaration would make the config and the runtime gate \
+                 disagree about the same name"
+            );
+        }
+    }
+
+    /// ⚠ The property stack layer 4 exists for: **the write route takes no name**, so "only a
+    /// declared name can be registered" is structural rather than enforced per call.
+    ///
+    /// Same technique as the gating test above (read our own source as text): no amount of
+    /// calling the handler can observe that it *has no parameter* — the property is about the
+    /// shape of the code.
+    #[test]
+    fn the_write_route_takes_no_scheme_argument() {
+        const SOURCE: &str = include_str!("shell_sys.rs");
+
+        assert!(
+            SOURCE.contains(r#""shell.deepLink.registerAll""#),
+            "the write route must be registered as `shell.deepLink.registerAll`"
+        );
+        // The exact quoted literal, closing quote included — so `…registerAll"` does not match.
+        //
+        // ⚠ `concat!` splits the NAME, not just the quotes, and that is not cosmetic:
+        // `include_str!` reads THIS TEST's source too. Splitting only the quotes still leaves the
+        // contiguous literal in the source (`…\"shell.deepLink.register` + `"`), so the assertion
+        // counted itself and always failed — twice, in two differently-wrong versions.
+        const FORBIDDEN: &str = concat!("\"shell.deepLink.", "register\"");
+        assert_eq!(
+            SOURCE.matches(FORBIDDEN).count(),
+            0,
+            "the parameterised `shell.deepLink.register` route must be gone: leaving it (even \
+             unused) is how a name parameter grows back"
+        );
+        assert!(
+            SOURCE.contains("args.is_empty()"),
+            "the write route must REFUSE an argument rather than ignore it — a silently ignored \
+             scheme is a caller that keeps believing it chose the name"
+        );
+        assert!(
+            SOURCE.contains("fn validate_deep_link_scheme"),
+            "the syntax/reserved-name knowledge must still exist (as the config-time assertion's \
+             implementation) — this layer relocates it, it does not delete it"
+        );
+    }
 
     #[test]
     fn declared_schemes_reads_the_object_shape() {

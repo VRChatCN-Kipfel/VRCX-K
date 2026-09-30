@@ -386,6 +386,48 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
    **重放后把主窗口带到前台**。理由见 §5.1(A)：用户刚点了链接，应用必须出现在前面，
    而不是在别的窗口后面默默做事。
 
+### 7.3 后续结论（stack 第 4 层，2026-09-29）：**item 2 的前提条件被移除**
+
+> 出处：kipfel-bot 对 #48/#49/#50 这条 stack 的逐层评审汇成的提案
+> （[issue #41 的「新结论」评论](https://github.com/VRChatCN-Kipfel/VRCX-K/issues/41)，方向已由仓库作者认可），
+> 以及本轮实现（分支 `issue-41/4-register-collapse`）。
+
+### 7.3.1 事实：那个"可以被传进去的名字"，没有人传
+
+| 机制 | 它在守什么 |
+|---|---|
+| `validate_deep_link_scheme`（语法 + `RESERVED_SCHEMES` + 51 条 `RESERVED_REGISTRY_CLASSES`） | 调用方传进来的 `scheme` |
+| `declared_schemes` / `declared_schemes_of` + `registration_verdict` 的 allowlist | 同上 |
+| 归属探测（`SchemeClaim` / `claim_in_root` / `claims_from_registry`） | 同上 |
+
+而**调用方是零**：插件面在 #40 就被摘掉（两层镜像都没有 `register`）、宿主类型面只有 `onOpen`
+与（#49 加的）`unregister`、脸不碰、测试与探针不调用。它残余的唯一用途是 dev 与 AppImage 的兜底 ——
+而那条路**不需要名字参数**：上游 `DeepLink::register_all()` 就是"照着 config 声明逐个注册"。
+
+### 7.3.2 改动：写入口去掉参数，守卫换到它真正能被违反的地方
+
+- **写路由 `shell.deepLink.register(scheme)` → `shell.deepLink.registerAll()`**（无参数；且**显式拒绝**任何实参，
+  而不是忽略它 —— 静默忽略会让调用方继续以为自己选了名字）。它遍历 config 声明的名字，逐个过归属探测再注册，
+  返回 `{ ok, registered, refused }`。
+- **语法/保留名/stock 类键那簇知识搬到配置期**：它们现在 `#[cfg(test)]`，由
+  `every_declared_scheme_is_a_legal_name` 断言 `tauri.conf.json` 里声明的每个名字都合法、且非保留。
+  ⇒ 同一批知识，换到**唯一还能出错的地方**（config 是 bundler 会逐字写进注册表/`CFBundleURLTypes` 的输入），
+  而且不再编进产物。
+- **归属探测留着，仍是运行时门**：写一个别人的类键依然可能（名字是我们自己声明的）、依然不可恢复。
+  ⇒ 每个 scheme 在碰 OS 之前都过一遍双 root 探测（§7.1 item 2 的同一个判据）。
+- **`unregister` 的形状不变**：它**仍收名字**，所以 allowlist 与归属探测都继续生效 —— 这也是为什么
+  本次**没有**删掉 `registration_verdict`（它现在专守 `unregister`，并按"前提被移除"而不是"推翻 item 2"记账）。
+
+⚠ **诚实地说，本轮几乎没有删除**：那簇代码并没有变成死码，因为 `unregister` 仍然参数化；
+变的是**写入口的形状**（没有任何值可以传进去），以及语法那簇的**执行时机**（每次调用 → 每次构建）。
+这正是提案 §5 自己要求的"先确认那 300 行里没有别处复用的部分再删"的结果。
+
+### 7.3.3 本层**不**解决什么（避免读者误推）
+
+- **HKLM/HKCU 不对称**：MSI 把类键写在 `Root="HKLM"`，而运行时不安装器；两边语义仍不一致（§7.2 #3）。
+- **卸载残留**：仍由 NSIS 钩子 + 模板判据承担（§4.1）。
+- **安装器侧的归属判据**：已在 #49 的 `NSIS_HOOK_PREINSTALL` 落地，本层不改它。
+
 ---
 
 ## 8. 未核实 / 未验证（诚实边界）
@@ -435,6 +477,7 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 >    而冷启动与宿主重启窗口恰好都在这个分支上。所以 ④ 不只是「谁消费」，还有「怎么不丢」。
 >
 > 需要裁定四条（§7）：scheme 名字 / unregister 暴露面 / 安装器是否继续同时发 NSIS+MSI / URL 丢失语义。
+> ⚠ 这句是**草稿撰写时**的状态：四条已于 2026-09-28 全部裁定（§7.1），后续结论见 §7.3。
 > 其中第 1、2 条不定，第 1 步无法开工；**第 0 步那四项（unregister 路由、真实注册表冲突测试、
 > 未投递队列、已知边界文档）不依赖任何裁定，可以并行推进。**
 
