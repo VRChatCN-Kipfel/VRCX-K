@@ -502,9 +502,19 @@ export type ShellSysAPI = {
      * honest about what the host is allowed to ask for — leaving it declared would
      * let a future caller "restore" the capability by writing one arrow function,
      * which is exactly how a deliberate removal gets undone by accident.
+     *
+     * ⚠ `unregister` IS here while `register` is not, and that asymmetry is the
+     * owner's decision (issue #41 §7.1 item 2, "selective exposure"): the undo is
+     * reachable from the host and the face — which is what `HostWsAPI.deepLink`
+     * exists for — and NOT from a plugin, because nothing on the plugin's side
+     * (neither the curated services nor the raw `ctx.shell` mirror) lists it. The
+     * shell additionally bounds it to the names this build declares and refuses to
+     * remove a key it does not own, so the worst a caller can do is undo our own
+     * registration.
      */
     deepLink?: {
       isRegistered(scheme: string): Promise<boolean>
+      unregister(scheme: string): Promise<DeepLinkUnregisterResult>
     }
   }
   /**
@@ -567,11 +577,33 @@ export type ShellShortcutBridge = {
 /**
  * Host-facing view of the deep-link side of the shell bridge (desktop only).
  *
- * A purely local registration: `deepLink.opened` arrives on the exposed API, not
- * through the remote proxy.
+ * `onOpen` is a purely local registration: `deepLink.opened` arrives on the exposed
+ * API, not through the remote proxy.
  */
 export type ShellDeepLinkBridge = {
   onOpen(handler: (event: DeepLinkEvent) => void): () => void
+  /**
+   * Undo a registration under a name this build declares.
+   *
+   * ⚠ OPTIONAL on purpose: it is absent against a shell that predates the route
+   * (issue #41 §7.1 item 2 added it), and "this shell cannot undo it" is a
+   * different answer from "no shell is attached". Callers must not treat a missing
+   * method as a failed removal.
+   */
+  unregister?: (scheme: string) => Promise<DeepLinkUnregisterResult>
+}
+
+/**
+ * Result of `shell.deepLink.unregister` — mirrors the shell's verdict object.
+ *
+ * `removed: false` with `ok: true` means "there was nothing registered under that
+ * name", which is a legitimate answer to asking twice rather than an error.
+ */
+export type DeepLinkUnregisterResult = {
+  ok: boolean
+  scheme: string
+  removed?: boolean
+  error?: string
 }
 
 export type ShellStdioBridge = ShellSysAPI & {
@@ -612,17 +644,53 @@ export type ShellHandsHelloBridge = {
  * `tray.action` and `shortcut.pressed` both arrive on the exposed API and must
  * fan out to every local subscriber without one throwing handler breaking the
  * RPC channel. One implementation, so the two cannot drift apart.
+ *
+ * # ⚠ `retainUntilSubscribed` — a notification must not vanish into the startup window
+ *
+ * The host's expose table exists **before** the services that consume these notifications
+ * subscribe to them (`index.ts` attaches them after `shell.ready`), so a notification that
+ * arrives in between is emitted into an empty handler set and lost. That is not theoretical:
+ * it was **measured on macOS** for the URL that LAUNCHES the app (issue #41 decision ④) —
+ * `deepLink.opened` arrived with the transport already up, no subscriber yet, and the
+ * activation disappeared with nothing in any log.
+ *
+ * With this option the fanout keeps the **latest** value until the first subscriber arrives,
+ * then hands it over. One slot, deliberately: this is a startup-window buffer, and the newest
+ * activation is the one a user is still waiting for.
+ *
+ * ⚠ Why only the deep-link notification opts in: a URL remains a valid intent seconds later,
+ * whereas a tray click or a hotkey press is a momentary input — replaying one after startup
+ * could fire an action the user has long moved past. Dropping a transient input is the
+ * defensible behaviour; dropping a link is not.
  */
-function fanout<T>(label: string) {
+function fanout<T>(label: string, options: { retainUntilSubscribed?: boolean } = {}) {
   const handlers = new Set<(value: T) => void>()
+  let retained: T | undefined
+  let hasRetained = false
   return {
     on(handler: (value: T) => void): () => void {
       handlers.add(handler)
+      if (options.retainUntilSubscribed && hasRetained && handlers.size === 1) {
+        const pending = retained as T
+        retained = undefined
+        hasRetained = false
+        try {
+          handler(pending)
+        } catch (error) {
+          console.error(`[host] ${label} handler error`, error)
+        }
+      }
       return () => {
         handlers.delete(handler)
       }
     },
     emit(value: T): void {
+      if (options.retainUntilSubscribed && handlers.size === 0) {
+        retained = value
+        hasRetained = true
+        console.error(`[host] ${label} arrived before any subscriber — retained for the first one`)
+        return
+      }
       for (const handler of [...handlers]) {
         try {
           handler(value)
@@ -748,7 +816,10 @@ export function connectShellStdio(
 ): ShellStdioBridge {
   const trayActions = fanout<TrayActionEvent>("tray.action")
   const shortcutPresses = fanout<ShortcutPressEvent>("shortcut.pressed")
-  const deepLinks = fanout<DeepLinkEvent>("deepLink.opened")
+  // ⚠ The ONLY fanout that retains: the URL that launches the app arrives before
+  // `ctx.deepLink` subscribes (measured on macOS — see `fanout`'s doc comment), and a lost
+  // activation is invisible.
+  const deepLinks = fanout<DeepLinkEvent>("deepLink.opened", { retainUntilSubscribed: true })
   // Separate from the others because it is ONCE per shell process, not an event
   // stream: a late subscriber would otherwise miss it forever. `currentHello`
   // holds the last one so `onHello` can answer immediately — the same reason
@@ -907,6 +978,28 @@ export function connectShellStdio(
     },
     deepLink: {
       onOpen: (handler) => deepLinks.on(handler),
+      // ⚠ `shell.deepLink.unregister` is OPTIONAL in the wire type (a mobile shell registers no
+      // such route at all, and a shell older than issue #41 has no `unregister`), so an absent
+      // route must surface as "this shell cannot do it" rather than as a TypeError that looks
+      // like a refusal.
+      //
+      // ⚠ An earlier version guarded this with `deepLinkRoute ? {…} : {}` and claimed the
+      // narrowing was "real rather than a non-null assertion". **That was wrong and is now
+      // gone** (review finding): the kkrpc remote proxy is function-shaped — this very file
+      // documents that its `set` trap turns assignment into an RPC — so `remote.shell.deepLink`
+      // is ALWAYS truthy and the false branch was unreachable. What actually happens on an old
+      // shell is that the call goes out and comes back as `unknown RPC method:
+      // shell.deepLink.unregister`, which `unregisterDeclaredScheme` catches and reports as
+      // `unsupported`. That outcome is correct; the comment claiming a guard was not.
+      //
+      // The `?.` below is therefore a TYPE-level necessity, not a runtime branch — and the
+      // fallback is a REJECTION on purpose: if that branch ever does become reachable (a future
+      // capability negotiation, or a non-proxy transport), it must surface as "this shell cannot
+      // do it" through the caller's existing error path, never as `undefined` flowing into the
+      // result handling, which would blow up one frame later.
+      unregister: (scheme: string) =>
+        remote.shell.deepLink?.unregister(scheme) ??
+        Promise.reject(new Error("this shell has no shell.deepLink.unregister route")),
     },
     /**
      * Whether a write to the shell has already failed. Bootstrap consults this
