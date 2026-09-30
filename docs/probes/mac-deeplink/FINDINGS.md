@@ -44,7 +44,7 @@ saying nothing about the path production actually uses. Both modes are asserted,
 It also carries two controls, because both are silent-failure shapes:
 
 - a **script-executable bundle** (must be refused), and
-- a **location A/B** (`PROBE_ROOT=/tmp/…`), which is how §0.8 was found.
+- a **location A/B** (`PROBE_ROOT=/tmp/…`), which is how row 8 was found.
 
 ## 2. Raw output
 
@@ -96,18 +96,36 @@ gui/501 domain: reachable
 
 ⚠ **This is now an instrument in the repo, not a one-off**: `run.sh` mode **C** builds a plain C bundle
 (no AppKit, no Apple Event handler) whose `main` logs `argc`/`argv` and exits; the probe then sends
-`open "scheme://…"` five times and asserts the URL never appears in any logged `argv`.
+`open "scheme://…"` five times and asserts **both** halves — the URL never appears in any logged `argv`,
+and every launch logged exactly one argument.
 (An earlier round measured this with a throwaway bundle — the conclusion had a source but the
-instrument did not, so it could not be reproduced. That gap is closed; the numbers below are from a
-re-run of mode C on 2026-09-29.)
+instrument did not, so it could not be reproduced. That gap is closed.)
+
+⚠ **Verbatim output** of a re-run of mode C (2026-09-30, macOS 26.6.2 arm64) — pasted whole, including
+the five `argc=1 argv=[…]` lines the probe's `probe.c` writes, because an edited summary here would not
+be reproducible from the script (an earlier version of this section showed `delivery 1..5` and omitted
+those lines — review finding):
 
 ```
 === C: plain C bundle (no AppKit, no AE handler) — is argv ever the carrier? ===
   PASS argv-mode: LaunchServices claims vrcxkprobec
-       argv-mode: delivery 1..5: 'open' returned 0 (⚠ NOT evidence on its own)
-       argv-mode: the C bundle was launched 5 time(s) across 5 deliveries
-  PASS argv-mode: no launch ever saw the URL in argv (every launch logged argc=1)
+       argv-mode: delivery 1: 'open' returned 0 (⚠ NOT evidence on its own)
+       argv-mode: delivery 2: 'open' returned 0 (⚠ NOT evidence on its own)
+       argv-mode: delivery 3: 'open' returned 0 (⚠ NOT evidence on its own)
+       argv-mode: delivery 4: 'open' returned 0 (⚠ NOT evidence on its own)
+       argv-mode: delivery 5: 'open' returned 0 (⚠ NOT evidence on its own)
+       argv-mode: the C bundle was launched 5 time(s) across 5 deliveries (5 logged argc=1)
+       argc=1 argv=[/Users/test/.vrcxk-mac-deeplink-probe/Probe-argv.app/Contents/MacOS/probe]
+       argc=1 argv=[/Users/test/.vrcxk-mac-deeplink-probe/Probe-argv.app/Contents/MacOS/probe]
+       argc=1 argv=[/Users/test/.vrcxk-mac-deeplink-probe/Probe-argv.app/Contents/MacOS/probe]
+       argc=1 argv=[/Users/test/.vrcxk-mac-deeplink-probe/Probe-argv.app/Contents/MacOS/probe]
+       argc=1 argv=[/Users/test/.vrcxk-mac-deeplink-probe/Probe-argv.app/Contents/MacOS/probe]
+  PASS argv-mode: 5/5 launches logged argc=1 and none saw the URL in argv
 ```
+
+(The `5 logged argc=1` figure and the `5/5` verdict are what the script itself prints; before the review
+fix its PASS text claimed that count while only checking for a `://` substring — the assertion and the
+claim now match.)
 
 The earlier round, for the record (same conclusion, five different delivery spellings —
 `open -a`, `open URL`, `open -n URL`, `osascript open location`, `open -b <bundleid> URL`):
@@ -329,9 +347,13 @@ Against that: `HKCU\Software\Classes\vrcx` (the incumbent VRCX's own class key, 
 `reg export` 5 times across install / cold / warm / failed attempts) was **identical throughout** — the
 install writes only `HKCU\Software\Classes\vrcxk`, and the runtime gate is bounded to the declared name.
 
-### 7.1 ⚠ Two things Windows still does NOT verify, and the measured reason why
+### 7.1 ⚠ The three Windows findings behind that verification
 
-1. **The installer's own file and registry writes.** Measured on this machine, and reduced to a clean
+⚠ This section is **no longer a list of open gaps** (the install/uninstall half moved to CI, and row 12 above
+says what is actually still unverified). It is kept because each item below changed *how* the verification had
+to be run — one blocked it locally, one is where the blocker was paid off, one is a trap that cost a round:
+
+1. **The dev box cannot run an NSIS installer at all** — measured on this machine, and reduced to a clean
    asymmetry — **same context, same operations, different binary** (all runs launched the way a user
    does, through Explorer, in the logged-in session at High integrity, outside the agent's process tree):
 

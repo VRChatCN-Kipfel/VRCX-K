@@ -34,6 +34,10 @@ stage() { echo; echo "########## $* ##########"; }
 FAILED=0
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
+# ⚠ 这个 helper 必须存在：下面用 `open … || note "…"` 表达"退出码只记录、不作判据"。
+# 第一版漏了它，于是 `set -u` 之下那两处调用变成 command-not-found(127) —— 意图静默失效，
+# 而且恰好是"未声明 helper"这一类（与 run.sh 里 `$label` 那次同型）。复审抓到的。
+note() { printf '       %s\n' "$1"; }
 
 stage "1. the two halves must both be in this tree"
 grep -q 'deepLinks.attachShell' "$TREE/host/src/index.ts" \

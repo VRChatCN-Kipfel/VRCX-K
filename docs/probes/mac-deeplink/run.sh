@@ -241,20 +241,28 @@ run_argv_mode() { # $1 = scheme — the instrument behind "argv is never the car
   done
   sleep 2
 
-  local launches=0
-  [ -s "$log" ] && launches=$(grep -c 'argc=' "$log" 2>/dev/null || echo 0)
-  note "argv-mode: the C bundle was launched $launches time(s) across 5 deliveries"
+  # The claim under test has TWO halves: the URL never arrives as an argument, **and every launch
+  # of this bundle sees exactly one argv entry**. Both are asserted, because the PASS text used to
+  # claim the second while only checking `grep '://'` — a verdict stronger than its evidence
+  # (review finding). `probe.c` prints `argc=<n> argv=[…]`, so the log itself is the instrument.
+  local launches=0 exact=0
+  if [ -s "$log" ]; then
+    launches=$(grep -c '^argc=' "$log" 2>/dev/null || echo 0)
+    exact=$(grep -c '^argc=1 ' "$log" 2>/dev/null || echo 0)
+  fi
+  note "argv-mode: the C bundle was launched $launches time(s) across 5 deliveries ($exact logged argc=1)"
   [ -s "$log" ] && sed 's/^/       /' "$log"
 
-  # The claim under test: the URL never arrives as an argument. So the assertion is on argv,
-  # not on the exit code and not on a launch count (0 launches is reported, not silently passed).
   if [ "$launches" -eq 0 ]; then
     fail "argv-mode: the C bundle was never launched, so this run does NOT test the argv claim"
   elif grep -q '://' "$log" 2>/dev/null; then
     fail "argv-mode: the URL APPEARED in argv — argv would be a delivery path after all"
     grep '://' "$log" | sed 's/^/       /'
+  elif [ "$exact" -ne "$launches" ]; then
+    fail "argv-mode: $launches launch(es) but only $exact had argv of length 1 — argv carried something"
+    grep -v '^argc=1 ' "$log" | sed 's/^/       /'
   else
-    pass "argv-mode: no launch ever saw the URL in argv (every launch logged argc=1)"
+    pass "argv-mode: $launches/$launches launches logged argc=1 and none saw the URL in argv"
   fi
   pkill -f "$app/Contents/MacOS/probe" 2>/dev/null
   sleep 0.5
