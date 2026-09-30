@@ -147,9 +147,20 @@ ${EndIf}
 | **运行时** `shell.deepLink.register` | 有 | 有（本次实现） |
 | **安装器**（NSIS / MSI，**用户实际走的**） | 有（由 bundler 生成的 `deep_link_protocols` 决定） | ❌ **没有** —— 上游模板 Install 段是四次裸 `WriteRegStr`，零探测 |
 
-⚠ 也就是说：下面这条"唯一有效的手段"**只对运行时那一半成立**；安装器那一半**未实现**（已记为 §8 的一行，
-并在 PR #49 的评审里作为本层待办：模板在 Install 段最前面留了 `NSIS_HOOK_PREINSTALL` 落点）。
-而安装器恰恰是正常用户唯一会走的路。
+⚠ **而"安装器"这半边内部还要再分一次**（复审 #49 时量出来的，别把它读成"已覆盖"）：
+两个安装器写的 **root 不同**，所以"安装器有没有归属判据"这个问法太粗：
+
+| 安装器 | 类键写在 | 归属探测 |
+|---|---|---|
+| **NSIS** | `SHCTX` —— 当前配置 `!define INSTALLMODE "currentUser"` ⇒ **HKCU** | 本层记录时：无（上游模板 Install 段四次裸 `WriteRegStr`）；**#49 起**：`NSIS_HOOK_PREINSTALL` 读 `SHCTX` ⇒ 覆盖 **HKCU** |
+| **MSI** | **`Root="HKLM"`**（渲染出的 `main.wxs`：`<RegistryKey Root="HKLM" Key="Software\Classes\vrcxk">`） | **两种情况都没有判据** —— 规格见 PR #49 的评论（owner 已决定**自维护 MSI 模板**，不另立 issue） |
+
+⚠ 后果（这正是这道门存在的理由）：**`HKLM\Software\Classes\vrcxk` 压着外来处理器、而 `HKCU` 为空**时，
+NSIS 钩子读 `HKCU` 得到空 ⇒ 放行 ⇒ 模板写 `HKCU` ⇒ **`HKCU` 遮蔽 `HKLM`**。
+"`HKCU` 优先于 `HKLM`"是本文自己写下的语义，而安装器这条路径**看不见它**。
+
+⚠ 也就是说：下面这条"唯一有效的手段"**只对运行时那一半成立**，安装器那一半（两种安装器合计）
+在 #49 之后仍只覆盖 **HKCU**。而安装器恰恰是正常用户唯一会走的路。
 
 - **allowlist（不是黑名单）**：只允许我们**在 config 里声明过**的名字通过运行时注册路径。
   这一条今天已经半成品：`validate_deep_link_scheme` 是黑名单 + 语法门，其自身的注释就写着
@@ -374,7 +385,7 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 |---|---|
 | 真机注册表行为（`HKCU\Software\Classes\<scheme>` 的写入/删除/冲突） | ⚠ **截至本文撰写轮（2026-09-28）零验证**（当时 `pwsh` 不可用，连 `cargo test` 都跑不了）。**其后已由 CI 真机补上**：`installer-acceptance` 在 `windows-latest` 上真装真卸，断言装出键、卸后删键、别人的 `vrcx` 键逐字节未变（首个全绿 run **36462916457**，§6.1 第 2 层） |
 | MSI 侧的深链注册与卸载清理 | 只读了模板（`Root="HKLM"` + perUser 注释），**未实测** |
-| **安装器侧的归属探测** | ❌ **未实现**（与上一行的"未实测"是两件事：这条是根本没写）。上游 NSIS 模板的 Install 段是四次裸 `WriteRegStr`；模板在最前面留了 `NSIS_HOOK_PREINSTALL` 落点。⇒ 「认领已存在的类键会被拒绝」这条不变量**今天只在运行时路径上成立**，见 §4.2 |
+| **安装器侧的归属探测** | ❌ **未实现**（与上一行的"未实测"是两件事：这条是根本没写）。上游 NSIS 模板的 Install 段是四次裸 `WriteRegStr`；模板在最前面留了 `NSIS_HOOK_PREINSTALL` 落点。⇒ 「认领已存在的类键会被拒绝」这条不变量**今天只在运行时路径上成立**，见 §4.2。⚠ **安装器侧还要按 root 再分**（§4.2 的第二张表）：NSIS 写 `SHCTX`（当前配置 ⇒ **HKCU**，**#49 起**由 `NSIS_HOOK_PREINSTALL` 覆盖），MSI 写 **`Root="HKLM"`**、**没有任何判据** |
 | macOS 的 `CFBundleURLTypes` 实际投递 | ✅ **已实测**（2026-09-28，macOS 26.6.2 arm64，经 SSH）：`CFBundleURLTypes` → `kAEGetURL` Apple Event → **delegate `application:openURLs:`**（即 Tauri 的 `RunEvent::Opened` 路径）。探针与原始输出见 [`docs/probes/mac-deeplink/`](probes/mac-deeplink/FINDINGS.md) |
 | macOS 上**真实 Tauri 应用**的端到端（含 bundler 生成 `Info.plist`） | ✅ **已实测**（§5.5）：临时 scheme 构建出的 `.app` 确实带 `CFBundleURLTypes`，LaunchServices 认领，且 `open "…://…"` 从 SSH 会话投到**宿主日志**。⚠ 限定：用的是**临时 scheme 名**，且「宿主收到」靠**临时插入的一行日志**观测（产品暂无④的消费方）；未测 single-instance 转发与 `LSUIElement` |
 | 上游 `tauri-plugin-deep-link` 2.4.10 的 `unregister` 实现 | 本轮**未重读源码**，采信 issue 与 `shell_sys.rs` 注释的引用 |
@@ -389,7 +400,7 @@ issue 的验收标准要求「若写 `schemes`：macOS 上一条真机验证」�
 | issue 的验收标准 | 对应本建议的哪一步 | 怎么测 |
 |---|---|---|
 | ①②③④ 全有明确结论后才重新暴露 `register` | §7 四条裁定 + 本文档本身 | 本文档即「写下来」的载体；裁定结论回填到本节 |
-| 一条测试钉住「认领已存在的类键会被拒绝」，且**在真实注册表语义下成立** | §6 第 0 步 **第 2 项** | 单元层已有一半（`validate_deep_link_scheme` 的 11 条用例）；缺的是**真机**：先人工建 `HKCU\Software\Classes\vrcxktest`，再断言注册被拒且原值未变。⚠ **该判据当前只覆盖运行时注册路径**——安装器那条（用户实际走的）**没有**归属判据，见 §8 与 PR #49 评审 ③ |
+| 一条测试钉住「认领已存在的类键会被拒绝」，且**在真实注册表语义下成立** | §6 第 0 步 **第 2 项** | 单元层已有一半（`validate_deep_link_scheme` 的 11 条用例）；缺的是**真机**：先人工建 `HKCU\Software\Classes\vrcxktest`，再断言注册被拒且原值未变。⚠ **该判据当前只覆盖运行时注册路径**——安装器那条（用户实际走的）**没有**归属判据，见 §8 与 PR #49 评审 ③。⚠ **且安装器侧的覆盖范围按 root 不同**：NSIS/`SHCTX`(HKCU) 由 #49 覆盖，**MSI/`HKLM` 不覆盖**（§4.2 第二张表） |
 | 若实现 `unregister`：注册 → 注销后键回到注册前状态（含被覆盖的既有键） | §6 第 0 步 **第 1 项** | 「自有新键」可断言全等；「被覆盖的既有键」**结构上无法恢复** ⇒ 按本文 §4.2 写进文档明说，并把测试限定为前者 |
 | 若写 `schemes`：macOS 真机验证 | 已**完成**（§5.4 机制 → §5.5 真实应用 → **`docs/probes/mac-deeplink/run-real-name.sh` 用真名 `vrcxk` 的冷启动 + 热启动验收**） | 机制与 bundler 两半都已实测；真名验收在生产代码上全绿：内置 `.app` 的 `CFBundleURLTypes` 带 `vrcxk`、LaunchServices 认领、**冷启动**（应用未运行 → URL 拉起它）与热启动都落到宿主日志。⚠ 判据**不能**用 `open` 的退出码（实测会给假绿），也**不能**把 bundle 建在 `/tmp`（会假红），也**不能**只送壳分支的树（会得到一个看起来一模一样的假失败 —— FINDINGS §6.3） |
 | **Windows 装/卸**（安装器自己的文件与注册表写入） | 已**完成**（CI 真机，`.github/workflows/installer-acceptance.yml` + `scripts/installer-acceptance.ps1`） | `windows-latest` 上构建 NSIS → 静默装 → 断言自有类键/命令串/`URL Protocol`/`Uninstall` 条目 → 静默卸 → 断言自有类键确实被删。首个全绿 run **36462916457**（详见下一行） |
