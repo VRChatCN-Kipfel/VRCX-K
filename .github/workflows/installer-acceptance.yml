@@ -71,13 +71,95 @@ jobs:
       # ⚠ 这里不传 --locked：`bun run <script> … -- …` 里那个 `--` 会被 bun 吃掉、
       # 未必真到 cargo，而锁文件一致性已由 desktop 矩阵的 `cargo check --locked` 把住 ——
       # 不要为了看起来更严而写一个自己都说不清是否生效的参数。
-      - name: Build the NSIS bundle
-        run: bun run tauri build --bundles nsis
+      # ⚠ 两个安装器**一起构建**：MSI 侧的自维护模板（`src-tauri/windows/main.wxs`）如果从不在 CI 里
+      # 被构建，它就会随上游默默失效 —— 那比没有模板更糟。`bundles` 接受逗号列表，这条路能让两个产物
+      # 共用同一次编译。
+      #
+      # ⚠ `continue-on-error` + 显式诊断 + 显式失败：Tauri 在 WiX 工具失败时只报
+      # `failed to run …\light.exe`，**把工具真正的报错吞掉** —— 而这层模板是我们自己维护的，
+      # 它的构建失败必须自己说出原因，否则下一轮只能靠猜。
+      - name: Build the installers (NSIS + MSI)
+        id: build
+        continue-on-error: true
+        run: bun run tauri build --bundles nsis,msi
+
+      - name: Diagnose the WiX tools (only when the bundle build failed)
+        if: steps.build.outcome == 'failure'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:LOCALAPPDATA 'tauri\WixTools314'
+          Write-Host "wix tools: $tools"
+          if (-not (Test-Path $tools)) {
+            Write-Host "the tools directory does not exist — the download/extract step is the problem"
+            exit 0
+          }
+          $wixDir = 'target\release\wix\x64'
+          Get-ChildItem $wixDir -ErrorAction SilentlyContinue | Select-Object Name, Length | Format-Table
+          $wxs = Join-Path $wixDir 'main.wxs'
+          if (-not (Test-Path $wxs)) {
+            Write-Host "no rendered main.wxs — the HANDLEBARS stage failed, before the tools ever ran"
+            exit 0
+          }
+          $wxl = Get-ChildItem $wixDir -Filter '*.wxl' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $wxl) {
+            Write-Host "no .wxl — Tauri did not write its localization file, which is what !(loc.…) needs"
+            exit 0
+          }
+          Write-Host "locale: $($wxl.Name)"
+          $obj = Join-Path $env:TEMP 'diagnose.wixobj'
+          & "$tools\candle.exe" -nologo -arch x64 -out $obj $wxs
+          Write-Host "candle exit=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit 0 }
+          # ⚠ 参数照抄 Tauri（`msi/mod.rs` 的 run_light）：-ext <UI/Util 的 dll 全路径>、
+          # -loc <Tauri 写的 wxl>、cwd = wix 目录、*.wixobj。少写 -loc 就会得到
+          # `LGHT0102 … !(loc.TauriLanguage) is unknown` —— 那是**诊断自己的**错，不是构建的错
+          # （第一版诊断就是这么误报的）。
+          Push-Location $wixDir
+          & "$tools\light.exe" -nologo `
+            -ext (Join-Path $tools 'WixUIExtension.dll') `
+            -ext (Join-Path $tools 'WixUtilExtension.dll') `
+            -cultures:en-US `
+            -loc "$($wxl.Name)" `
+            -o (Join-Path $env:TEMP 'diagnose.msi') `
+            *.wixobj
+          Write-Host "light exit=$LASTEXITCODE"
+          Pop-Location
 
       # 断言全在脚本里；失败即非零退出，CI 变红。
-      - name: Install → assert → uninstall → assert
+      - name: "NSIS: install → assert → uninstall → assert"
         shell: pwsh
         run: ./scripts/installer-acceptance.ps1
+
+      # MSI 是**另一条注册表路径**（HKLM，而不是 NSIS 的 HKCU），所以它有自己的脚本：
+      # 同样验真装真卸，外加「改目录重装不能被归属判据误拒」这条升级陷阱用例。
+      # ⚠ 只在构建成功时跑：构建失败时"没有 MSI 可测"是**另一个**原因，不该混进这条判据的读数。
+      - name: "MSI: install → assert → upgrade → uninstall → assert"
+        if: steps.build.outcome == 'success'
+        shell: pwsh
+        run: ./scripts/installer-acceptance-msi.ps1
+
+      # ⚠ **判别实验**：MSI 构建失败时，用**上游原版模板**（把 config 里的 wix.template 去掉）再构建一次。
+      #   · 若这次**成功** ⇒ 问题在我们的 fork/参数；
+      #   · 若**同样失败** ⇒ 这条 MSI 路径本来就坏（与本层无关），那就该记下来而不是硬推。
+      # 这一步只改 CI 工作区里的文件，不动仓库。
+      - name: "Discriminate: does the STOCK upstream template build? (only when ours failed)"
+        if: steps.build.outcome == 'failure'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $conf.bundle.windows.PSObject.Properties.Remove('wix')
+          $conf | ConvertTo-Json -Depth 32 | Set-Content src-tauri/tauri.conf.json -Encoding utf8
+          Write-Host "wix.template removed from the workspace copy; rebuilding with the STOCK template"
+          bun run tauri build --bundles msi
+          Write-Host "stock-template build exit=$LASTEXITCODE"
+
+      - name: Fail the job when the bundle build failed
+        if: steps.build.outcome == 'failure'
+        run: |
+          Write-Host "::error::the installer build failed — read the diagnosis and discrimination steps above"
+          exit 1
 
       # 失败时把注册表快照与安装器一起留下来，别让人再去猜。
       - name: Upload diagnostics
@@ -87,6 +169,10 @@ jobs:
           name: installer-acceptance-diagnostics
           path: |
             .temp/installer-acceptance/*.reg
+            .temp/installer-acceptance-msi/*.reg
             target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+            # 模板渲染出来的 WiX 源码：模板自己出错时，第一个要看的就是它。
+            target/release/wix/**/main.wxs
           if-no-files-found: ignore
           retention-days: 14
