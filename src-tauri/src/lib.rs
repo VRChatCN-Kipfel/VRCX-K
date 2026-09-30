@@ -957,4 +957,164 @@ mod packaging_tests {
              refused looks exactly like one that succeeded"
         );
     }
+
+    /// ⚠ The **MSI** half of the same invariant, and a different registry root (spec on PR #49).
+    ///
+    /// MSI writes the class key under **`Root="HKLM"`** while `NSIS_HOOK_PREINSTALL` reads `SHCTX`
+    /// (HKCU under the current `currentUser` mode), so the NSIS gate cannot cover it. We therefore
+    /// maintain the MSI template ourselves (`src-tauri/windows/main.wxs`, a fork of the upstream
+    /// template at `tauri-cli-v2.11.4`, SHA-256 `E371A016…0198`, verified byte-exact when it was
+    /// taken), and this test pins the properties that make the fork worth having.
+    ///
+    /// ⚠ What a text test can NOT pin: "one probe per declared scheme" is by construction (the
+    /// handlebars `{{#each deep_link_protocols}}` loop), so the loop's presence is asserted and the
+    /// *rendered* artifact — which CI installs — is the real evidence. That is also why the two
+    /// escaping rules below are pinned literally: both were real bugs found by rendering, not by
+    /// reading.
+    #[test]
+    fn the_msi_template_gates_the_deep_link_key_it_writes_to_hklm() {
+        let base = conf("tauri.conf.json");
+        let schemes = declared_schemes_in(&base);
+        assert!(
+            !schemes.is_empty(),
+            "nothing declared — pinned by the test above"
+        );
+
+        let template_rel = at(&base, &["bundle", "windows", "wix", "template"])
+            .and_then(|value| value.as_str().map(str::to_string))
+            .expect(
+                "bundle.windows.wix.template must point at our fork: the upstream template writes \
+                 HKLM\\Software\\Classes\\<scheme> with no ownership check at all, and an existing \
+                 class key cannot be restored",
+            );
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&template_rel);
+        let template = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
+
+        // The premise this whole file exists for: MSI writes the class key under HKLM.
+        assert!(
+            template.contains(r#"<RegistryKey Root="HKLM" Key="Software\Classes\"#),
+            "{} must still be the template that writes the deep-link class key under \
+             HKLM\\Software\\Classes — if that changed, the HKLM/HKCU split (and therefore why \
+             this file exists) changed with it",
+            path.display()
+        );
+        // Our gate: a search per protocol + a launch condition that refuses a foreign handler.
+        //
+        // ⚠ The element is `Condition` with the expression as its TEXT — written the other way
+        // round (a `LaunchCondition` element carrying a `Condition=` attribute, which is what the
+        // first version of this block did) WiX fails with
+        //   `error CNDL0005: The Product element contains an unexpected child element`
+        // and Tauri reports only "failed to run candle.exe". Found by running the compiler; the
+        // negative assertions below are what keeps that shape from coming back.
+        for needle in ["VRCXK_DL_CMD_", "VRCXK_DL_SEARCH_", "<Condition Message="] {
+            assert!(
+                template.contains(needle),
+                "{} no longer contains `{needle}` — the MSI ownership gate is gone, so MSI would \
+                 overwrite a foreign HKLM class key again",
+                path.display()
+            );
+        }
+        for wrong in [
+            "<LaunchCondition ",
+            "<LaunchCondition\n",
+            "<LaunchCondition/>",
+        ] {
+            assert!(
+                !template.contains(wrong),
+                "{} contains `{wrong}` — the launch-condition element must be `Condition` with its \
+                 expression as element text; the `LaunchCondition` shape does not compile \
+                 (CNDL0005) and Tauri reports it only as a failure to run candle.exe",
+                path.display()
+            );
+        }
+
+        // ⚠ The condition's EXPRESSION, which two separate real defects were found in — both only
+        // by running the toolchain (candle first, then light's ICE79 validation on CI):
+        let condition_line = template
+            .lines()
+            .find(|line| line.trim_start().starts_with("<Condition Message="))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} has no `<Condition Message=…>` element — the gate is gone",
+                    path.display()
+                )
+            });
+        let expression = condition_line
+            .split_once('>')
+            .and_then(|(_, rest)| rest.split_once("</Condition>"))
+            .map(|(text, _)| text)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: the condition has no `>expression</Condition>` text — the expression must \
+                     be the element's TEXT: {}",
+                    path.display(),
+                    condition_line.trim()
+                )
+            });
+
+        // (1) No `!` token: a bracketed file reference made ICE79 read it as a FEATURE reference
+        //     and reject the whole product (`LGHT0204: ICE79: Feature 'Path' referenced in column
+        //     'LaunchCondition'.'Condition' … is invalid`). It is also undecidable there —
+        //     a file reference needs CostFinalize and LaunchConditions runs before it.
+        assert!(
+            !expression.contains('!'),
+            "{}: the launch-condition expression contains a `!` token ({}), which ICE79 reads as a \
+             feature reference and rejects at link time",
+            path.display(),
+            expression.trim()
+        );
+        // (2) No quoted literal either: `LGHT0204: ICE03: Bad conditional string` — an MSI condition
+        //     cannot express a string that itself contains quotes, and the searched value (a command
+        //     line) always does. Only property names may appear.
+        assert!(
+            !expression.contains('"') && !expression.contains('%'),
+            "{}: the launch-condition expression must use ONLY property names — a quoted literal or \
+             a `%` token is a bad conditional string at link time (ICE03). It reads: {}",
+            path.display(),
+            expression.trim()
+        );
+        // (3) The escape hatches that keep our OWN upgrade/reinstall from being refused, both plain
+        //     properties MSI maintains itself.
+        for needle in ["Installed", "WIX_UPGRADE_DETECTED"] {
+            assert!(
+                expression.contains(needle),
+                "{}: the condition must let our own upgrade/reinstall through `{needle}`, or every \
+                 upgrade of our own product is refused — the same symptom as a foreign key. It \
+                 reads: {}",
+                path.display(),
+                expression.trim()
+            );
+        }
+        // The upgrade trap: without this short-circuit, an upgrade compares the stored command
+        // (previous install path) against the new one and refuses OUR OWN product.
+        assert!(
+            template.contains("WIX_UPGRADE_DETECTED"),
+            "{} must short-circuit the refusal while upgrading: during an upgrade the stored \
+             command still points at the previous install path, so the comparison alone would \
+             refuse our own product with a symptom identical to a foreign key",
+            path.display()
+        );
+        // ⚠ The escaping rules below were verified by RENDERING the template and then feeding the
+        // rendered file to `candle.exe` — the compiler is the authority here, and it is what caught
+        // the WiX element error above (the link step, `light.exe`, still needs CI: it cannot create
+        // its temp directory's ACL on the dev box):
+        //   · `\{{` is a handlebars ESCAPE: it renders as a literal `{{protocol}}`, so the scheme
+        //     name silently never appears. The double backslash is mandatory here.
+        //   · `\\` NOT followed by an expression survives as two backslashes, producing a wrong
+        //     registry path. Every other separator is a single `\`.
+        assert!(
+            template.contains(r"Software\Classes\\{{protocol}}\shell\open\command"),
+            "{} must read the class key with EXACTLY this escaping (`\\{{{{protocol}}}}` then \
+             single backslashes) — the rendered output is \
+             `Software\\Classes\\<scheme>\\shell\\open\\command`, and both a stray `\\\\` and a \
+             bare `\\{{{{…}}}}` were measured to render into a wrong key",
+            path.display()
+        );
+        assert!(
+            template.contains("{{#each deep_link_protocols"),
+            "{} must generate the gate per declared protocol rather than for one hardcoded name",
+            path.display()
+        );
+    }
 }
